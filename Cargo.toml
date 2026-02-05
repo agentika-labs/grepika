@@ -1,0 +1,77 @@
+[package]
+name = "agentika-grep"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Token-efficient MCP server for code search with trigram indexing"
+authors = ["Agentika"]
+license = "MIT"
+
+[dependencies]
+# MCP Server
+rmcp = { version = "0.1", features = ["server", "transport-io"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Grep internals (ripgrep core)
+grep-regex = "0.1"
+grep-searcher = "0.1"
+grep-matcher = "0.1"
+
+# File walking with gitignore support
+ignore = "0.4"
+
+# Parallel processing
+rayon = "1.10"
+num_cpus = "1.16"
+
+# SQLite with bundled-full (includes FTS5)
+rusqlite = { version = "0.33", features = ["bundled-full"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.26"
+
+# Fast hashing and bitmaps
+ahash = "0.8"
+roaring = "0.10"
+sha2 = "0.10"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "0.8", features = ["derive"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging (MUST go to stderr for MCP)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Regex for symbol escaping
+regex = "1"
+
+[features]
+default = []
+profiling = []
+
+[dev-dependencies]
+tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "hot_paths"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[[bin]]
+name = "agentika-grep"
+path = "src/main.rs"

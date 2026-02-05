@@ -1,0 +1,100 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+**agentika-grep** is a token-efficient MCP (Model Context Protocol) server for code search. It combines three search backends for high-quality results:
+- **FTS5** - SQLite full-text search with BM25 ranking
+- **Grep** - Parallel regex search using ripgrep internals
+- **Trigram** - Fast substring search via 3-byte sequence indexing
+
+The server communicates via JSON-RPC over stdin/stdout when running as an MCP server.
+
+## Build & Run Commands
+
+```bash
+# Build
+cargo build --release
+
+# Run MCP server (for IDE/editor integration)
+./target/release/agentika-grep --mcp --root <path>
+
+# CLI commands
+agentika-grep index                           # Index the codebase
+agentika-grep search <query> -l 20 -m combined  # Search (modes: combined, fts, grep)
+agentika-grep get <path> -s 1 -e 100          # Get file content with line range
+
+# Run tests
+cargo test
+
+# Run single test
+cargo test test_name
+
+# Build with profiling (adds timing/memory logs to stderr)
+cargo build --release --features profiling
+```
+
+## Architecture
+
+```
+MCP Server (rmcp)          ← JSON-RPC stdin/stdout
+       │
+Tool Router (server.rs)    ← search, relevant, get, outline, toc, context, stats, refs, index, diff
+       │
+SearchService              ← spawn_blocking for async bridge
+       │
+┌──────┼──────┐
+FTS5   Grep   Trigram      ← Three search backends with weighted score merging
+       │
+SQLite + r2d2 pool         ← .agentika-grep/index.db
+```
+
+### Key Design Decisions
+
+- **spawn_blocking bridge**: MCP handlers are async (rmcp), but search operations are CPU-bound. The `run_tool` helper in `server.rs` uses `tokio::task::spawn_blocking` to bridge this gap.
+
+- **Score merging**: Results from multiple backends are merged with configurable weights (default: FTS 0.4, grep 0.4, trigram 0.2) plus a multi-source bonus.
+
+- **Type-safe newtypes**: `FileId`, `Score`, and `Trigram` in `types.rs` provide compile-time safety. `Score` uses saturating arithmetic (clamped to 0.0-1.0).
+
+- **r2d2 connection pool**: rusqlite::Connection is not Sync, so r2d2 manages thread-safe SQLite access.
+
+## Module Structure
+
+| Module | Purpose |
+|--------|---------|
+| `server.rs` | MCP server with `#[tool]` macro handlers |
+| `services/search.rs` | Combined search with score merging |
+| `services/fts.rs` | FTS5 BM25 search |
+| `services/grep.rs` | Parallel grep with ripgrep crates |
+| `services/trigram.rs` | In-memory trigram index (RoaringBitmap) |
+| `services/indexer.rs` | Incremental indexing with SHA256 change detection |
+| `db/mod.rs` | Database with r2d2 pool and FTS5 queries |
+| `db/schema.rs` | SQLite schema (files, files_fts, trigrams tables) |
+| `tools/*.rs` | MCP tool input/output types and executors |
+| `types.rs` | FileId, Score, Trigram newtypes |
+| `error.rs` | Hierarchical error types with machine-readable codes |
+
+## MCP Tools Exposed
+
+| Tool | Description |
+|------|-------------|
+| `search` | Pattern search (regex/natural language) |
+| `relevant` | Find files most relevant to a topic |
+| `get` | File content with optional line range |
+| `outline` | Extract file structure (functions, classes) |
+| `toc` | Directory tree |
+| `context` | Surrounding lines around a specific line |
+| `stats` | Index statistics |
+| `related` | Files related by shared symbols |
+| `refs` | Find all references to a symbol |
+| `index` | Update search index (incremental by default) |
+| `diff` | Compare two files |
+
+## Critical Notes
+
+- **Logging must go to stderr**: stdout is reserved for JSON-RPC in MCP mode
+- Index stored at `<root>/.agentika-grep/index.db` by default
+- Gitignore patterns are respected during indexing
+- Max file size for indexing: 1MB (configurable in `IndexConfig`)
