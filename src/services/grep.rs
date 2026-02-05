@@ -1,34 +1,33 @@
 //! Parallel grep service using ripgrep internals.
 //!
-//! Uses a dedicated rayon ThreadPool to avoid contention with
-//! tokio's blocking thread pool.
+//! Uses `WalkParallel` from the `ignore` crate to overlap directory
+//! walking with file searching, with per-thread `Searcher` reuse.
 //!
 //! # Security
 //!
 //! This module includes ReDoS protection via pattern validation.
 //! See [`crate::security::validate_regex_pattern`] for details.
 
-use crate::error::{GrepError, SearchError};
+use crate::error::SearchError;
 use crate::security;
 use crate::types::Score;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
-use ignore::WalkBuilder;
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use ignore::{WalkBuilder, WalkState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Scored files with their matching line snippets.
-pub type GrepSearchResult = (Vec<(PathBuf, Score)>, HashMap<PathBuf, Vec<GrepMatch>>);
+pub type GrepSearchResult = (Vec<(PathBuf, Score)>, HashMap<Arc<Path>, Vec<GrepMatch>>);
 
 /// Match found by grep.
 #[derive(Debug, Clone)]
 pub struct GrepMatch {
-    pub path: PathBuf,
+    pub path: Arc<Path>,
     pub line_number: u64,
     pub line_content: String,
     pub match_start: usize,
@@ -73,8 +72,8 @@ impl Default for GrepConfig {
 
 /// Parallel grep service using ripgrep internals.
 pub struct GrepService {
-    /// Dedicated thread pool (avoids tokio contention)
-    pool: ThreadPool,
+    /// Number of parallel walk+search threads
+    num_threads: usize,
     /// Root directory to search
     root: PathBuf,
     /// Default configuration
@@ -86,7 +85,7 @@ impl GrepService {
     ///
     /// # Errors
     ///
-    /// Returns `SearchError::Grep` if thread pool creation fails.
+    /// Returns `SearchError::Grep` if configuration is invalid.
     pub fn new(root: PathBuf) -> Result<Self, SearchError> {
         Self::with_config(root, GrepConfig::default())
     }
@@ -95,20 +94,19 @@ impl GrepService {
     ///
     /// # Errors
     ///
-    /// Returns `SearchError::Grep` if thread pool creation fails.
+    /// Returns `SearchError::Grep` if configuration is invalid.
     pub fn with_config(root: PathBuf, config: GrepConfig) -> Result<Self, SearchError> {
         let num_threads = if config.max_threads > 0 {
             config.max_threads.min(8)
         } else {
             num_cpus::get().min(8)
         };
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .thread_name(|i| format!("grep-worker-{i}"))
-            .build()
-            .map_err(|e| SearchError::Grep(GrepError::RegexBuild(e.to_string())))?;
 
-        Ok(Self { pool, root, config })
+        Ok(Self {
+            num_threads,
+            root,
+            config,
+        })
     }
 
     /// Searches for pattern in files under root directory.
@@ -133,6 +131,10 @@ impl GrepService {
 
     /// Searches with an optional file filter (Phase 3: trigram pre-filtering).
     ///
+    /// Uses `WalkParallel` to overlap directory traversal with file searching.
+    /// Each walker thread gets its own `Searcher` instance (reused across files
+    /// on that thread), avoiding per-file allocation overhead.
+    ///
     /// When `file_filter` is `Some`, only files in the set are searched.
     /// This avoids scanning files the trigram index already ruled out.
     pub fn search_parallel_filtered(
@@ -154,55 +156,102 @@ impl GrepService {
             self.config.max_matches
         };
 
-        // Collect files (respects .gitignore), optionally filtered by trigram set
+        let match_count = Arc::new(AtomicUsize::new(0));
+        let file_count = Arc::new(AtomicUsize::new(0));
+        let results: Arc<Mutex<Vec<GrepMatch>>> = Arc::new(Mutex::new(Vec::new()));
+        let matcher = Arc::new(matcher);
+
         let walker = WalkBuilder::new(&self.root)
             .hidden(!self.config.include_hidden)
             .follow_links(self.config.follow_symlinks)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .build();
+            .threads(self.num_threads)
+            .build_parallel();
 
-        let files: Vec<PathBuf> = walker
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_some_and(|ft| ft.is_file()))
-            .map(|entry| entry.path().to_path_buf())
-            .filter(|path| {
-                // Phase 3: skip files not in the trigram filter set
-                file_filter.map_or(true, |set| set.contains(path))
-            })
-            .take(self.config.max_files)
-            .collect();
+        let max_files = self.config.max_files;
 
-        // Lock-free parallel collection (P6): each thread accumulates
-        // its own matches, then rayon merges them at the end.
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let match_count = Arc::new(AtomicUsize::new(0));
+        walker.run(|| {
+            // Per-thread state: factory called once per walker thread
+            let mut searcher = Searcher::new();
+            let matcher = Arc::clone(&matcher);
+            let mc = Arc::clone(&match_count);
+            let fc = Arc::clone(&file_count);
+            let res = Arc::clone(&results);
 
-        let mut results: Vec<GrepMatch> = self.pool.install(|| {
-            use rayon::prelude::*;
+            Box::new(move |entry| {
+                // Early termination: enough matches collected
+                if mc.load(Ordering::Relaxed) >= max_matches {
+                    return WalkState::Quit;
+                }
 
-            files
-                .par_iter()
-                .flat_map_iter(|path| {
-                    if cancelled.load(Ordering::Relaxed) {
-                        return Vec::new();
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return WalkState::Continue,
+                };
+
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    return WalkState::Continue;
+                }
+
+                // Max files limit (non-deterministic order, acceptable — results are scored)
+                if fc.fetch_add(1, Ordering::Relaxed) >= max_files {
+                    return WalkState::Quit;
+                }
+
+                let path = entry.path();
+
+                // Trigram pre-filter: skip files not in the filter set
+                if let Some(filter) = file_filter {
+                    if !filter.contains(path) {
+                        return WalkState::Continue;
                     }
+                }
 
-                    match search_file(path, &matcher) {
-                        Ok(file_matches) => {
-                            let count = match_count.fetch_add(file_matches.len(), Ordering::Relaxed);
-                            if count + file_matches.len() >= max_matches {
-                                cancelled.store(true, Ordering::Relaxed);
+                // Search with per-thread Searcher (reused across files on this thread)
+                let arc_path: Arc<Path> = Arc::from(path);
+                let mut file_matches = Vec::new();
+
+                let search_ok = searcher
+                    .search_path(
+                        &*matcher,
+                        path,
+                        UTF8(|line_number, line| {
+                            if let Ok(Some(m)) = matcher.find(line.as_bytes()) {
+                                file_matches.push(GrepMatch {
+                                    path: Arc::clone(&arc_path),
+                                    line_number,
+                                    line_content: line.trim_end().to_string(),
+                                    match_start: m.start(),
+                                    match_end: m.end(),
+                                });
                             }
-                            file_matches
-                        }
-                        Err(_) => Vec::new(),
+                            Ok(true)
+                        }),
+                    )
+                    .is_ok();
+
+                if search_ok && !file_matches.is_empty() {
+                    let count = mc.fetch_add(file_matches.len(), Ordering::Relaxed);
+                    if let Ok(mut r) = res.lock() {
+                        r.extend(file_matches);
                     }
-                })
-                .collect()
+                    if count >= max_matches {
+                        return WalkState::Quit;
+                    }
+                }
+
+                WalkState::Continue
+            })
         });
 
+        // Safe: WalkParallel::run() uses thread::scope internally —
+        // all threads are joined before run() returns.
+        let mut results = Arc::try_unwrap(results)
+            .expect("all walker threads joined")
+            .into_inner()
+            .expect("mutex not poisoned");
         results.truncate(max_matches);
         Ok(results)
     }
@@ -247,13 +296,14 @@ impl GrepService {
         // 2B: Reduced overcollection from 3x to 2x (ample for top-3 snippets)
         let matches = self.search_parallel_filtered(pattern, limit * 2, file_filter)?;
 
-        // 2A: Single HashMap holding stats + snippets to avoid double path cloning.
+        // 2A: Single HashMap holding stats + snippets. Arc<Path> key =
+        // cheap clone (atomic increment) instead of PathBuf heap alloc.
         // Each entry: (match_count, max_line_number, top_3_snippets)
-        let mut file_agg: HashMap<PathBuf, (usize, u64, Vec<GrepMatch>)> = HashMap::new();
+        let mut file_agg: HashMap<Arc<Path>, (usize, u64, Vec<GrepMatch>)> = HashMap::new();
 
         for m in matches {
             let entry = file_agg
-                .entry(m.path.clone())
+                .entry(Arc::clone(&m.path))
                 .or_insert_with(|| (0, 0, Vec::with_capacity(3)));
             entry.0 += 1;
             entry.1 = entry.1.max(m.line_number);
@@ -279,7 +329,7 @@ impl GrepService {
 
         // Split into scored results + file_matches in one pass
         let mut results: Vec<(PathBuf, Score)> = Vec::with_capacity(file_agg.len());
-        let mut file_matches: HashMap<PathBuf, Vec<GrepMatch>> =
+        let mut file_matches: HashMap<Arc<Path>, Vec<GrepMatch>> =
             HashMap::with_capacity(file_agg.len().min(limit));
 
         for (path, (count, max_line, snippets)) in file_agg {
@@ -293,9 +343,9 @@ impl GrepService {
 
             // Temporarily store all snippets; trimmed after truncation (1F)
             if !snippets.is_empty() {
-                file_matches.insert(path.clone(), snippets);
+                file_matches.insert(Arc::clone(&path), snippets);
             }
-            results.push((path, score));
+            results.push((path.to_path_buf(), score));
         }
 
         // Sort by score descending (1E: sort_unstable avoids temp allocation)
@@ -304,9 +354,9 @@ impl GrepService {
 
         // Trim file_matches to only paths in the truncated results (1F)
         if file_matches.len() > results.len() {
-            let kept_paths: HashSet<&PathBuf> =
-                results.iter().map(|(p, _)| p).collect();
-            file_matches.retain(|k, _| kept_paths.contains(k));
+            let kept_paths: HashSet<&Path> =
+                results.iter().map(|(p, _)| p.as_path()).collect();
+            file_matches.retain(|k, _| kept_paths.contains(k.as_ref()));
         }
 
         Ok((results, file_matches))
@@ -317,46 +367,6 @@ impl GrepService {
     pub fn root(&self) -> &Path {
         &self.root
     }
-}
-
-/// Searches a single file for matches.
-fn search_file(path: &Path, matcher: &RegexMatcher) -> Result<Vec<GrepMatch>, GrepError> {
-    let mut matches = Vec::new();
-    let mut searcher = Searcher::new();
-
-    searcher
-        .search_path(
-            matcher,
-            path,
-            UTF8(|line_number, line| {
-                // Single matcher.find() call (P4: was called twice before)
-                match matcher.find(line.as_bytes()) {
-                    Ok(Some(m)) => {
-                        matches.push(GrepMatch {
-                            path: path.to_path_buf(),
-                            line_number,
-                            line_content: line.trim_end().to_string(),
-                            match_start: m.start(),
-                            match_end: m.end(),
-                        });
-                    }
-                    Err(_) => {
-                        // Matcher error on this line, skip it
-                    }
-                    Ok(None) => {
-                        // grep-searcher found a match but our matcher didn't;
-                        // this can happen with line-matching edge cases
-                    }
-                }
-                Ok(true)
-            }),
-        )
-        .map_err(|e| GrepError::FileRead {
-            path: path.to_path_buf(),
-            source: std::io::Error::other(e.to_string()),
-        })?;
-
-    Ok(matches)
 }
 
 #[cfg(test)]

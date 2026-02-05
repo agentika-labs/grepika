@@ -482,7 +482,7 @@ impl SearchService {
         &self,
         fts: Vec<(FileId, Score)>,
         grep: Vec<(PathBuf, Score)>,
-        grep_matches: HashMap<PathBuf, Vec<GrepMatch>>,
+        grep_matches: HashMap<Arc<Path>, Vec<GrepMatch>>,
         trigram: Option<roaring::RoaringBitmap>,
         limit: usize,
         config: &SearchConfig,
@@ -592,7 +592,7 @@ impl SearchService {
 
         // Lazy snippet extraction (1B): only for surviving top-N results
         for result in &mut results {
-            if let Some(matches) = grep_matches.get(&result.path) {
+            if let Some(matches) = grep_matches.get(result.path.as_path()) {
                 result.snippets = matches
                     .iter()
                     .map(|m| MatchSnippet {
