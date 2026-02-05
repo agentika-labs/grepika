@@ -1,0 +1,180 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            use-cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use-cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use-cross: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use-cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        shell: bash
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../agentika-grep-${{ matrix.target }}.tar.gz agentika-grep
+        shell: bash
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../agentika-grep-${{ matrix.target }}.zip agentika-grep.exe
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentika-grep-${{ matrix.target }}
+          path: agentika-grep-${{ matrix.target }}.*
+
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-npm:
+    name: Publish npm packages
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare platform packages
+        run: |
+          # Map: rust-target -> npm-package-dir, archive-extension
+          declare -A TARGETS=(
+            ["x86_64-unknown-linux-gnu"]="agentika-grep-linux-x64:tar.gz"
+            ["aarch64-unknown-linux-gnu"]="agentika-grep-linux-arm64:tar.gz"
+            ["x86_64-apple-darwin"]="agentika-grep-darwin-x64:tar.gz"
+            ["aarch64-apple-darwin"]="agentika-grep-darwin-arm64:tar.gz"
+            ["x86_64-pc-windows-msvc"]="agentika-grep-win32-x64:zip"
+          )
+
+          VERSION="${{ steps.version.outputs.version }}"
+
+          for target in "${!TARGETS[@]}"; do
+            IFS=':' read -r npm_dir ext <<< "${TARGETS[$target]}"
+            pkg_dir="npm/${npm_dir}"
+
+            # Update version in package.json
+            jq --arg v "$VERSION" '.version = $v' "${pkg_dir}/package.json" > tmp.json && mv tmp.json "${pkg_dir}/package.json"
+
+            # Create bin directory and extract binary
+            mkdir -p "${pkg_dir}/bin"
+            if [ "$ext" = "tar.gz" ]; then
+              tar xzf "artifacts/agentika-grep-${target}/agentika-grep-${target}.tar.gz" -C "${pkg_dir}/bin/"
+            else
+              unzip -o "artifacts/agentika-grep-${target}/agentika-grep-${target}.zip" -d "${pkg_dir}/bin/"
+            fi
+
+            chmod +x "${pkg_dir}/bin/"* 2>/dev/null || true
+          done
+
+          # Update base package version and optionalDependencies versions
+          jq --arg v "$VERSION" '
+            .version = $v |
+            .optionalDependencies = (.optionalDependencies | to_entries | map(.value = $v) | from_entries)
+          ' npm/agentika-grep/package.json > tmp.json && mv tmp.json npm/agentika-grep/package.json
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in npm/agentika-grep-*/; do
+            echo "Publishing ${dir}..."
+            cd "$dir"
+            npm publish --access public || true
+            cd ../..
+          done
+
+      - name: Publish base package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/agentika-grep
+          npm publish --access public

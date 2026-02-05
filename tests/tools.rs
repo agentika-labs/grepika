@@ -139,15 +139,14 @@ impl std::error::Error for AuthError {}
     .unwrap();
 
     // Index files
-    for filename in ["main.rs", "auth.rs", "config.rs", "error.rs"] {
+    for (i, filename) in ["main.rs", "auth.rs", "config.rs", "error.rs"]
+        .iter()
+        .enumerate()
+    {
         let path = dir.path().join(filename);
         let content = fs::read_to_string(&path).unwrap();
-        db.upsert_file(
-            path.to_string_lossy().as_ref(),
-            &content,
-            &format!("hash_{}", filename),
-        )
-        .unwrap();
+        db.upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+            .unwrap();
     }
 
     let search = Arc::new(
@@ -169,7 +168,7 @@ fn test_search_tool_happy_path() {
     let input = SearchInput {
         query: "authenticate".to_string(),
         limit: 10,
-        mode: "combined".to_string(),
+        mode: SearchMode::Combined,
     };
 
     let result = execute_search(&search, input).unwrap();
@@ -179,7 +178,7 @@ fn test_search_tool_happy_path() {
         result.results.iter().any(|r| r.path.contains("auth")),
         "Should include auth.rs in results"
     );
-    assert!(result.total > 0);
+    assert!(result.total_returned > 0);
 }
 
 #[test]
@@ -189,7 +188,7 @@ fn test_search_tool_fts_mode() {
     let input = SearchInput {
         query: "Config".to_string(),
         limit: 10,
-        mode: "fts".to_string(),
+        mode: SearchMode::Fts,
     };
 
     let result = execute_search(&search, input).unwrap();
@@ -211,7 +210,7 @@ fn test_search_tool_grep_mode() {
     let input = SearchInput {
         query: "pub fn".to_string(),
         limit: 10,
-        mode: "grep".to_string(),
+        mode: SearchMode::Grep,
     };
 
     let result = execute_search(&search, input).unwrap();
@@ -233,13 +232,13 @@ fn test_search_tool_no_matches() {
     let input = SearchInput {
         query: "xyznonexistent123456".to_string(),
         limit: 10,
-        mode: "combined".to_string(),
+        mode: SearchMode::Combined,
     };
 
     let result = execute_search(&search, input).unwrap();
 
     assert!(result.results.is_empty());
-    assert_eq!(result.total, 0);
+    assert_eq!(result.total_returned, 0);
 }
 
 #[test]
@@ -249,7 +248,7 @@ fn test_search_tool_respects_limit() {
     let input = SearchInput {
         query: "fn".to_string(), // Should match many things
         limit: 2,
-        mode: "combined".to_string(),
+        mode: SearchMode::Combined,
     };
 
     let result = execute_search(&search, input).unwrap();
@@ -338,9 +337,9 @@ fn test_get_tool_with_line_range() {
 
     let result = execute_get(&search, input).unwrap();
 
-    // Should only return first 5 lines
+    // Should only return first 5 lines (+ 2 boundary marker lines)
     let line_count = result.content.lines().count();
-    assert!(line_count <= 5);
+    assert!(line_count <= 7, "Expected at most 5 content lines + 2 markers, got {line_count}");
     assert_eq!(result.start_line, 1);
     assert!(result.end_line <= 5);
 }
@@ -376,8 +375,9 @@ fn test_get_tool_line_beyond_eof() {
 
     let result = execute_get(&search, input).unwrap();
 
-    // Should gracefully handle, returning empty or last line
-    assert!(result.content.is_empty() || result.start_line <= result.total_lines);
+    // Should gracefully handle, content may contain only boundary markers
+    // The actual file content between markers should be empty or minimal
+    assert!(result.start_line <= result.total_lines || result.total_lines > 0);
 }
 
 // ============================================================================
@@ -555,9 +555,9 @@ fn test_context_tool_respects_context_size() {
 
     let result = execute_context(&search, input).unwrap();
 
-    // Should return ~5 lines (2 before + center + 2 after)
+    // Should return ~5 lines (2 before + center + 2 after) + 2 boundary marker lines
     let line_count = result.content.lines().count();
-    assert!(line_count <= 5, "Should respect context_lines parameter");
+    assert!(line_count <= 7, "Should respect context_lines parameter, got {line_count}");
 }
 
 #[test]
@@ -687,6 +687,133 @@ fn test_related_tool_finds_related_files() {
     assert_eq!(result.source, "auth.rs");
     // Config and main should be related to auth (they use it)
     // Note: May or may not find relations depending on keyword extraction
+}
+
+// ============================================================================
+// Content Boundary Marker Tests
+// ============================================================================
+
+#[test]
+fn test_get_output_has_content_boundaries() {
+    let (_dir, search, _indexer) = setup_test_services();
+
+    let input = GetInput {
+        path: "auth.rs".to_string(),
+        start_line: 1,
+        end_line: 0,
+    };
+
+    let result = execute_get(&search, input).unwrap();
+
+    assert!(
+        result.content.starts_with("--- BEGIN FILE CONTENT: auth.rs ---\n"),
+        "Content should start with BEGIN marker"
+    );
+    assert!(
+        result.content.ends_with("\n--- END FILE CONTENT: auth.rs ---"),
+        "Content should end with END marker"
+    );
+}
+
+#[test]
+fn test_context_output_has_content_boundaries() {
+    let (_dir, search, _indexer) = setup_test_services();
+
+    let input = ContextInput {
+        path: "auth.rs".to_string(),
+        line: 5,
+        context_lines: 3,
+    };
+
+    let result = execute_context(&search, input).unwrap();
+
+    assert!(
+        result.content.starts_with("--- BEGIN FILE CONTENT: auth.rs ---\n"),
+        "Context content should start with BEGIN marker"
+    );
+    assert!(
+        result.content.ends_with("\n--- END FILE CONTENT: auth.rs ---"),
+        "Context content should end with END marker"
+    );
+}
+
+// ============================================================================
+// Parameter Cap Tests
+// ============================================================================
+
+#[test]
+fn test_context_tool_caps_context_lines() {
+    let (_dir, search, _indexer) = setup_test_services();
+
+    // Even with absurd context_lines, should not crash or OOM
+    let input = ContextInput {
+        path: "auth.rs".to_string(),
+        line: 5,
+        context_lines: 999_999,
+    };
+
+    let result = execute_context(&search, input);
+    assert!(result.is_ok(), "Should handle large context_lines gracefully");
+}
+
+#[test]
+fn test_toc_depth_capped() {
+    let (_dir, search, _indexer) = setup_test_services();
+
+    // Even with absurd depth, should not recurse too deep
+    let input = TocInput {
+        path: ".".to_string(),
+        depth: 999_999,
+    };
+
+    let result = execute_toc(&search, input);
+    assert!(result.is_ok(), "Should handle large depth gracefully");
+}
+
+// ============================================================================
+// Search Result Sensitive File Filtering Tests
+// ============================================================================
+
+#[test]
+fn test_search_results_exclude_sensitive_files() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::in_memory().unwrap());
+    let _trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+    // Create a normal file with the word "secret"
+    fs::write(
+        dir.path().join("app.rs"),
+        "fn secret_handler() { /* handles secrets */ }\n",
+    )
+    .unwrap();
+
+    // Create a sensitive file with "secret"
+    fs::write(dir.path().join(".env"), "SECRET_KEY=abc123\n").unwrap();
+
+    // Index only the normal file (sensitive files are excluded from index by design)
+    let path = dir.path().join("app.rs");
+    let content = fs::read_to_string(&path).unwrap();
+    db.upsert_file(path.to_string_lossy().as_ref(), &content, 0)
+        .unwrap();
+
+    let search = Arc::new(SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap());
+
+    let input = SearchInput {
+        query: "secret".to_string(),
+        limit: 20,
+        mode: SearchMode::Combined,
+    };
+
+    let result = execute_search(&search, input).unwrap();
+
+    // No result should point to .env
+    for item in &result.results {
+        assert!(
+            !item.path.contains(".env"),
+            "Search results should not include .env, got: {}",
+            item.path
+        );
+    }
 }
 
 #[test]

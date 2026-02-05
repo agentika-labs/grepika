@@ -38,15 +38,11 @@ fn setup_test_services() -> (TempDir, Arc<SearchService>, Indexer) {
     fs::write(dir.path().join("credentials.json"), "{\"key\": \"secret\"}\n").unwrap();
 
     // Index files for FTS
-    for filename in ["main.rs", "lib.rs", "src/app.rs"] {
+    for (i, filename) in ["main.rs", "lib.rs", "src/app.rs"].iter().enumerate() {
         let path = dir.path().join(filename);
         let content = fs::read_to_string(&path).unwrap();
-        db.upsert_file(
-            path.to_string_lossy().as_ref(),
-            &content,
-            &format!("hash_{filename}"),
-        )
-        .unwrap();
+        db.upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+            .unwrap();
     }
 
     let service = Arc::new(
@@ -304,6 +300,79 @@ fn test_related_tool_blocks_sensitive_files() {
 }
 
 // =============================================================================
+// Null Byte Injection Tests
+// =============================================================================
+
+#[test]
+fn test_null_byte_rejected_in_get() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    let result = execute_get(
+        &service,
+        GetInput {
+            path: "main.rs\0../../etc/passwd".to_string(),
+            start_line: 1,
+            end_line: 0,
+        },
+    );
+    assert!(result.is_err(), "Should block null byte in path");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("traversal"),
+        "Error should mention traversal, got: {err}"
+    );
+}
+
+#[test]
+fn test_null_byte_rejected_in_context() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    let result = execute_context(
+        &service,
+        ContextInput {
+            path: "\0main.rs".to_string(),
+            line: 1,
+            context_lines: 5,
+        },
+    );
+    assert!(result.is_err(), "Should block null byte in path");
+}
+
+// =============================================================================
+// Sensitive File Indexing Tests
+// =============================================================================
+
+#[test]
+fn test_sensitive_files_excluded_from_index() {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Database::in_memory().unwrap());
+    let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+    // Create normal files
+    fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+
+    // Create sensitive files
+    fs::write(dir.path().join(".env"), "SECRET_KEY=abc123\n").unwrap();
+    fs::write(
+        dir.path().join("credentials.json"),
+        "{\"key\": \"secret\"}\n",
+    )
+    .unwrap();
+
+    let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
+    let progress = indexer.index(None, false).unwrap();
+
+    // Only normal files should be indexed
+    assert_eq!(progress.files_indexed, 2, "Should only index non-sensitive files");
+    assert_eq!(
+        db.file_count().unwrap(),
+        2,
+        "Database should not contain sensitive files"
+    );
+}
+
+// =============================================================================
 // Valid Path Tests (ensure we don't over-block)
 // =============================================================================
 
@@ -395,7 +464,7 @@ fn test_search_tool_blocks_redos_patterns() {
         SearchInput {
             query: "(a+)+".to_string(),
             limit: 10,
-            mode: "grep".to_string(),
+            mode: SearchMode::Grep,
         },
     );
     assert!(result.is_err(), "Should block (a+)+ pattern");
@@ -405,7 +474,7 @@ fn test_search_tool_blocks_redos_patterns() {
         SearchInput {
             query: "(.*)*".to_string(),
             limit: 10,
-            mode: "grep".to_string(),
+            mode: SearchMode::Grep,
         },
     );
     assert!(result.is_err(), "Should block (.*)* pattern");
@@ -415,7 +484,7 @@ fn test_search_tool_blocks_redos_patterns() {
         SearchInput {
             query: "(.+)+".to_string(),
             limit: 10,
-            mode: "grep".to_string(),
+            mode: SearchMode::Grep,
         },
     );
     assert!(result.is_err(), "Should block (.+)+ pattern");
@@ -431,7 +500,7 @@ fn test_search_tool_allows_safe_patterns() {
         SearchInput {
             query: "fn\\s+\\w+".to_string(),
             limit: 10,
-            mode: "grep".to_string(),
+            mode: SearchMode::Grep,
         },
     );
     assert!(result.is_ok(), "Should allow fn\\s+\\w+ pattern");
@@ -441,7 +510,7 @@ fn test_search_tool_allows_safe_patterns() {
         SearchInput {
             query: "hello.*world".to_string(),
             limit: 10,
-            mode: "grep".to_string(),
+            mode: SearchMode::Grep,
         },
     );
     assert!(result.is_ok(), "Should allow hello.*world pattern");

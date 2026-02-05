@@ -290,7 +290,7 @@ fn bench_fts_search(c: &mut Criterion) {
                 "#,
                 i = i
             );
-            db.upsert_file(&format!("file_{}.rs", i), &content, &format!("hash{}", i))
+            db.upsert_file(&format!("file_{}.rs", i), &content, i as u64)
                 .expect("Failed to insert file");
         }
 
@@ -327,7 +327,7 @@ fn bench_fts_query_complexity(c: &mut Criterion) {
             "#,
             i = i
         );
-        db.upsert_file(&format!("file_{}.rs", i), &content, &format!("hash{}", i))
+        db.upsert_file(&format!("file_{}.rs", i), &content, i as u64)
             .expect("Failed to insert file");
     }
 
@@ -392,7 +392,7 @@ fn bench_combined_search(c: &mut Criterion) {
         db.upsert_file(
             dir.path().join(&filename).to_string_lossy().as_ref(),
             &content,
-            &format!("hash{}", i),
+            i as u64,
         )
         .expect("Failed to insert file");
     }
@@ -439,24 +439,19 @@ fn bench_db_upsert(c: &mut Criterion) {
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("single_file", |b| {
-        b.iter_batched(
-            || Database::in_memory().expect("Failed to create database"),
-            |db| {
-                black_box(db.upsert_file("test.rs", content, "hash1"))
-            },
-            criterion::BatchSize::SmallInput,
-        )
+        let db = Database::in_memory().expect("Failed to create database");
+        b.iter(|| black_box(db.upsert_file("test.rs", content, 0x1)))
     });
 
     // Benchmark upsert to existing file (update path)
     group.bench_function("update_existing", |b| {
         let db = Database::in_memory().expect("Failed to create database");
-        db.upsert_file("test.rs", content, "hash1")
+        db.upsert_file("test.rs", content, 0x1)
             .expect("Failed to insert");
 
         let updated_content = format!("{}\n// Updated", content);
         b.iter(|| {
-            black_box(db.upsert_file("test.rs", &updated_content, "hash2"))
+            black_box(db.upsert_file("test.rs", &updated_content, 0x2))
         })
     });
 
@@ -476,7 +471,7 @@ fn bench_db_read(c: &mut Criterion) {
             .upsert_file(
                 &format!("file_{}.rs", i),
                 &format!("fn function_{}() {{}}", i),
-                &format!("hash{}", i),
+                i as u64,
             )
             .expect("Failed to insert");
         file_ids.push(id);

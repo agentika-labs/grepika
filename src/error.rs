@@ -46,14 +46,14 @@ pub enum DbError {
     #[error("File not found in database: {path}")]
     FileNotFound { path: PathBuf },
 
-    #[error("Database is locked")]
+    #[error("Database is locked. Another process may be indexing. Wait a moment and retry.")]
     Locked,
 }
 
 /// Search operation errors.
 #[derive(Error, Debug)]
 pub enum SearchError {
-    #[error("Invalid regex pattern: {0}")]
+    #[error("Invalid regex pattern: {0}. Check your pattern syntax or use mode=fts for natural language search.")]
     InvalidPattern(String),
 
     #[error("Grep error: {0}")]
@@ -62,8 +62,8 @@ pub enum SearchError {
     #[error("Search timeout after {seconds}s")]
     Timeout { seconds: u64 },
 
-    #[error("No results found")]
-    NoResults,
+    #[error("No results found for '{query}'. Try broader terms, a different mode (fts/grep), or run 'index' to refresh.")]
+    NoResults { query: String },
 
     #[error("Search cancelled")]
     Cancelled,
@@ -72,7 +72,7 @@ pub enum SearchError {
 /// Grep-specific errors.
 #[derive(Error, Debug)]
 pub enum GrepError {
-    #[error("Regex build error: {0}")]
+    #[error("Invalid regex: {0}. Check your pattern syntax or use mode=fts for natural language search.")]
     RegexBuild(String),
 
     #[error("File read error for {path}: {source}")]
@@ -101,10 +101,10 @@ pub enum IndexError {
     #[error("Trigram extraction failed: {0}")]
     Trigram(String),
 
-    #[error("Index is stale and needs rebuild")]
+    #[error("Index is stale. Run 'index' with force=true to rebuild.")]
     Stale,
 
-    #[error("Index corruption detected: {0}")]
+    #[error("Index corruption: {0}. Delete the index file and run 'index' to rebuild from scratch.")]
     Corruption(String),
 }
 
@@ -159,7 +159,7 @@ impl SearchError {
             Self::InvalidPattern(_) => "INVALID_PATTERN",
             Self::Grep(e) => e.code(),
             Self::Timeout { .. } => "TIMEOUT",
-            Self::NoResults => "NO_RESULTS",
+            Self::NoResults { .. } => "NO_RESULTS",
             Self::Cancelled => "CANCELLED",
         }
     }

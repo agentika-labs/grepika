@@ -5,12 +5,73 @@
 
 use crate::db::Database;
 use crate::error::{DbResult, SearchError};
+use crate::services::grep::GrepMatch;
 use crate::services::{FtsService, GrepService, TrigramIndex};
 use crate::types::{FileId, Score};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::RwLock;
+
+/// Detected query intent for weight adjustment (Q7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryIntent {
+    /// Contains regex metacharacters (e.g., `fn\s+\w+`)
+    Regex,
+    /// Multiple words, likely natural language (e.g., "authentication flow")
+    NaturalLanguage,
+    /// CamelCase or snake_case identifier (e.g., "SearchService")
+    ExactSymbol,
+    /// Short token < 4 chars (e.g., "fn", "if")
+    ShortToken,
+}
+
+/// Classifies a query to determine optimal backend weights.
+fn classify_query(query: &str) -> QueryIntent {
+    let trimmed = query.trim();
+
+    if trimmed.is_empty() {
+        return QueryIntent::ShortToken;
+    }
+
+    // Check for regex metacharacters (beyond simple wildcards)
+    let regex_chars = ['\\', '+', '?', '{', '}', '|', '^', '$', '[', ']'];
+    let has_regex = trimmed.chars().any(|c| regex_chars.contains(&c));
+    // Standalone . and * are common in natural language, but combined patterns are regex
+    let has_regex_combo = trimmed.contains(".*") || trimmed.contains(".+") || trimmed.contains("\\s");
+
+    if has_regex || has_regex_combo {
+        return QueryIntent::Regex;
+    }
+
+    // Multiple words = natural language
+    let word_count = trimmed.split_whitespace().count();
+    if word_count >= 2 {
+        return QueryIntent::NaturalLanguage;
+    }
+
+    // Short single token
+    if trimmed.len() < 4 {
+        return QueryIntent::ShortToken;
+    }
+
+    // Default: exact symbol (CamelCase, snake_case, or single long word)
+    QueryIntent::ExactSymbol
+}
+
+/// A matching snippet from a search result.
+#[derive(Debug, Clone)]
+pub struct MatchSnippet {
+    /// Line number where the match occurs (1-indexed)
+    pub line_number: u64,
+    /// The content of the matching line (trimmed)
+    pub line_content: String,
+    /// Byte offset within the line where the match starts
+    pub match_start: usize,
+    /// Byte offset within the line where the match ends
+    pub match_end: usize,
+}
 
 /// A search result with merged scores.
 #[derive(Debug, Clone)]
@@ -20,6 +81,8 @@ pub struct SearchResult {
     pub score: Score,
     /// Which search methods contributed to this result
     pub sources: SearchSources,
+    /// Top matching snippets from this file (up to 3)
+    pub snippets: Vec<MatchSnippet>,
 }
 
 /// Tracks which search methods found a result.
@@ -69,6 +132,10 @@ pub struct SearchService {
     grep: GrepService,
     trigram: Arc<RwLock<TrigramIndex>>,
     config: SearchConfig,
+    /// Cached file count to avoid DB round-trip on every search (1C).
+    /// Updated after indexing. Relaxed ordering is fine — staleness
+    /// by a few files is acceptable for IDF weighting.
+    cached_total_files: AtomicU64,
 }
 
 impl SearchService {
@@ -82,12 +149,16 @@ impl SearchService {
         let grep = GrepService::new(root)?;
         let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
 
+        // Pre-populate cached total_files from DB (best-effort)
+        let total = db.total_files().unwrap_or(0);
+
         Ok(Self {
             db,
             fts,
             grep,
             trigram,
             config: SearchConfig::default(),
+            cached_total_files: AtomicU64::new(total),
         })
     }
 
@@ -106,7 +177,31 @@ impl SearchService {
         Ok(service)
     }
 
+    /// Updates the cached total file count (call after indexing).
+    pub fn refresh_total_files(&self) {
+        if let Ok(total) = self.db.total_files() {
+            self.cached_total_files.store(total, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns the cached total file count, falling back to DB on 0.
+    fn total_files(&self) -> u64 {
+        let cached = self.cached_total_files.load(Ordering::Relaxed);
+        if cached > 0 {
+            return cached;
+        }
+        // Fallback: cache was never populated
+        let total = self.db.total_files().unwrap_or(1);
+        self.cached_total_files.store(total, Ordering::Relaxed);
+        total
+    }
+
     /// Performs a combined search using all available methods.
+    ///
+    /// Adjusts backend weights based on query intent (Q7):
+    /// - Regex patterns favor grep
+    /// - Natural language queries favor FTS
+    /// - Short/exact tokens use balanced weights
     ///
     /// This is a blocking operation - use `spawn_blocking` in async contexts.
     ///
@@ -115,20 +210,49 @@ impl SearchService {
     /// Returns `SearchError` if result merging or database access fails.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
         let limit = if limit > 0 { limit } else { self.config.limit };
+        let intent = classify_query(query);
 
-        // Run searches (these are already parallel internally)
-        let fts_results = self.fts.search(query, limit * 2).unwrap_or_default();
-        let grep_results = self.grep.search_files(query, limit * 2).unwrap_or_default();
+        // Run searches based on intent
+        // For regex queries, skip FTS (it can't handle regex)
+        let fts_results = if intent != QueryIntent::Regex {
+            self.fts.search(query, limit * 2).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
-        // Trigram search (blocking read)
-        // Lock poisoning recovery: continue with the inner data
+        // Phase 3: Run trigram BEFORE grep to build a file filter.
+        // If the trigram bitmap is selective (<80% of files), convert it
+        // to a path set and restrict grep to only those files.
         let trigram_results = {
             let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
             trigram.search(query)
         };
 
-        // Merge results
-        self.merge_results(fts_results, grep_results, trigram_results, limit)
+        let file_filter = self.build_trigram_filter(&trigram_results);
+
+        let (grep_results, grep_matches) = self
+            .grep
+            .search_files_with_matches_filtered(query, limit * 2, file_filter.as_ref())
+            .unwrap_or_default();
+
+        // Override weights based on intent
+        let config = match intent {
+            QueryIntent::Regex => SearchConfig {
+                fts_weight: 0.0,
+                grep_weight: 0.7,
+                trigram_weight: 0.3,
+                ..self.config.clone()
+            },
+            QueryIntent::NaturalLanguage => SearchConfig {
+                fts_weight: 0.6,
+                grep_weight: 0.2,
+                trigram_weight: 0.2,
+                ..self.config.clone()
+            },
+            QueryIntent::ExactSymbol | QueryIntent::ShortToken => self.config.clone(),
+        };
+
+        self.merge_results(fts_results, grep_results, grep_matches, trigram_results, limit, &config)
     }
 
     /// Performs FTS-only search.
@@ -154,16 +278,21 @@ impl SearchService {
     /// Returns `SearchError::InvalidPattern` if the regex pattern is invalid.
     pub fn search_grep(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
         let results = self.grep.search_files(query, limit)?;
+
+        // Batch resolve paths to file IDs
+        let path_strings: Vec<String> = results
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().to_string())
+            .collect();
+        let id_map = self.db.get_file_ids_batch(&path_strings).unwrap_or_default();
+
         let results: Vec<_> = results
             .into_iter()
             .map(|(path, score)| {
-                // Try to find file ID from path
-                let file_id = self
-                    .db
-                    .get_file_by_path(path.to_string_lossy().as_ref())
-                    .ok()
-                    .flatten()
-                    .map(|(id, _)| id)
+                let path_str = path.to_string_lossy().to_string();
+                let file_id = id_map
+                    .get(&path_str)
+                    .copied()
                     .unwrap_or(FileId::new(0));
 
                 SearchResult {
@@ -174,6 +303,7 @@ impl SearchService {
                         grep: true,
                         ..Default::default()
                     },
+                    snippets: Vec::new(),
                 }
             })
             .collect();
@@ -199,105 +329,200 @@ impl SearchService {
         self.grep.root()
     }
 
+    /// Builds a file filter from trigram results for grep pre-filtering (Phase 3).
+    ///
+    /// Returns `None` if the bitmap is absent or matches >=80% of files
+    /// (filter overhead would exceed savings). Otherwise resolves FileIds
+    /// to paths via batch lookup.
+    fn build_trigram_filter(
+        &self,
+        trigram: &Option<roaring::RoaringBitmap>,
+    ) -> Option<HashSet<PathBuf>> {
+        let bitmap = trigram.as_ref()?;
+        let total = self.total_files();
+        if total == 0 {
+            return None;
+        }
+
+        let match_count = bitmap.len();
+        // Skip filter when bitmap matches >=80% of files (not selective enough)
+        if match_count * 100 / total >= 80 {
+            return None;
+        }
+
+        // Resolve FileIds to paths
+        let file_ids: Vec<FileId> = bitmap.iter().map(FileId::new).collect();
+        let path_map = self.db.get_paths_batch(&file_ids).unwrap_or_default();
+
+        let filter: HashSet<PathBuf> =
+            path_map.into_values().map(PathBuf::from).collect();
+
+        if filter.is_empty() {
+            None
+        } else {
+            Some(filter)
+        }
+    }
+
     /// Merges results from multiple search methods.
+    ///
+    /// Performance optimizations:
+    /// - Batch DB lookups instead of per-result queries (P1)
+    /// - Only fetches paths, never content (P2)
+    /// - Trigram only scores files already in FTS/grep results (P3)
+    /// - Single-pass scoring: no intermediate HashMap (1A)
+    /// - Lazy snippets: only extracted for top-N results (1B)
+    /// - Cached total_files: avoids DB round-trip (1C)
+    /// - Reduced path conversions: index into pre-computed strings (1D)
+    /// - sort_unstable_by: no allocation overhead (1E)
     fn merge_results(
         &self,
         fts: Vec<(FileId, Score)>,
         grep: Vec<(PathBuf, Score)>,
+        grep_matches: HashMap<PathBuf, Vec<GrepMatch>>,
         trigram: Option<roaring::RoaringBitmap>,
         limit: usize,
+        config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        // Pre-allocate with estimated capacity from input sizes
         let estimated_capacity = fts.len() + grep.len();
-        let mut scores: HashMap<FileId, (Score, SearchSources, PathBuf)> =
+
+        // Single accumulator: (weighted_score_sum, weight_sum, sources, path)
+        let mut score_accum: HashMap<FileId, (f64, f64, SearchSources, PathBuf)> =
             HashMap::with_capacity(estimated_capacity);
 
-        // Add FTS results
+        // Batch resolve FTS file_ids to paths (P1+P2)
+        let fts_ids: Vec<FileId> = fts.iter().map(|(id, _)| *id).collect();
+        let fts_paths = self.db.get_paths_batch(&fts_ids).unwrap_or_default();
+
         for (file_id, score) in fts {
-            if let Ok(Some((path, _))) = self.db.get_file(file_id) {
-                let entry = scores.entry(file_id).or_insert_with(|| {
-                    (Score::ZERO, SearchSources::default(), PathBuf::from(&path))
+            if let Some(path) = fts_paths.get(&file_id) {
+                let entry = score_accum.entry(file_id).or_insert_with(|| {
+                    (0.0, 0.0, SearchSources::default(), PathBuf::from(path))
                 });
-                entry.0 = entry.0.merge(score.weighted(self.config.fts_weight));
-                entry.1.fts = true;
+                entry.0 += score.as_f64() * config.fts_weight;
+                entry.1 += config.fts_weight;
+                entry.2.fts = true;
             }
         }
 
-        // Add grep results
-        for (path, score) in grep {
-            if let Ok(Some((file_id, _))) =
-                self.db.get_file_by_path(path.to_string_lossy().as_ref())
-            {
-                let entry = scores
+        // Batch resolve grep paths to file_ids (P1+P2)
+        // Pre-compute path strings once (1D: avoids double to_string_lossy)
+        let grep_path_strings: Vec<String> = grep
+            .iter()
+            .map(|(p, _)| p.to_string_lossy().to_string())
+            .collect();
+        let grep_ids = self.db.get_file_ids_batch(&grep_path_strings).unwrap_or_default();
+
+        // Zip pre-computed strings with grep results to avoid re-conversion (1D)
+        for (i, (path, score)) in grep.into_iter().enumerate() {
+            if let Some(&file_id) = grep_ids.get(&grep_path_strings[i]) {
+                let entry = score_accum
                     .entry(file_id)
-                    .or_insert_with(|| (Score::ZERO, SearchSources::default(), path.clone()));
-                entry.0 = entry.0.merge(score.weighted(self.config.grep_weight));
-                entry.1.grep = true;
+                    .or_insert_with(|| (0.0, 0.0, SearchSources::default(), path));
+                entry.0 += score.as_f64() * config.grep_weight;
+                entry.1 += config.grep_weight;
+                entry.2.grep = true;
             }
         }
 
-        // Add trigram results (boost existing or add new)
+        // Add trigram scores ONLY for files already in FTS/grep results (P3)
         if let Some(bitmap) = trigram {
-            for file_id in bitmap.iter() {
-                let file_id = FileId::new(file_id);
-                if let Ok(Some((path, _))) = self.db.get_file(file_id) {
-                    let entry = scores.entry(file_id).or_insert_with(|| {
-                        (Score::ZERO, SearchSources::default(), PathBuf::from(&path))
-                    });
-                    entry.0 = entry
-                        .0
-                        .merge(Score::new(0.5).weighted(self.config.trigram_weight));
-                    entry.1.trigram = true;
+            // Use cached total_files (1C) instead of DB round-trip
+            let total_files = self.total_files() as f64;
+            let match_count = bitmap.len() as f64;
+
+            // IDF-based score (Q1): rare matches score higher than common ones
+            let trigram_raw = if total_files > 0.0 && match_count > 0.0 {
+                let idf = (total_files / match_count).ln() / total_files.ln().max(1.0);
+                idf.clamp(0.1, 1.0)
+            } else {
+                0.5
+            };
+
+            for (file_id, (score_sum, weight_sum, sources, _)) in score_accum.iter_mut() {
+                if bitmap.contains(file_id.as_u32()) {
+                    *score_sum += trigram_raw * config.trigram_weight;
+                    *weight_sum += config.trigram_weight;
+                    sources.trigram = true;
                 }
             }
         }
 
-        // Apply multi-source bonus
-        for (score, sources, _) in scores.values_mut() {
-            let source_count = sources.fts as u8 + sources.grep as u8 + sources.trigram as u8;
-            if source_count > 1 {
-                *score = score.merge(Score::new(
-                    self.config.multi_source_bonus * (source_count - 1) as f64,
-                ));
-            }
-        }
-
-        // Convert to results and sort
-        let mut results: Vec<_> = scores
+        // Single-pass (1A): compute final scores directly from score_accum,
+        // WITHOUT snippets (1B: deferred to after truncation)
+        let mut results: Vec<SearchResult> = score_accum
             .into_iter()
-            .map(|(file_id, (score, sources, path))| SearchResult {
-                file_id,
-                path,
-                score,
-                sources,
+            .map(|(file_id, (score_sum, weight_sum, sources, path))| {
+                let source_count =
+                    sources.fts as u8 + sources.grep as u8 + sources.trigram as u8;
+
+                let base_score = if weight_sum > 0.0 {
+                    score_sum / weight_sum
+                } else {
+                    0.0
+                };
+
+                let bonus_mult = if source_count > 1 {
+                    1.0 + config.multi_source_bonus * (source_count - 1) as f64
+                } else {
+                    1.0
+                };
+
+                SearchResult {
+                    file_id,
+                    path,
+                    score: Score::new(base_score * bonus_mult),
+                    sources,
+                    snippets: Vec::new(), // Populated below for top-N only
+                }
             })
             .collect();
 
-        results.sort_by(|a, b| {
+        // sort_unstable_by: no temp allocation (1E)
+        // Score is clamped [0.0, 1.0] so NaN is impossible; unwrap_or is defensive
+        results.sort_unstable_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         results.truncate(limit);
 
+        // Lazy snippet extraction (1B): only for surviving top-N results
+        for result in &mut results {
+            if let Some(matches) = grep_matches.get(&result.path) {
+                result.snippets = matches
+                    .iter()
+                    .map(|m| MatchSnippet {
+                        line_number: m.line_number,
+                        line_content: m.line_content.clone(),
+                        match_start: m.match_start,
+                        match_end: m.match_end,
+                    })
+                    .collect();
+            }
+        }
+
         Ok(results)
     }
 
-    /// Enriches file IDs with paths.
+    /// Enriches file IDs with paths using batch lookup.
     fn enrich_results(
         &self,
         results: Vec<(FileId, Score)>,
         sources: SearchSources,
     ) -> DbResult<Vec<SearchResult>> {
-        let mut enriched = Vec::with_capacity(results.len());
+        let ids: Vec<FileId> = results.iter().map(|(id, _)| *id).collect();
+        let path_map = self.db.get_paths_batch(&ids)?;
 
+        let mut enriched = Vec::with_capacity(results.len());
         for (file_id, score) in results {
-            if let Some((path, _)) = self.db.get_file(file_id)? {
+            if let Some(path) = path_map.get(&file_id) {
                 enriched.push(SearchResult {
                     file_id,
                     path: PathBuf::from(path),
                     score,
                     sources: sources.clone(),
+                    snippets: Vec::new(),
                 });
             }
         }
@@ -332,7 +557,7 @@ mod tests {
         db.upsert_file(
             dir.path().join("auth.rs").to_string_lossy().as_ref(),
             "fn authenticate() { login() }",
-            "hash1",
+            0x1,
         )
         .unwrap();
 
@@ -364,19 +589,19 @@ mod tests {
         db.upsert_file(
             dir.path().join("auth.rs").to_string_lossy().as_ref(),
             "fn authenticate() { login(); validate(); }",
-            "hash1",
+            0x1,
         )
         .unwrap();
         db.upsert_file(
             dir.path().join("login.rs").to_string_lossy().as_ref(),
             "fn login() { println!(\"logging in\"); }",
-            "hash2",
+            0x2,
         )
         .unwrap();
         db.upsert_file(
             dir.path().join("config.rs").to_string_lossy().as_ref(),
             "struct Config { auth_timeout: u64 }",
-            "hash3",
+            0x3,
         )
         .unwrap();
 
@@ -455,7 +680,7 @@ mod tests {
             db.upsert_file(
                 dir.path().join(&filename).to_string_lossy().as_ref(),
                 &content,
-                &format!("hash{}", i),
+                i as u64,
             )
             .unwrap();
         }
@@ -486,7 +711,7 @@ mod tests {
         db.upsert_file(
             dir.path().join("test.rs").to_string_lossy().as_ref(),
             "fn custom_test() {}",
-            "hash1",
+            0x1,
         )
         .unwrap();
 

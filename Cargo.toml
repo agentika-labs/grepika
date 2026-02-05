@@ -6,6 +6,11 @@ rust-version = "1.75"
 description = "Token-efficient MCP server for code search with trigram indexing"
 authors = ["Agentika"]
 license = "MIT"
+repository = "https://github.com/agentika/agentika-grep"
+homepage = "https://github.com/agentika/agentika-grep"
+readme = "README.md"
+keywords = ["mcp", "code-search", "trigram", "grep", "fts5"]
+categories = ["command-line-utilities", "development-tools", "text-processing"]
 
 [dependencies]
 # MCP Server
@@ -35,6 +40,10 @@ r2d2_sqlite = "0.26"
 ahash = "0.8"
 roaring = "0.10"
 sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Platform-specific directories
+dirs = "5"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -70,6 +79,15 @@ harness = false
 [[bench]]
 name = "token_efficiency"
 harness = false
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/agentika-grep-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "agentika-grep{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/agentika-grep-{ target }.zip"
+pkg-fmt = "zip"
 
 [profile.release]
 lto = true

@@ -17,10 +17,13 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 use ignore::WalkBuilder;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+/// Scored files with their matching line snippets.
+pub type GrepSearchResult = (Vec<(PathBuf, Score)>, HashMap<PathBuf, Vec<GrepMatch>>);
 
 /// Match found by grep.
 #[derive(Debug, Clone)]
@@ -125,6 +128,19 @@ impl GrepService {
         pattern: &str,
         limit: usize,
     ) -> Result<Vec<GrepMatch>, SearchError> {
+        self.search_parallel_filtered(pattern, limit, None)
+    }
+
+    /// Searches with an optional file filter (Phase 3: trigram pre-filtering).
+    ///
+    /// When `file_filter` is `Some`, only files in the set are searched.
+    /// This avoids scanning files the trigram index already ruled out.
+    pub fn search_parallel_filtered(
+        &self,
+        pattern: &str,
+        limit: usize,
+        file_filter: Option<&HashSet<PathBuf>>,
+    ) -> Result<Vec<GrepMatch>, SearchError> {
         // Validate pattern for ReDoS vulnerabilities
         security::validate_regex_pattern(pattern)
             .map_err(|e| SearchError::InvalidPattern(e.to_string()))?;
@@ -132,62 +148,61 @@ impl GrepService {
         let matcher = RegexMatcher::new_line_matcher(pattern)
             .map_err(|e| SearchError::InvalidPattern(e.to_string()))?;
 
-        let matches = Arc::new(Mutex::new(Vec::new()));
-        let match_count = Arc::new(AtomicUsize::new(0));
-        let cancelled = Arc::new(AtomicBool::new(false));
         let max_matches = if limit > 0 {
             limit
         } else {
             self.config.max_matches
         };
 
-        // Collect files first (respects .gitignore)
-        let files: Vec<PathBuf> = WalkBuilder::new(&self.root)
+        // Collect files (respects .gitignore), optionally filtered by trigram set
+        let walker = WalkBuilder::new(&self.root)
             .hidden(!self.config.include_hidden)
             .follow_links(self.config.follow_symlinks)
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
-            .build()
+            .build();
+
+        let files: Vec<PathBuf> = walker
             .filter_map(Result::ok)
             .filter(|entry| entry.file_type().is_some_and(|ft| ft.is_file()))
             .map(|entry| entry.path().to_path_buf())
+            .filter(|path| {
+                // Phase 3: skip files not in the trigram filter set
+                file_filter.map_or(true, |set| set.contains(path))
+            })
             .take(self.config.max_files)
             .collect();
 
-        // Search files in parallel
-        self.pool.install(|| {
+        // Lock-free parallel collection (P6): each thread accumulates
+        // its own matches, then rayon merges them at the end.
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let match_count = Arc::new(AtomicUsize::new(0));
+
+        let mut results: Vec<GrepMatch> = self.pool.install(|| {
             use rayon::prelude::*;
 
-            files.par_iter().for_each(|path| {
-                // Early termination check
-                if cancelled.load(Ordering::Relaxed) {
-                    return;
-                }
-
-                if let Ok(file_matches) = search_file(path, &matcher) {
-                    // Lock poisoning indicates a thread panicked - treat as unrecoverable
-                    let mut all_matches = matches.lock().unwrap_or_else(|e| e.into_inner());
-                    for m in file_matches {
-                        all_matches.push(m);
-                        let count = match_count.fetch_add(1, Ordering::Relaxed);
-                        if count + 1 >= max_matches {
-                            cancelled.store(true, Ordering::Relaxed);
-                            break;
-                        }
+            files
+                .par_iter()
+                .flat_map_iter(|path| {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return Vec::new();
                     }
-                }
-            });
+
+                    match search_file(path, &matcher) {
+                        Ok(file_matches) => {
+                            let count = match_count.fetch_add(file_matches.len(), Ordering::Relaxed);
+                            if count + file_matches.len() >= max_matches {
+                                cancelled.store(true, Ordering::Relaxed);
+                            }
+                            file_matches
+                        }
+                        Err(_) => Vec::new(),
+                    }
+                })
+                .collect()
         });
 
-        // Arc::try_unwrap succeeds because this is the only remaining reference after pool.install
-        // Lock poisoning recovery: extract data even if a thread panicked
-        let mutex = Arc::try_unwrap(matches).unwrap_or_else(|arc| {
-            // Fallback: clone the data if other references somehow exist
-            let guard = arc.lock().unwrap_or_else(|e| e.into_inner());
-            std::sync::Mutex::new(guard.clone())
-        });
-        let mut results = mutex.into_inner().unwrap_or_else(|e| e.into_inner());
         results.truncate(max_matches);
         Ok(results)
     }
@@ -202,29 +217,99 @@ impl GrepService {
         pattern: &str,
         limit: usize,
     ) -> Result<Vec<(PathBuf, Score)>, SearchError> {
-        let matches = self.search_parallel(pattern, limit * 10)?;
+        let (results, _) = self.search_files_with_matches(pattern, limit)?;
+        Ok(results)
+    }
 
-        // Aggregate by file and compute scores
-        let mut file_counts: HashMap<PathBuf, usize> = HashMap::new();
+    /// Searches and returns file-level results with scores plus top matches per file.
+    ///
+    /// Returns `(scored_files, matches_by_file)` where `matches_by_file` contains
+    /// the top 3 `GrepMatch`es per file for snippet generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SearchError::InvalidPattern` if the regex pattern is invalid.
+    pub fn search_files_with_matches(
+        &self,
+        pattern: &str,
+        limit: usize,
+    ) -> Result<GrepSearchResult, SearchError> {
+        self.search_files_with_matches_filtered(pattern, limit, None)
+    }
+
+    /// Like `search_files_with_matches` but with optional trigram pre-filter.
+    pub fn search_files_with_matches_filtered(
+        &self,
+        pattern: &str,
+        limit: usize,
+        file_filter: Option<&HashSet<PathBuf>>,
+    ) -> Result<GrepSearchResult, SearchError> {
+        // 2B: Reduced overcollection from 3x to 2x (ample for top-3 snippets)
+        let matches = self.search_parallel_filtered(pattern, limit * 2, file_filter)?;
+
+        // 2A: Single HashMap holding stats + snippets to avoid double path cloning.
+        // Each entry: (match_count, max_line_number, top_3_snippets)
+        let mut file_agg: HashMap<PathBuf, (usize, u64, Vec<GrepMatch>)> = HashMap::new();
+
         for m in matches {
-            *file_counts.entry(m.path).or_insert(0) += 1;
+            let entry = file_agg
+                .entry(m.path.clone())
+                .or_insert_with(|| (0, 0, Vec::with_capacity(3)));
+            entry.0 += 1;
+            entry.1 = entry.1.max(m.line_number);
+            if entry.2.len() < 3 {
+                entry.2.push(m);
+            }
         }
 
-        // Score based on match count (logarithmic scale)
-        let max_count = file_counts.values().copied().max().unwrap_or(1) as f64;
-        let mut results: Vec<_> = file_counts
-            .into_iter()
-            .map(|(path, count)| {
-                let score = Score::new((count as f64).ln_1p() / max_count.ln_1p());
-                (path, score)
+        // Score blending match count and density (Q6):
+        // density = matches / max_line_number rewards focused files
+        let max_count = file_agg.values().map(|(c, _, _)| *c).max().unwrap_or(1) as f64;
+        let max_density = file_agg
+            .values()
+            .map(|(count, max_line, _)| {
+                if *max_line > 0 {
+                    *count as f64 / *max_line as f64
+                } else {
+                    0.0
+                }
             })
-            .collect();
+            .fold(0.0f64, f64::max)
+            .max(f64::EPSILON);
 
-        // Sort by score descending
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Split into scored results + file_matches in one pass
+        let mut results: Vec<(PathBuf, Score)> = Vec::with_capacity(file_agg.len());
+        let mut file_matches: HashMap<PathBuf, Vec<GrepMatch>> =
+            HashMap::with_capacity(file_agg.len().min(limit));
+
+        for (path, (count, max_line, snippets)) in file_agg {
+            let norm_count = (count as f64).ln_1p() / max_count.ln_1p();
+            let density = if max_line > 0 {
+                (count as f64 / max_line as f64) / max_density
+            } else {
+                0.0
+            };
+            let score = Score::new(0.6 * norm_count + 0.4 * density);
+
+            // Temporarily store all snippets; trimmed after truncation (1F)
+            if !snippets.is_empty() {
+                file_matches.insert(path.clone(), snippets);
+            }
+            results.push((path, score));
+        }
+
+        // Sort by score descending (1E: sort_unstable avoids temp allocation)
+        results.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(limit);
 
-        Ok(results)
+        // Trim file_matches to only paths in the truncated results (1F)
+        if file_matches.len() > results.len() {
+            let kept_paths: HashSet<&PathBuf> =
+                results.iter().map(|(p, _)| p).collect();
+            file_matches.retain(|k, _| kept_paths.contains(k));
+        }
+
+        Ok((results, file_matches))
     }
 
     /// Gets the root directory.
@@ -244,19 +329,24 @@ fn search_file(path: &Path, matcher: &RegexMatcher) -> Result<Vec<GrepMatch>, Gr
             matcher,
             path,
             UTF8(|line_number, line| {
-                // Find match positions in line
-                matcher
-                    .find(line.as_bytes())
-                    .map_err(|_| std::io::Error::other("matcher error"))?;
-
-                if let Ok(Some(m)) = matcher.find(line.as_bytes()) {
-                    matches.push(GrepMatch {
-                        path: path.to_path_buf(),
-                        line_number,
-                        line_content: line.trim_end().to_string(),
-                        match_start: m.start(),
-                        match_end: m.end(),
-                    });
+                // Single matcher.find() call (P4: was called twice before)
+                match matcher.find(line.as_bytes()) {
+                    Ok(Some(m)) => {
+                        matches.push(GrepMatch {
+                            path: path.to_path_buf(),
+                            line_number,
+                            line_content: line.trim_end().to_string(),
+                            match_start: m.start(),
+                            match_end: m.end(),
+                        });
+                    }
+                    Err(_) => {
+                        // Matcher error on this line, skip it
+                    }
+                    Ok(None) => {
+                        // grep-searcher found a match but our matcher didn't;
+                        // this can happen with line-matching edge cases
+                    }
                 }
                 Ok(true)
             }),

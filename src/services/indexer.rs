@@ -1,18 +1,25 @@
 //! Incremental file indexer with change detection.
 //!
-//! Uses SHA256 hashing to detect file changes and only
-//! re-indexes modified files.
+//! Uses xxHash (xxh3_64) for fast file change detection.
+//! xxHash is ~30x faster than SHA256 while providing sufficient
+//! collision resistance for content hashing.
 
-use crate::db::Database;
-use crate::error::{IndexError, IndexResult, ServerError};
+use crate::db::{Database, FileData};
+use crate::error::{IndexError, ServerError};
+use crate::security;
 use crate::services::TrigramIndex;
 use crate::types::FileId;
 use ignore::WalkBuilder;
-use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use xxhash_rust::xxh3::xxh3_64;
+
+/// Batch size for database upserts.
+/// Larger batches reduce transaction overhead but increase memory usage.
+const BATCH_SIZE: usize = 500;
 
 /// Progress callback type.
 pub type ProgressCallback = Box<dyn Fn(IndexProgress) + Send + Sync>;
@@ -111,16 +118,21 @@ pub struct Indexer {
     trigram: Arc<RwLock<TrigramIndex>>,
     root: PathBuf,
     config: IndexConfig,
+    /// Pre-built HashSet of lowercased extensions for O(1) lookup (P7)
+    extension_set: HashSet<String>,
 }
 
 impl Indexer {
     /// Creates a new indexer.
     pub fn new(db: Arc<Database>, trigram: Arc<RwLock<TrigramIndex>>, root: PathBuf) -> Self {
+        let config = IndexConfig::default();
+        let extension_set = build_extension_set(&config.extensions);
         Self {
             db,
             trigram,
             root,
-            config: IndexConfig::default(),
+            config,
+            extension_set,
         }
     }
 
@@ -131,90 +143,135 @@ impl Indexer {
         root: PathBuf,
         config: IndexConfig,
     ) -> Self {
+        let extension_set = build_extension_set(&config.extensions);
         Self {
             db,
             trigram,
             root,
             config,
+            extension_set,
         }
     }
 
-    /// Performs incremental indexing.
+    /// Performs incremental indexing using two-phase parallel processing.
     ///
-    /// Returns the final progress state.
+    /// **Phase 1 (Parallel):** Read files and compute hashes using rayon.
+    /// This is CPU-bound work that benefits from parallelization.
+    ///
+    /// **Phase 2 (Sequential):** Batch insert into database and update trigrams.
+    /// This is I/O-bound work where batching is more effective than parallelism.
     ///
     /// # Errors
     ///
     /// Returns `ServerError::Database` if database operations fail.
     /// Returns `ServerError::Index` if trigram indexing fails.
-    pub fn index(&self, progress: Option<ProgressCallback>) -> Result<IndexProgress, ServerError> {
-        // Get existing indexed files
-        let existing: HashSet<String> = self
-            .db
-            .get_indexed_files()?
-            .into_iter()
-            .map(|(path, _)| path)
-            .collect();
+    pub fn index(
+        &self,
+        progress: Option<ProgressCallback>,
+        force: bool,
+    ) -> Result<IndexProgress, ServerError> {
+        // Pre-load all existing hashes into memory for O(1) lookups
+        // When force=true, use empty map so all files appear changed
+        let existing_hashes: HashMap<String, u64> = if force {
+            HashMap::new()
+        } else {
+            self.db.get_all_hashes()?
+        };
+        let existing_paths: HashSet<String> = existing_hashes.keys().cloned().collect();
 
         // Collect files to process
         let files: Vec<PathBuf> = self.collect_files()?;
         let total = files.len();
 
+        // ========================================
+        // PHASE 1: Parallel file reading + hashing
+        // ========================================
+        // This is embarrassingly parallel - no shared mutable state
+        let file_data: Vec<FileData> = files
+            .par_iter()
+            .filter_map(|path| {
+                // Read file content
+                let content = fs::read_to_string(path).ok()?;
+
+                // Compute hash
+                let hash = compute_hash(&content);
+                let path_str = path.to_string_lossy().to_string();
+
+                // Check if file needs indexing (O(1) HashMap lookup)
+                if existing_hashes.get(&path_str) == Some(&hash) {
+                    return None; // Skip unchanged files
+                }
+
+                Some(FileData {
+                    path: path_str,
+                    content,
+                    hash,
+                })
+            })
+            .collect();
+
+        // Collect all seen paths (including unchanged ones)
+        let seen_paths: HashSet<String> = files
+            .par_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        // Calculate unchanged count
+        let files_unchanged = total - file_data.len();
+
+        // ========================================
+        // PHASE 2: Sequential DB writes + trigrams
+        // ========================================
+        // Batching is more efficient than parallel writes due to
+        // transaction overhead and lock contention
+
         let mut state = IndexProgress {
             files_processed: 0,
             files_total: total,
             files_indexed: 0,
-            files_unchanged: 0,
+            files_unchanged,
             files_deleted: 0,
             current_file: None,
         };
 
-        let mut seen_paths: HashSet<String> = HashSet::new();
-
-        // Process files
-        for path in files {
-            state.current_file = Some(path.clone());
-            state.files_processed += 1;
-
+        // Process files in batches
+        for batch in file_data.chunks(BATCH_SIZE) {
+            // Report progress at batch level
             if let Some(ref cb) = progress {
+                state.current_file = batch.first().map(|f| PathBuf::from(&f.path));
                 cb(state.clone());
             }
 
-            let path_str = path.to_string_lossy().to_string();
-            seen_paths.insert(path_str.clone());
+            // Batch upsert returns FileIds in same order as input
+            let file_ids = self.db.upsert_files_batch(batch)?;
 
-            // Read file content
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue, // Skip binary/unreadable files
-            };
-
-            // Check if file needs indexing
-            let hash = compute_hash(&content);
-            let needs_index = match self.db.get_file_by_path(&path_str) {
-                Ok(Some((_, existing_content))) => compute_hash(&existing_content) != hash,
-                Ok(None) => true,
-                Err(_) => true,
-            };
-
-            if needs_index {
-                // Index the file
-                let file_id = self.db.upsert_file(&path_str, &content, &hash)?;
-                self.index_trigrams(file_id, &content).execute()?;
-                state.files_indexed += 1;
-            } else {
-                state.files_unchanged += 1;
+            // Update trigram index for each file
+            for (data, file_id) in batch.iter().zip(file_ids) {
+                self.index_trigrams(file_id, &data.content);
             }
+
+            state.files_indexed += batch.len();
+            state.files_processed += batch.len();
         }
 
         // Remove deleted files
-        for path in existing.difference(&seen_paths) {
+        for path in existing_paths.difference(&seen_paths) {
             if self.db.delete_file(path)? {
                 state.files_deleted += 1;
             }
         }
 
+        // Persist trigram index to database if any files were indexed
+        if state.files_indexed > 0 || state.files_deleted > 0 {
+            let entries = {
+                let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
+                trigram.to_db_entries()
+            }; // RwLock read guard dropped before DB write
+            self.db.save_trigrams(&entries)?;
+        }
+
         state.current_file = None;
+        state.files_processed = total;
 
         if let Some(ref cb) = progress {
             cb(state.clone());
@@ -238,8 +295,8 @@ impl Indexer {
         let hash = compute_hash(&content);
         let path_str = path.to_string_lossy().to_string();
 
-        let file_id = self.db.upsert_file(&path_str, &content, &hash)?;
-        self.index_trigrams(file_id, &content).execute()?;
+        let file_id = self.db.upsert_file(&path_str, &content, hash)?;
+        self.index_trigrams(file_id, &content);
 
         Ok(file_id)
     }
@@ -263,20 +320,15 @@ impl Indexer {
 
             let path = entry.path();
 
-            // Check extension
-            if !self.config.extensions.is_empty() {
+            // Check extension using pre-built HashSet (P7: O(1) vs O(n))
+            if !self.extension_set.is_empty() {
                 let ext = path
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
 
-                if !self
-                    .config
-                    .extensions
-                    .iter()
-                    .any(|e| e.to_lowercase() == ext)
-                {
+                if !self.extension_set.contains(&ext) {
                     // Check for extensionless files like Makefile, Dockerfile
                     let filename = path
                         .file_name()
@@ -284,12 +336,7 @@ impl Indexer {
                         .unwrap_or("")
                         .to_lowercase();
 
-                    if !self
-                        .config
-                        .extensions
-                        .iter()
-                        .any(|e| e.to_lowercase() == filename)
-                    {
+                    if !self.extension_set.contains(&filename) {
                         continue;
                     }
                 }
@@ -302,19 +349,21 @@ impl Indexer {
                 }
             }
 
+            // Skip sensitive files (defense-in-depth: prevents .env, credentials, etc. from entering the index)
+            if security::is_sensitive_file(path).is_some() {
+                continue;
+            }
+
             files.push(path.to_path_buf());
         }
 
         Ok(files)
     }
 
-    /// Updates trigram index for a file.
-    fn index_trigrams(&self, file_id: FileId, content: &str) -> IndexTrigrams {
-        IndexTrigrams {
-            trigram: Arc::clone(&self.trigram),
-            file_id,
-            content: content.to_string(),
-        }
+    /// Updates trigram index for a file (P8: inline to avoid content clone).
+    fn index_trigrams(&self, file_id: FileId, content: &str) {
+        let mut trigram = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+        trigram.add_file(file_id, content);
     }
 
     /// Gets indexing statistics.
@@ -328,34 +377,15 @@ impl Indexer {
     /// Panics if the trigram `RwLock` is poisoned (another thread panicked while holding it).
     pub fn stats(&self) -> Result<IndexStats, ServerError> {
         let file_count = self.db.file_count()?;
-        let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
-        let trigram_count = trigram.trigram_count();
+        let trigram_count = {
+            let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
+            trigram.trigram_count()
+        };
 
         Ok(IndexStats {
             file_count,
             trigram_count,
         })
-    }
-}
-
-/// Helper for async trigram indexing.
-struct IndexTrigrams {
-    trigram: Arc<RwLock<TrigramIndex>>,
-    file_id: FileId,
-    content: String,
-}
-
-impl IndexTrigrams {
-    /// Executes trigram indexing for a file.
-    ///
-    /// # Errors
-    ///
-    /// Currently always returns `Ok(())`. The `IndexResult` is for future extensibility.
-    fn execute(self) -> IndexResult<()> {
-        // Lock poisoning recovery: continue with the inner data
-        let mut trigram = self.trigram.write().unwrap_or_else(|e| e.into_inner());
-        trigram.add_file(self.file_id, &self.content);
-        Ok(())
     }
 }
 
@@ -366,22 +396,18 @@ pub struct IndexStats {
     pub trigram_count: usize,
 }
 
-/// Computes SHA256 hash of content.
-fn compute_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(result)
+/// Builds a HashSet of lowercased extensions for O(1) lookup (P7).
+fn build_extension_set(extensions: &[String]) -> HashSet<String> {
+    extensions.iter().map(|e| e.to_lowercase()).collect()
 }
 
-mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
-    }
+/// Computes xxHash (xxh3_64) of content.
+///
+/// xxHash is ~30x faster than SHA256 while providing
+/// sufficient collision resistance for file change detection.
+#[inline]
+fn compute_hash(content: &str) -> u64 {
+    xxh3_64(content.as_bytes())
 }
 
 #[cfg(test)]
@@ -406,7 +432,7 @@ mod tests {
         let (dir, db, trigram) = setup_test_env();
         let indexer = Indexer::new(db.clone(), trigram, dir.path().to_path_buf());
 
-        let progress = indexer.index(None).unwrap();
+        let progress = indexer.index(None, false).unwrap();
         assert_eq!(progress.files_indexed, 2);
         assert_eq!(db.file_count().unwrap(), 2);
     }
@@ -417,11 +443,11 @@ mod tests {
         let indexer = Indexer::new(db.clone(), trigram, dir.path().to_path_buf());
 
         // First index
-        let progress1 = indexer.index(None).unwrap();
+        let progress1 = indexer.index(None, false).unwrap();
         assert_eq!(progress1.files_indexed, 2);
 
         // Second index (no changes)
-        let progress2 = indexer.index(None).unwrap();
+        let progress2 = indexer.index(None, false).unwrap();
         assert_eq!(progress2.files_indexed, 0);
         assert_eq!(progress2.files_unchanged, 2);
 
@@ -433,7 +459,7 @@ mod tests {
         .unwrap();
 
         // Third index (one change)
-        let progress3 = indexer.index(None).unwrap();
+        let progress3 = indexer.index(None, false).unwrap();
         assert_eq!(progress3.files_indexed, 1);
         assert_eq!(progress3.files_unchanged, 1);
     }

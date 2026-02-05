@@ -56,15 +56,24 @@ impl TrigramIndex {
             return None; // Query too short for trigram filtering
         }
 
-        // Start with first trigram's files
-        let mut result = self.index.get(&trigrams[0])?.clone();
-
-        // AND with remaining trigrams
-        for trigram in &trigrams[1..] {
+        // Collect bitmaps and check for missing trigrams
+        let mut bitmaps: Vec<&RoaringBitmap> = Vec::with_capacity(trigrams.len());
+        for trigram in &trigrams {
             if let Some(bitmap) = self.index.get(trigram) {
-                result &= bitmap;
+                bitmaps.push(bitmap);
             } else {
                 return Some(RoaringBitmap::new()); // No files have this trigram
+            }
+        }
+
+        // Start with smallest bitmap (P9: cheapest clone, fastest AND chain)
+        bitmaps.sort_by_key(|b| b.len());
+        let mut result = bitmaps[0].clone();
+
+        for bitmap in &bitmaps[1..] {
+            result &= *bitmap;
+            if result.is_empty() {
+                break; // Early exit: no files match all trigrams
             }
         }
 
@@ -119,6 +128,44 @@ impl TrigramIndex {
     /// Sets a trigram's bitmap directly (for loading from DB).
     pub fn set_trigram(&mut self, trigram: Trigram, bitmap: RoaringBitmap) {
         self.index.insert(trigram, bitmap);
+    }
+
+    /// Serializes the entire index to database-compatible entries.
+    ///
+    /// Each entry is a tuple of (trigram_bytes, serialized_bitmap).
+    /// This is used to persist the index to the database.
+    #[must_use]
+    pub fn to_db_entries(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.index
+            .iter()
+            .map(|(trigram, bitmap)| (trigram.as_bytes().to_vec(), Self::bitmap_to_bytes(bitmap)))
+            .collect()
+    }
+
+    /// Loads the index from database entries.
+    ///
+    /// Takes an iterator of (trigram_bytes, serialized_bitmap) tuples.
+    /// Invalid entries are silently skipped.
+    pub fn from_db_entries<I>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
+    {
+        let mut index = AHashMap::new();
+
+        for (trigram_bytes, bitmap_bytes) in entries {
+            // Trigram must be exactly 3 bytes
+            if trigram_bytes.len() != 3 {
+                continue;
+            }
+
+            let trigram = Trigram([trigram_bytes[0], trigram_bytes[1], trigram_bytes[2]]);
+
+            if let Some(bitmap) = Self::bitmap_from_bytes(&bitmap_bytes) {
+                index.insert(trigram, bitmap);
+            }
+        }
+
+        Self { index }
     }
 }
 

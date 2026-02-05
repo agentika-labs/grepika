@@ -278,7 +278,7 @@ fn test_validate_token_expired() {
         db.upsert_file(
             full_path.to_string_lossy().as_ref(),
             content,
-            &format!("hash_{}", path.replace('/', "_")),
+            xxhash_rust::xxh3::xxh3_64(content.as_bytes()),
         )
         .expect("Failed to insert file");
     }
@@ -324,18 +324,21 @@ fn measure_agentika_search(service: &SearchService, query: &str, limit: usize) -
                 path: relative_path,
                 score: r.score.as_f64(),
                 sources,
+                snippets: Vec::new(),
             }
         })
         .collect();
 
-    let total = items.len();
+    let total_returned = items.len();
     let output = SearchOutput {
         results: items,
-        total,
+        total_returned,
+        has_more: false,
         query: query.to_string(),
+        score_guide: "Scores: 0.0-1.0 scale. >0.7 excellent, 0.4-0.7 good, <0.4 weak",
     };
 
-    TokenMetrics::from_output(&output, output.total, output.total)
+    TokenMetrics::from_output(&output, output.total_returned, output.total_returned)
 }
 
 // ============================================================================

@@ -41,8 +41,19 @@ pub struct IndexOutput {
 /// # Errors
 ///
 /// Returns an error string if indexing fails.
-pub fn execute_index(indexer: &Indexer, _input: IndexInput) -> Result<IndexOutput, String> {
-    let progress = indexer.index(None).map_err(|e| e.to_string())?;
+pub fn execute_index(indexer: &Indexer, input: IndexInput) -> Result<IndexOutput, String> {
+    // Wire up progress callback for stderr logging
+    let progress_cb: Option<crate::services::indexer::ProgressCallback> =
+        Some(Box::new(|p: crate::services::indexer::IndexProgress| {
+            eprintln!(
+                "[INDEX] {}/{} files processed, {} indexed",
+                p.files_processed, p.files_total, p.files_indexed
+            );
+        }));
+
+    let progress = indexer
+        .index(progress_cb, input.force)
+        .map_err(|e| e.to_string())?;
 
     let message = if progress.files_indexed > 0 || progress.files_deleted > 0 {
         format!(

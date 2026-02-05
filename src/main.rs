@@ -24,7 +24,7 @@ struct Cli {
     #[arg(long, default_value = ".")]
     root: PathBuf,
 
-    /// Database path (default: <root>/.agentika-grep/index.db)
+    /// Database path (default: ~/.cache/agentika-grep/<hash>.db)
     #[arg(long)]
     db: Option<PathBuf>,
 
@@ -130,18 +130,30 @@ async fn run_cli(root: PathBuf, db: Option<PathBuf>, cmd: Commands) -> anyhow::R
     use std::sync::Arc;
     use std::sync::RwLock;
 
-    // Initialize database
-    let db_path = db.unwrap_or_else(|| root.join(".agentika-grep").join("index.db"));
+    // Initialize database - use global cache location by default
+    let db_path = db.unwrap_or_else(|| agentika_grep::default_db_path(&root));
     std::fs::create_dir_all(db_path.parent().unwrap())?;
     let database = Arc::new(Database::open(&db_path)?);
 
+    // Load trigram index from database (if previously persisted)
+    let trigram = match database.load_all_trigrams() {
+        Ok(entries) if !entries.is_empty() => {
+            tracing::info!("Loaded {} trigrams from database", entries.len());
+            Arc::new(RwLock::new(TrigramIndex::from_db_entries(entries)))
+        }
+        Ok(_) => Arc::new(RwLock::new(TrigramIndex::new())),
+        Err(_) => Arc::new(RwLock::new(TrigramIndex::new())),
+    };
+
     // Initialize services
-    let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
     let search = Arc::new(SearchService::new(Arc::clone(&database), root.clone())?);
-    let indexer = Indexer::new(Arc::clone(&database), trigram, root.clone());
+    let indexer = Indexer::new(Arc::clone(&database), Arc::clone(&trigram), root);
 
     match cmd {
         Commands::Search { query, limit, mode } => {
+            let mode: agentika_grep::tools::SearchMode = mode
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
             let input = agentika_grep::tools::SearchInput { query, limit, mode };
             let result = agentika_grep::tools::execute_search(&search, input)
                 .map_err(|e| anyhow::anyhow!(e))?;

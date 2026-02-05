@@ -73,6 +73,14 @@ impl SecurityError {
 /// assert!(validate_path(root, "src/../../etc/passwd").is_err());
 /// ```
 pub fn validate_path(root: &Path, user_path: &str) -> Result<PathBuf, SecurityError> {
+    // Reject null bytes (defense-in-depth against C-level string truncation)
+    if user_path.contains('\0') {
+        return Err(SecurityError::PathTraversal {
+            attempted: user_path.replace('\0', "\\0"),
+            root: root.to_path_buf(),
+        });
+    }
+
     let user_path_obj = Path::new(user_path);
 
     // Reject absolute paths immediately
@@ -370,6 +378,14 @@ pub fn is_sensitive_file(path: &Path) -> Option<&'static str> {
 ///
 /// This combines path traversal validation and sensitive file checking.
 pub fn validate_read_access(root: &Path, user_path: &str) -> Result<PathBuf, SecurityError> {
+    // Reject null bytes (belt-and-suspenders with validate_path)
+    if user_path.contains('\0') {
+        return Err(SecurityError::PathTraversal {
+            attempted: user_path.replace('\0', "\\0"),
+            root: root.to_path_buf(),
+        });
+    }
+
     // First validate path traversal
     let resolved = validate_path(root, user_path)?;
 
@@ -455,7 +471,7 @@ pub fn validate_regex_pattern(pattern: &str) -> Result<(), SecurityError> {
 fn count_nesting_depth(pattern: &str) -> usize {
     let mut max_depth: usize = 0;
     let mut current_depth: usize = 0;
-    let mut chars = pattern.chars().peekable();
+    let mut chars = pattern.chars();
 
     while let Some(c) = chars.next() {
         match c {
@@ -582,6 +598,19 @@ mod tests {
         );
         // Parent escaping root results in just ".."
         assert_eq!(normalize_path(Path::new("../foo")), Path::new("../foo"));
+    }
+
+    #[test]
+    fn test_null_byte_rejected() {
+        let root = Path::new("/project");
+
+        // Null byte in path should be rejected
+        assert!(validate_path(root, "file.txt\0../../etc/passwd").is_err());
+        assert!(validate_path(root, "\0").is_err());
+        assert!(validate_path(root, "src/\0main.rs").is_err());
+
+        // validate_read_access also rejects null bytes
+        assert!(validate_read_access(root, "file.txt\0").is_err());
     }
 
     // Sensitive file detection tests

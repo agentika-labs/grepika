@@ -12,9 +12,23 @@ use crate::security;
 use crate::services::SearchService;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::Arc;
+
+/// Wraps file content in boundary markers to help LLM consumers distinguish
+/// tool metadata from untrusted file content (prompt injection defense).
+fn mark_content_boundary(content: &str, path: &str) -> String {
+    format!(
+        "--- BEGIN FILE CONTENT: {path} ---\n{content}\n--- END FILE CONTENT: {path} ---"
+    )
+}
+
+/// Files larger than this threshold use streaming reads.
+/// Below this threshold, loading the entire file is actually faster
+/// due to fewer syscalls and simpler memory allocation patterns.
+const STREAMING_THRESHOLD: u64 = 100 * 1024; // 100KB
 
 /// Input for the get tool (retrieves file content).
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -66,27 +80,16 @@ pub fn execute_get(service: &Arc<SearchService>, input: GetInput) -> Result<GetO
     let full_path = security::validate_read_access(service.root(), &input.path)
         .map_err(|e| e.to_string())?;
 
-    let content =
-        fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len();
-
-    let start = input.start_line.saturating_sub(1).min(total_lines);
-    let end = if input.end_line == 0 {
-        total_lines
-    } else {
-        input.end_line.min(total_lines)
-    };
-
-    let selected_content = lines[start..end].join("\n");
+    // Use streaming for large files to avoid loading entire file into memory
+    let (content, total_lines, start_line, end_line) =
+        read_line_range(&full_path, input.start_line, input.end_line)?;
 
     Ok(GetOutput {
-        path: input.path,
-        content: selected_content,
+        path: input.path.clone(),
+        content: mark_content_boundary(&content, &input.path),
         total_lines,
-        start_line: start + 1,
-        end_line: end,
+        start_line,
+        end_line,
     })
 }
 
@@ -115,8 +118,11 @@ pub struct Symbol {
     pub name: String,
     /// Symbol kind (function, class, struct, etc.)
     pub kind: String,
-    /// Line number
+    /// Start line number
     pub line: usize,
+    /// End line number (if detectable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<usize>,
     /// Indentation level
     pub level: usize,
 }
@@ -279,18 +285,12 @@ pub fn execute_context(
     let full_path = security::validate_read_access(service.root(), &input.path)
         .map_err(|e| e.to_string())?;
 
-    let content =
-        fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let total = lines.len();
-
-    let center = input.line.saturating_sub(1).min(total.saturating_sub(1));
-    let start = center.saturating_sub(input.context_lines);
-    let end = (center + input.context_lines + 1).min(total);
+    // Use streaming for large files to avoid loading entire file into memory
+    let (lines, _total, start, end) =
+        read_context_streaming(&full_path, input.line, input.context_lines)?;
 
     // Format with line numbers
-    let formatted: Vec<String> = lines[start..end]
+    let formatted: Vec<String> = lines
         .iter()
         .enumerate()
         .map(|(i, line)| {
@@ -300,9 +300,10 @@ pub fn execute_context(
         })
         .collect();
 
+    let content = formatted.join("\n");
     Ok(ContextOutput {
-        path: input.path,
-        content: formatted.join("\n"),
+        path: input.path.clone(),
+        content: mark_content_boundary(&content, &input.path),
         start_line: start + 1,
         end_line: end,
         center_line: input.line,
@@ -310,6 +311,150 @@ pub fn execute_context(
 }
 
 // Helper functions
+
+/// Reads a line range from a file using streaming for large files.
+///
+/// For files over `STREAMING_THRESHOLD`, this uses `BufReader` to avoid
+/// loading the entire file into memory. For smaller files, it falls back
+/// to the simpler read-all approach which is actually faster due to
+/// fewer syscalls.
+///
+/// Returns `(content, total_lines, actual_start, actual_end)`.
+fn read_line_range(
+    path: &Path,
+    start_line: usize,
+    end_line: usize,
+) -> Result<(String, usize, usize, usize), String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {e}"))?;
+
+    if metadata.len() > STREAMING_THRESHOLD {
+        read_line_range_streaming(path, start_line, end_line)
+    } else {
+        read_line_range_full(path, start_line, end_line)
+    }
+}
+
+/// Streaming implementation for large files.
+fn read_line_range_streaming(
+    path: &Path,
+    start_line: usize,
+    end_line: usize,
+) -> Result<(String, usize, usize, usize), String> {
+    let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+    let reader = BufReader::new(file);
+
+    let mut selected = Vec::new();
+    let mut total_lines = 0;
+
+    // Convert to 0-indexed
+    let start = start_line.saturating_sub(1);
+    let end = if end_line == 0 { usize::MAX } else { end_line };
+
+    for (i, line_result) in reader.lines().enumerate() {
+        total_lines = i + 1;
+        let line_num = i + 1; // 1-indexed
+
+        if line_num > start && line_num <= end {
+            let line = line_result.map_err(|e| format!("Failed to read line: {e}"))?;
+            selected.push(line);
+        }
+        // Continue iterating to get accurate total_lines count
+    }
+
+    let actual_start = start.min(total_lines.saturating_sub(1)) + 1;
+    let actual_end = end.min(total_lines);
+
+    Ok((selected.join("\n"), total_lines, actual_start, actual_end))
+}
+
+/// Full-file read for small files (faster due to fewer syscalls).
+fn read_line_range_full(
+    path: &Path,
+    start_line: usize,
+    end_line: usize,
+) -> Result<(String, usize, usize, usize), String> {
+    let content = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len();
+
+    let start = start_line.saturating_sub(1).min(total_lines);
+    let end = if end_line == 0 {
+        total_lines
+    } else {
+        end_line.min(total_lines)
+    };
+
+    let selected_content = lines[start..end].join("\n");
+
+    Ok((selected_content, total_lines, start + 1, end))
+}
+
+/// Reads context around a line using streaming for large files.
+fn read_context_streaming(
+    path: &Path,
+    center_line: usize,
+    context_lines: usize,
+) -> Result<(Vec<String>, usize, usize, usize), String> {
+    let metadata = fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {e}"))?;
+
+    if metadata.len() > STREAMING_THRESHOLD {
+        read_context_streaming_impl(path, center_line, context_lines)
+    } else {
+        read_context_full(path, center_line, context_lines)
+    }
+}
+
+/// Streaming implementation for context reading.
+fn read_context_streaming_impl(
+    path: &Path,
+    center_line: usize,
+    context_lines: usize,
+) -> Result<(Vec<String>, usize, usize, usize), String> {
+    let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+    let reader = BufReader::new(file);
+
+    let center = center_line.saturating_sub(1);
+    let start = center.saturating_sub(context_lines);
+    let end_target = center + context_lines + 1;
+
+    let mut lines_buffer = Vec::new();
+    let mut total_lines = 0;
+
+    for (i, line_result) in reader.lines().enumerate() {
+        total_lines = i + 1;
+        let line_num = i; // 0-indexed for comparison
+
+        if line_num >= start && line_num < end_target {
+            let line = line_result.map_err(|e| format!("Failed to read line: {e}"))?;
+            lines_buffer.push(line);
+        }
+    }
+
+    let actual_end = end_target.min(total_lines);
+
+    Ok((lines_buffer, total_lines, start, actual_end))
+}
+
+/// Full-file read for context (small files).
+fn read_context_full(
+    path: &Path,
+    center_line: usize,
+    context_lines: usize,
+) -> Result<(Vec<String>, usize, usize, usize), String> {
+    let content = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total = lines.len();
+
+    let center = center_line.saturating_sub(1).min(total.saturating_sub(1));
+    let start = center.saturating_sub(context_lines);
+    let end = (center + context_lines + 1).min(total);
+
+    let selected: Vec<String> = lines[start..end].iter().map(|s| (*s).to_string()).collect();
+
+    Ok((selected, total, start, end))
+}
 
 fn detect_file_type(path: &Path) -> String {
     path.extension()
@@ -319,18 +464,35 @@ fn detect_file_type(path: &Path) -> String {
 }
 
 fn extract_symbols(content: &str, file_type: &str) -> Vec<Symbol> {
+    let lines: Vec<&str> = content.lines().collect();
     let mut symbols = Vec::new();
 
-    for (line_num, line) in content.lines().enumerate() {
+    for (line_num, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
         let indent = line.len() - line.trim_start().len();
         let level = indent / 4; // Assume 4-space indentation
 
         let symbol = match file_type {
-            "rs" => extract_rust_symbol(trimmed, line_num + 1, level),
-            "py" => extract_python_symbol(trimmed, line_num + 1, level),
-            "js" | "ts" | "jsx" | "tsx" => extract_js_symbol(trimmed, line_num + 1, level),
-            "go" => extract_go_symbol(trimmed, line_num + 1, level),
+            "rs" | "go" | "js" | "ts" | "jsx" | "tsx" => {
+                let raw = match file_type {
+                    "rs" => extract_rust_symbol(trimmed, line_num + 1, level),
+                    "go" => extract_go_symbol(trimmed, line_num + 1, level),
+                    _ => extract_js_symbol(trimmed, line_num + 1, level),
+                };
+                // Compute end_line via brace tracking for brace-delimited languages
+                raw.map(|mut s| {
+                    s.end_line = find_brace_end(&lines, line_num);
+                    s
+                })
+            }
+            "py" => {
+                let raw = extract_python_symbol(trimmed, line_num + 1, level);
+                // Compute end_line via indent tracking for Python
+                raw.map(|mut s| {
+                    s.end_line = find_indent_end(&lines, line_num, indent);
+                    s
+                })
+            }
             _ => None,
         };
 
@@ -340,6 +502,55 @@ fn extract_symbols(content: &str, file_type: &str) -> Vec<Symbol> {
     }
 
     symbols
+}
+
+/// Finds the closing brace for a symbol starting at `start_line` (0-indexed).
+/// Returns the 1-indexed line number of the closing brace, or None.
+fn find_brace_end(lines: &[&str], start_line: usize) -> Option<usize> {
+    let mut depth: i32 = 0;
+    let mut found_open = false;
+
+    for (i, line) in lines.iter().enumerate().skip(start_line) {
+        for ch in line.chars() {
+            if ch == '{' {
+                depth += 1;
+                found_open = true;
+            } else if ch == '}' {
+                depth -= 1;
+                if found_open && depth == 0 {
+                    return Some(i + 1); // 1-indexed
+                }
+            }
+        }
+        // If we found the opening brace but are past it and depth is back to 0
+        if found_open && depth == 0 {
+            return Some(i + 1);
+        }
+    }
+
+    None
+}
+
+/// Finds the end of an indentation block for Python (0-indexed start line).
+/// Returns the 1-indexed line number of the last line in the block.
+fn find_indent_end(lines: &[&str], start_line: usize, base_indent: usize) -> Option<usize> {
+    let mut last_content_line = start_line;
+
+    for (i, line) in lines.iter().enumerate().skip(start_line + 1) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue; // Skip blank lines
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent <= base_indent {
+            // We've exited the block
+            return Some(last_content_line + 1); // 1-indexed
+        }
+        last_content_line = i;
+    }
+
+    // Block extends to end of file
+    Some(last_content_line + 1)
 }
 
 fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol> {
@@ -354,6 +565,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             name,
             kind: "function".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -371,6 +583,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             name,
             kind: "struct".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -386,6 +599,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             name,
             kind: "enum".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -405,6 +619,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             name,
             kind: "impl".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -422,6 +637,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             name,
             kind: "trait".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -439,6 +655,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             name,
             kind: "module".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -457,6 +674,7 @@ fn extract_python_symbol(line: &str, line_num: usize, level: usize) -> Option<Sy
             name,
             kind: "function".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -473,6 +691,7 @@ fn extract_python_symbol(line: &str, line_num: usize, level: usize) -> Option<Sy
             name,
             kind: "class".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -487,6 +706,7 @@ fn extract_python_symbol(line: &str, line_num: usize, level: usize) -> Option<Sy
             name,
             kind: "async_function".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -510,6 +730,7 @@ fn extract_js_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             name,
             kind: "function".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -525,6 +746,7 @@ fn extract_js_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             name,
             kind: "class".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -543,6 +765,7 @@ fn extract_js_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             name,
             kind: "function".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -568,6 +791,7 @@ fn extract_go_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             name,
             kind: "function".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -582,6 +806,7 @@ fn extract_go_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             name,
             kind: "struct".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }
@@ -596,6 +821,7 @@ fn extract_go_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             name,
             kind: "interface".to_string(),
             line: line_num,
+            end_line: None,
             level,
         });
     }

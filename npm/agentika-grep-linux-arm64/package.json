@@ -1,0 +1,15 @@
+{
+  "name": "@agentika/agentika-grep-linux-arm64",
+  "version": "0.0.0",
+  "description": "agentika-grep binary for Linux ARM64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentika/agentika-grep"
+  },
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "files": [
+    "bin/"
+  ]
+}

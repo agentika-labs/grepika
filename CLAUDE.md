@@ -69,7 +69,7 @@ SQLite + r2d2 pool         ← .agentika-grep/index.db
 | `services/fts.rs` | FTS5 BM25 search |
 | `services/grep.rs` | Parallel grep with ripgrep crates |
 | `services/trigram.rs` | In-memory trigram index (RoaringBitmap) |
-| `services/indexer.rs` | Incremental indexing with SHA256 change detection |
+| `services/indexer.rs` | Incremental indexing with xxHash change detection |
 | `db/mod.rs` | Database with r2d2 pool and FTS5 queries |
 | `db/schema.rs` | SQLite schema (files, files_fts, trigrams tables) |
 | `tools/*.rs` | MCP tool input/output types and executors |
@@ -92,9 +92,15 @@ SQLite + r2d2 pool         ← .agentika-grep/index.db
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
 
+## Verification
+
+- **Always use `--all-targets` for final clippy**: `cargo test` does not compile benchmark files (`benches/`). When refactoring function signatures in library code, bench files are easy to overlook. Use `cargo clippy --all-targets` or `cargo bench` to catch mismatches.
+
 ## Critical Notes
 
 - **Logging must go to stderr**: stdout is reserved for JSON-RPC in MCP mode
-- Index stored at `<root>/.agentika-grep/index.db` by default
+- Index stored at `~/.cache/agentika-grep/<hash>.db` by default (not in the project directory)
+- The `--db` flag can override the default index location
 - Gitignore patterns are respected during indexing
 - Max file size for indexing: 1MB (configurable in `IndexConfig`)
+- Trigram index is persisted to database and loaded on startup

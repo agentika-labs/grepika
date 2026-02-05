@@ -57,7 +57,7 @@ impl TestEnv {
     /// Indexes all files in the test directory.
     pub fn index_all(&self) {
         let indexer = self.indexer();
-        indexer.index(None).expect("Failed to index files");
+        indexer.index(None, false).expect("Failed to index files");
     }
 
     /// Gets the full path to a file in the test directory.

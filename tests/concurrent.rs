@@ -38,7 +38,7 @@ struct Struct{i} {{
         db.upsert_file(
             dir.path().join(&filename).to_string_lossy().as_ref(),
             &content,
-            &format!("hash{}", i),
+            i as u64,
         )
         .unwrap();
     }
@@ -160,7 +160,7 @@ fn test_concurrent_database_reads() {
 
     // Insert initial data
     for i in 0..10 {
-        db.upsert_file(&format!("file_{}.rs", i), "content", &format!("hash{}", i))
+        db.upsert_file(&format!("file_{}.rs", i), "content", i as u64)
             .unwrap();
     }
 
@@ -190,7 +190,7 @@ fn test_concurrent_database_file_lookups() {
     let mut file_ids = Vec::new();
     for i in 0..10 {
         let id = db
-            .upsert_file(&format!("file_{}.rs", i), "content", &format!("hash{}", i))
+            .upsert_file(&format!("file_{}.rs", i), "content", i as u64)
             .unwrap();
         file_ids.push(id);
     }
@@ -316,7 +316,7 @@ fn test_search_during_indexing() {
         db.upsert_file(
             dir.path().join(&filename).to_string_lossy().as_ref(),
             &content,
-            &format!("hash{}", i),
+            i as u64,
         )
         .unwrap();
     }
@@ -336,7 +336,7 @@ fn test_search_during_indexing() {
     let indexer_dir = dir.path().to_path_buf();
     let indexer_handle = thread::spawn(move || {
         let indexer = Indexer::new(indexer_db, indexer_trigram, indexer_dir);
-        indexer.index(None).unwrap()
+        indexer.index(None, false).unwrap()
     });
 
     // Perform searches while indexing
@@ -406,7 +406,7 @@ fn test_database_connection_pool_under_load() {
         db.upsert_file(
             &format!("stress_file_{}.rs", i),
             &format!("fn stress_{}() {{}}", i),
-            &format!("hash{}", i),
+            i as u64,
         )
         .unwrap();
     }
@@ -451,7 +451,7 @@ fn test_concurrent_tool_execution() {
         db.upsert_file(
             dir.path().join(&filename).to_string_lossy().as_ref(),
             &content,
-            &format!("hash{}", i),
+            i as u64,
         )
         .unwrap();
     }
@@ -469,7 +469,7 @@ fn test_concurrent_tool_execution() {
                             let input = SearchInput {
                                 query: "function".to_string(),
                                 limit: 10,
-                                mode: "combined".to_string(),
+                                mode: SearchMode::Combined,
                             };
                             let _ = execute_search(&search, input);
                         }

@@ -4,23 +4,53 @@ use crate::error::DbResult;
 use rusqlite::Connection;
 
 /// Current schema version for migrations.
-pub const SCHEMA_VERSION: u32 = 1;
+/// v2: Changed hash from TEXT (SHA256 hex) to INTEGER (xxHash u64)
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Initializes the database schema.
+///
+/// Handles schema versioning - if an older schema version exists,
+/// drops all tables and recreates them with the new schema.
 ///
 /// # Errors
 ///
 /// Returns `DbError::Sqlite` if schema creation fails.
 pub fn init_schema(conn: &Connection) -> DbResult<()> {
+    // Check existing schema version
+    let existing_version: Option<u32> = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM schema_info WHERE key = 'version'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    match existing_version {
+        Some(v) if v >= SCHEMA_VERSION => return Ok(()), // Already up to date
+        Some(_) => {
+            // Old version - drop everything and recreate
+            conn.execute_batch(
+                r"
+                DROP TABLE IF EXISTS files;
+                DROP TABLE IF EXISTS files_fts;
+                DROP TABLE IF EXISTS trigrams;
+                DROP TABLE IF EXISTS schema_info;
+                ",
+            )?;
+        }
+        None => {} // Fresh database
+    }
+
     conn.execute_batch(
         r#"
         -- Main files table
+        -- hash is INTEGER (xxHash u64) for fast change detection
         CREATE TABLE IF NOT EXISTS files (
             file_id INTEGER PRIMARY KEY AUTOINCREMENT,
             path TEXT NOT NULL UNIQUE,
             filename TEXT NOT NULL,
             content TEXT NOT NULL,
-            hash TEXT NOT NULL,
+            hash INTEGER NOT NULL,
             indexed_at TEXT NOT NULL,
             size_bytes INTEGER GENERATED ALWAYS AS (length(content)) STORED
         );
@@ -74,7 +104,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         ) WITHOUT ROWID;
 
         INSERT OR REPLACE INTO schema_info (key, value)
-        VALUES ('version', '1');
+        VALUES ('version', '2');
         "#,
     )?;
 

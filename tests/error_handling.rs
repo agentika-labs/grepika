@@ -25,7 +25,7 @@ fn test_search_invalid_regex_pattern() {
     db.upsert_file(
         dir.path().join("test.rs").to_string_lossy().as_ref(),
         "fn main() {}",
-        "hash1",
+        0x1,
     )
     .unwrap();
 
@@ -165,7 +165,7 @@ fn test_indexer_skips_binary_files() {
     let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
     let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
 
-    let progress = indexer.index(None).unwrap();
+    let progress = indexer.index(None, false).unwrap();
 
     // Should only index the text file (binary should be skipped due to extension filter)
     // Note: .dat is not in the default extensions list
@@ -208,7 +208,15 @@ fn test_get_empty_file() {
     };
 
     let result = execute_get(&search, input).unwrap();
-    assert!(result.content.is_empty());
+    // Content has boundary markers even for empty files
+    assert!(
+        result.content.contains("--- BEGIN FILE CONTENT: empty.txt ---"),
+        "Should have begin marker"
+    );
+    assert!(
+        result.content.contains("--- END FILE CONTENT: empty.txt ---"),
+        "Should have end marker"
+    );
     assert_eq!(result.total_lines, 0);
 }
 
@@ -293,7 +301,7 @@ fn greet_japanese() {
     db.upsert_file(
         dir.path().join("unicode.rs").to_string_lossy().as_ref(),
         unicode_content,
-        "hash1",
+        0x1,
     )
     .unwrap();
 
@@ -335,7 +343,7 @@ fn test_indexer_skips_large_files() {
     let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
     let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
 
-    let progress = indexer.index(None).unwrap();
+    let progress = indexer.index(None, false).unwrap();
 
     // Large file should be skipped
     assert_eq!(progress.files_indexed, 1, "Should only index the normal file");
@@ -348,7 +356,7 @@ fn test_indexer_skips_large_files() {
 #[test]
 fn test_fts_special_characters_in_query() {
     let db = Database::in_memory().unwrap();
-    db.upsert_file("test.rs", "fn test() { foo() }", "hash1")
+    db.upsert_file("test.rs", "fn test() { foo() }", 0x1)
         .unwrap();
 
     // FTS5 special characters should be escaped by preprocess_query
@@ -506,7 +514,7 @@ fn test_indexer_symlink_handling() {
     let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
 
     // Default config doesn't follow symlinks
-    let progress = indexer.index(None).unwrap();
+    let progress = indexer.index(None, false).unwrap();
 
     // Should only index the real file, not the symlink
     assert_eq!(progress.files_indexed, 1);
