@@ -166,6 +166,18 @@ impl fmt::Display for Trigram {
     }
 }
 
+// Compile-time assertions for thread safety.
+// These ensure Send+Sync remain implemented and catch regressions.
+#[cfg(test)]
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+
+    // Core newtypes
+    assert_send_sync::<FileId>();
+    assert_send_sync::<Score>();
+    assert_send_sync::<Trigram>();
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

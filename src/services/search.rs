@@ -58,6 +58,11 @@ impl Default for SearchConfig {
 }
 
 /// Combined search service.
+///
+/// Thread-safe (Send + Sync) via internal synchronization:
+/// - `Database`: Uses r2d2 connection pool for thread-safe SQLite access
+/// - `TrigramIndex`: Wrapped in `Arc<RwLock<_>>` for concurrent read/write
+/// - `FtsService` and `GrepService`: Stateless or internally synchronized
 pub struct SearchService {
     db: Arc<Database>,
     fts: FtsService,
@@ -202,7 +207,10 @@ impl SearchService {
         trigram: Option<roaring::RoaringBitmap>,
         limit: usize,
     ) -> Result<Vec<SearchResult>, SearchError> {
-        let mut scores: HashMap<FileId, (Score, SearchSources, PathBuf)> = HashMap::new();
+        // Pre-allocate with estimated capacity from input sizes
+        let estimated_capacity = fts.len() + grep.len();
+        let mut scores: HashMap<FileId, (Score, SearchSources, PathBuf)> =
+            HashMap::with_capacity(estimated_capacity);
 
         // Add FTS results
         for (file_id, score) in fts {
@@ -297,6 +305,18 @@ impl SearchService {
         Ok(enriched)
     }
 }
+
+// Compile-time assertions for thread safety.
+// These ensure Send+Sync remain implemented and catch regressions.
+#[cfg(test)]
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<SearchService>();
+    assert_send_sync::<SearchResult>();
+    assert_send_sync::<SearchSources>();
+    assert_send_sync::<SearchConfig>();
+};
 
 #[cfg(test)]
 mod tests {

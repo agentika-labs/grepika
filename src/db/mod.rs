@@ -16,6 +16,8 @@ use std::path::Path;
 ///
 /// Uses r2d2 because `rusqlite::Connection` is NOT Sync.
 /// The pool manages thread-safe access to `SQLite` connections.
+///
+/// Thread-safe (Send + Sync) via r2d2's internal synchronization.
 pub struct Database {
     pool: Pool<SqliteConnectionManager>,
 }
@@ -257,6 +259,13 @@ impl Database {
         Ok(rows > 0)
     }
 }
+
+// Compile-time assertion for thread safety.
+#[cfg(test)]
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Database>();
+};
 
 #[cfg(test)]
 mod tests {

@@ -12,6 +12,9 @@ use roaring::RoaringBitmap;
 ///
 /// Each trigram maps to a bitmap of file IDs containing it.
 /// Substring search ANDs all trigram bitmaps together.
+///
+/// Thread-safe (Send + Sync) when wrapped in appropriate synchronization
+/// primitives (e.g., `Arc<RwLock<TrigramIndex>>`).
 #[derive(Default)]
 pub struct TrigramIndex {
     /// Trigram -> FileIds containing this trigram
@@ -127,6 +130,13 @@ impl std::fmt::Debug for TrigramIndex {
             .finish()
     }
 }
+
+// Compile-time assertion for thread safety.
+#[cfg(test)]
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<TrigramIndex>();
+};
 
 #[cfg(test)]
 mod tests {
