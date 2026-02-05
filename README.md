@@ -43,6 +43,16 @@ tar -czvf agentika-grep-macos-arm64.tar.gz \
   -C target/aarch64-apple-darwin/release agentika-grep
 ```
 
+# Extract the archive
+```bash
+tar -xzvf agentika-grep-macos.tar.gz
+```
+
+# Remove quarantine attribute (run BEFORE first execution)
+```bash
+xattr -d com.apple.quarantine agentika-grep
+```
+
 ## Quick Start
 
 ```bash
