@@ -80,7 +80,8 @@ pub fn init_profiling(path: Option<&std::path::Path>) {
 /// - `CallToolResult::error()` with error details for tool errors
 /// - `rmcp::Error::internal_error()` for panics/JoinErrors
 ///
-/// When the `profiling` feature is enabled, logs timing and memory usage to stderr.
+/// When the `profiling` feature is enabled, logs timing, memory usage, and
+/// estimated token count to stderr.
 #[cfg(feature = "profiling")]
 async fn run_tool<T, E, F>(name: &'static str, f: F) -> Result<CallToolResult, rmcp::Error>
 where
@@ -97,19 +98,29 @@ where
     let mem_after = profiling::get_memory_mb();
     let mem_delta = mem_after - mem_before;
 
-    // Log to file or stderr
-    profiling::log(&format!(
-        "[{}] {:?} | mem: {:.1}MB ({:+.1}MB)",
-        name, elapsed, mem_after, mem_delta
-    ));
-
     match result {
         Ok(Ok(output)) => {
             let json = serde_json::to_string_pretty(&output)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
+
+            // Token estimation (~4 bytes per token for code/text)
+            let bytes = json.len();
+            let tokens = (bytes + 2) / 4; // Rounded division
+
+            profiling::log(&format!(
+                "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ~{} tokens ({:.1}KB)",
+                name, elapsed, mem_after, mem_delta, tokens, bytes as f64 / 1024.0
+            ));
+
             Ok(CallToolResult::success(vec![Content::text(json)]))
         }
-        Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
+        Ok(Err(e)) => {
+            profiling::log(&format!(
+                "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
+                name, elapsed, mem_after, mem_delta
+            ));
+            Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
+        }
         Err(e) => Err(rmcp::Error::internal_error(e.to_string(), None)),
     }
 }
