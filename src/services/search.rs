@@ -120,12 +120,22 @@ impl Default for SearchConfig {
     }
 }
 
+/// Bidirectional path↔FileId cache.
+///
+/// `Arc<str>` is shared between both maps — one heap allocation per path.
+/// Cloning `Arc<str>` is a pointer bump (atomic increment), not a heap alloc.
+struct PathCache {
+    id_to_path: HashMap<FileId, Arc<str>>,
+    path_to_id: HashMap<Arc<str>, FileId>,
+}
+
 /// Combined search service.
 ///
 /// Thread-safe (Send + Sync) via internal synchronization:
 /// - `Database`: Uses r2d2 connection pool for thread-safe SQLite access
 /// - `TrigramIndex`: Wrapped in `Arc<RwLock<_>>` for concurrent read/write
 /// - `FtsService` and `GrepService`: Stateless or internally synchronized
+/// - `PathCache`: Wrapped in `RwLock` for concurrent read access during searches
 pub struct SearchService {
     db: Arc<Database>,
     fts: FtsService,
@@ -136,10 +146,14 @@ pub struct SearchService {
     /// Updated after indexing. Relaxed ordering is fine — staleness
     /// by a few files is acceptable for IDF weighting.
     cached_total_files: AtomicU64,
+    /// Bidirectional path↔FileId cache. Read-heavy (searches), write-rare (after indexing).
+    path_cache: RwLock<PathCache>,
 }
 
 impl SearchService {
     /// Creates a new search service.
+    ///
+    /// Eagerly loads the path cache from the database on construction.
     ///
     /// # Errors
     ///
@@ -152,6 +166,9 @@ impl SearchService {
         // Pre-populate cached total_files from DB (best-effort)
         let total = db.total_files().unwrap_or(0);
 
+        // Eagerly load path cache from DB
+        let path_cache = Self::load_path_cache(&db);
+
         Ok(Self {
             db,
             fts,
@@ -159,6 +176,7 @@ impl SearchService {
             trigram,
             config: SearchConfig::default(),
             cached_total_files: AtomicU64::new(total),
+            path_cache: RwLock::new(path_cache),
         })
     }
 
@@ -177,11 +195,12 @@ impl SearchService {
         Ok(service)
     }
 
-    /// Updates the cached total file count (call after indexing).
+    /// Updates the cached total file count and path cache (call after indexing).
     pub fn refresh_total_files(&self) {
         if let Ok(total) = self.db.total_files() {
             self.cached_total_files.store(total, Ordering::Relaxed);
         }
+        self.refresh_path_cache();
     }
 
     /// Returns the cached total file count, falling back to DB on 0.
@@ -194,6 +213,90 @@ impl SearchService {
         let total = self.db.total_files().unwrap_or(1);
         self.cached_total_files.store(total, Ordering::Relaxed);
         total
+    }
+
+    /// Builds a `PathCache` from the database (used at init and refresh).
+    fn load_path_cache(db: &Database) -> PathCache {
+        let entries = db.get_all_file_paths().unwrap_or_default();
+        let mut id_to_path = HashMap::with_capacity(entries.len());
+        let mut path_to_id = HashMap::with_capacity(entries.len());
+        for (file_id, path) in entries {
+            let arc: Arc<str> = Arc::from(path);
+            id_to_path.insert(file_id, Arc::clone(&arc));
+            path_to_id.insert(arc, file_id);
+        }
+        PathCache {
+            id_to_path,
+            path_to_id,
+        }
+    }
+
+    /// Refreshes the path cache from the database (call after indexing).
+    pub fn refresh_path_cache(&self) {
+        let new_cache = Self::load_path_cache(&self.db);
+        if let Ok(mut cache) = self.path_cache.write() {
+            *cache = new_cache;
+        }
+    }
+
+    /// Batch resolves FileIds to paths, cache-first with DB fallback.
+    fn get_paths_cached(&self, file_ids: &[FileId]) -> HashMap<FileId, Arc<str>> {
+        let mut result = HashMap::with_capacity(file_ids.len());
+        let mut misses = Vec::new();
+
+        // Read from cache
+        if let Ok(cache) = self.path_cache.read() {
+            for &fid in file_ids {
+                if let Some(path) = cache.id_to_path.get(&fid) {
+                    result.insert(fid, Arc::clone(path));
+                } else {
+                    misses.push(fid);
+                }
+            }
+        } else {
+            // Poisoned lock — fall back to DB for all
+            misses.extend_from_slice(file_ids);
+        }
+
+        // DB fallback for cache misses
+        if !misses.is_empty() {
+            if let Ok(db_paths) = self.db.get_paths_batch(&misses) {
+                for (fid, path) in db_paths {
+                    result.insert(fid, Arc::from(path));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Batch resolves paths to FileIds, cache-first with DB fallback.
+    fn get_file_ids_cached(&self, paths: &[String]) -> HashMap<String, FileId> {
+        let mut result = HashMap::with_capacity(paths.len());
+        let mut misses = Vec::new();
+
+        // Read from cache
+        if let Ok(cache) = self.path_cache.read() {
+            for path in paths {
+                if let Some(&fid) = cache.path_to_id.get(path.as_str()) {
+                    result.insert(path.clone(), fid);
+                } else {
+                    misses.push(path.clone());
+                }
+            }
+        } else {
+            // Poisoned lock — fall back to DB for all
+            misses = paths.to_vec();
+        }
+
+        // DB fallback for cache misses
+        if !misses.is_empty() {
+            if let Ok(db_ids) = self.db.get_file_ids_batch(&misses) {
+                result.extend(db_ids);
+            }
+        }
+
+        result
     }
 
     /// Performs a combined search using all available methods.
@@ -259,16 +362,16 @@ impl SearchService {
     ///
     /// # Errors
     ///
-    /// Returns `DbError` if database query or result enrichment fails.
+    /// Returns `DbError` if the FTS database query fails.
     pub fn search_fts(&self, query: &str, limit: usize) -> DbResult<Vec<SearchResult>> {
         let results = self.fts.search(query, limit)?;
-        self.enrich_results(
+        Ok(self.enrich_results(
             results,
             SearchSources {
                 fts: true,
                 ..Default::default()
             },
-        )
+        ))
     }
 
     /// Performs grep-only search.
@@ -279,12 +382,12 @@ impl SearchService {
     pub fn search_grep(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
         let results = self.grep.search_files(query, limit)?;
 
-        // Batch resolve paths to file IDs
+        // Batch resolve paths to file IDs via cache
         let path_strings: Vec<String> = results
             .iter()
             .map(|(p, _)| p.to_string_lossy().to_string())
             .collect();
-        let id_map = self.db.get_file_ids_batch(&path_strings).unwrap_or_default();
+        let id_map = self.get_file_ids_cached(&path_strings);
 
         let results: Vec<_> = results
             .into_iter()
@@ -350,12 +453,12 @@ impl SearchService {
             return None;
         }
 
-        // Resolve FileIds to paths
+        // Resolve FileIds to paths via cache
         let file_ids: Vec<FileId> = bitmap.iter().map(FileId::new).collect();
-        let path_map = self.db.get_paths_batch(&file_ids).unwrap_or_default();
+        let path_map = self.get_paths_cached(&file_ids);
 
         let filter: HashSet<PathBuf> =
-            path_map.into_values().map(PathBuf::from).collect();
+            path_map.into_values().map(|s| PathBuf::from(&*s)).collect();
 
         if filter.is_empty() {
             None
@@ -390,14 +493,14 @@ impl SearchService {
         let mut score_accum: HashMap<FileId, (f64, f64, SearchSources, PathBuf)> =
             HashMap::with_capacity(estimated_capacity);
 
-        // Batch resolve FTS file_ids to paths (P1+P2)
+        // Batch resolve FTS file_ids to paths via cache (P1+P2)
         let fts_ids: Vec<FileId> = fts.iter().map(|(id, _)| *id).collect();
-        let fts_paths = self.db.get_paths_batch(&fts_ids).unwrap_or_default();
+        let fts_paths = self.get_paths_cached(&fts_ids);
 
         for (file_id, score) in fts {
             if let Some(path) = fts_paths.get(&file_id) {
                 let entry = score_accum.entry(file_id).or_insert_with(|| {
-                    (0.0, 0.0, SearchSources::default(), PathBuf::from(path))
+                    (0.0, 0.0, SearchSources::default(), PathBuf::from(&**path))
                 });
                 entry.0 += score.as_f64() * config.fts_weight;
                 entry.1 += config.fts_weight;
@@ -405,13 +508,13 @@ impl SearchService {
             }
         }
 
-        // Batch resolve grep paths to file_ids (P1+P2)
+        // Batch resolve grep paths to file_ids via cache (P1+P2)
         // Pre-compute path strings once (1D: avoids double to_string_lossy)
         let grep_path_strings: Vec<String> = grep
             .iter()
             .map(|(p, _)| p.to_string_lossy().to_string())
             .collect();
-        let grep_ids = self.db.get_file_ids_batch(&grep_path_strings).unwrap_or_default();
+        let grep_ids = self.get_file_ids_cached(&grep_path_strings);
 
         // Zip pre-computed strings with grep results to avoid re-conversion (1D)
         for (i, (path, score)) in grep.into_iter().enumerate() {
@@ -505,21 +608,21 @@ impl SearchService {
         Ok(results)
     }
 
-    /// Enriches file IDs with paths using batch lookup.
+    /// Enriches file IDs with paths using the path cache.
     fn enrich_results(
         &self,
         results: Vec<(FileId, Score)>,
         sources: SearchSources,
-    ) -> DbResult<Vec<SearchResult>> {
+    ) -> Vec<SearchResult> {
         let ids: Vec<FileId> = results.iter().map(|(id, _)| *id).collect();
-        let path_map = self.db.get_paths_batch(&ids)?;
+        let path_map = self.get_paths_cached(&ids);
 
         let mut enriched = Vec::with_capacity(results.len());
         for (file_id, score) in results {
             if let Some(path) = path_map.get(&file_id) {
                 enriched.push(SearchResult {
                     file_id,
-                    path: PathBuf::from(path),
+                    path: PathBuf::from(&**path),
                     score,
                     sources: sources.clone(),
                     snippets: Vec::new(),
@@ -527,7 +630,7 @@ impl SearchService {
             }
         }
 
-        Ok(enriched)
+        enriched
     }
 }
 
@@ -812,5 +915,82 @@ mod tests {
 
         // Verify root() returns the correct path
         assert_eq!(service.root(), dir.path());
+    }
+
+    #[test]
+    fn test_path_cache_bidirectional() {
+        let (_dir, _db, service) = setup_multi_file_env();
+
+        // Cache should be populated after construction (3 files)
+        let cache = service.path_cache.read().unwrap();
+        assert_eq!(cache.id_to_path.len(), 3);
+        assert_eq!(cache.path_to_id.len(), 3);
+
+        // Round-trip: FileId → path → FileId
+        for (&file_id, path) in &cache.id_to_path {
+            let resolved_id = cache.path_to_id.get(path).copied();
+            assert_eq!(resolved_id, Some(file_id));
+        }
+    }
+
+    #[test]
+    fn test_path_cache_miss_fallback() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+
+        // Create service with empty DB → empty cache
+        let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap();
+
+        // Insert a file AFTER cache was loaded (simulates cache miss)
+        let file_id = db.upsert_file("late_file.rs", "fn late() {}", 0x1).unwrap();
+
+        // get_paths_cached should fall back to DB for the miss
+        let result = service.get_paths_cached(&[file_id]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(&*result[&file_id], "late_file.rs");
+
+        // get_file_ids_cached should also fall back
+        let result = service.get_file_ids_cached(&["late_file.rs".to_string()]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result["late_file.rs"], file_id);
+    }
+
+    #[test]
+    fn test_cache_after_refresh() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap();
+
+        // Cache starts empty
+        assert_eq!(service.path_cache.read().unwrap().id_to_path.len(), 0);
+
+        // Add files and refresh
+        db.upsert_file("new1.rs", "fn new1() {}", 0x1).unwrap();
+        db.upsert_file("new2.rs", "fn new2() {}", 0x2).unwrap();
+        service.refresh_total_files(); // Also refreshes path cache
+
+        // Cache should now have 2 entries
+        let cache = service.path_cache.read().unwrap();
+        assert_eq!(cache.id_to_path.len(), 2);
+        assert_eq!(cache.path_to_id.len(), 2);
+    }
+
+    #[test]
+    fn test_cache_arc_sharing() {
+        let (_dir, _db, service) = setup_multi_file_env();
+
+        let cache = service.path_cache.read().unwrap();
+
+        // Verify Arc<str> pointers are shared between both maps
+        for (&file_id, path_arc) in &cache.id_to_path {
+            // Look up the same path in path_to_id
+            let (key_arc, _) = cache.path_to_id.get_key_value(path_arc.as_ref()).unwrap();
+            // Both should point to the same allocation
+            assert!(
+                Arc::ptr_eq(path_arc, key_arc),
+                "Arc<str> for FileId {:?} should be shared between both maps",
+                file_id
+            );
+        }
     }
 }

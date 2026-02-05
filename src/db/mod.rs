@@ -302,6 +302,25 @@ impl Database {
         Ok(count as u64)
     }
 
+    /// Gets all file_id → path mappings for cache population.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DbError::Pool` if no connection is available.
+    /// Returns `DbError::Sqlite` if the query fails.
+    pub fn get_all_file_paths(&self) -> DbResult<Vec<(FileId, String)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare_cached("SELECT file_id, path FROM files")?;
+        let results = stmt
+            .query_map([], |row| {
+                let id: u32 = row.get(0)?;
+                let path: String = row.get(1)?;
+                Ok((FileId::new(id), path))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
+
     /// Gets all indexed file paths with their hashes.
     ///
     /// # Errors
