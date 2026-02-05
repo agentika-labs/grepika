@@ -6,6 +6,36 @@ Token-efficient MCP server for code search. Combines three search backends for h
 - **Grep** - Parallel regex search using ripgrep internals
 - **Trigram** - Fast substring search via 3-byte sequence indexing
 
+## Installation
+
+### Pre-built Binary (macOS Apple Silicon)
+
+Download and install the pre-built binary:
+
+```bash
+# Extract
+tar -xzf agentika-grep-macos-arm64.tar.gz
+
+# Remove macOS quarantine flag (required for unsigned binaries)
+xattr -d com.apple.quarantine agentika-grep-macos-arm64
+
+# Make executable and install
+chmod +x agentika-grep-macos-arm64
+sudo mv agentika-grep-macos-arm64 /usr/local/bin/agentika-grep
+
+# Verify installation
+agentika-grep --help
+```
+
+### Build from Source
+
+Requires Rust 1.75+:
+
+```bash
+cargo build --release
+# Binary at: target/release/agentika-grep
+```
+
 ## Quick Start
 
 ```bash
