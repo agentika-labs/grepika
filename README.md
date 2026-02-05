@@ -98,6 +98,46 @@ cargo bench -- --baseline main
 open target/criterion/report/index.html
 ```
 
+### Token Efficiency Benchmarks
+
+Measure token savings compared to raw ripgrep output:
+
+```bash
+# Run token efficiency benchmarks
+cargo bench token_efficiency
+
+# Capture MCP schema for overhead analysis
+./scripts/capture_schema.sh
+```
+
+## Token Efficiency
+
+agentika-grep's indexed search returns **83.8% fewer tokens** on average compared to Claude's built-in Grep tool (which uses ripgrep). This dramatically reduces context consumption when exploring codebases.
+
+### Results (on agentika-grep codebase)
+
+```
+Query      │ agentika │  ripgrep │ Savings
+───────────┼──────────┼──────────┼────────
+auth       │    326 B │   2109 B │  84.5%
+config     │    502 B │   3749 B │  86.6%
+error      │    478 B │   5322 B │  91.0%
+handler    │    248 B │   1239 B │  80.0%
+database   │    242 B │   1048 B │  76.9%
+───────────┼──────────┼──────────┼────────
+AVERAGE    │    359 B │   2693 B │  83.8%
+```
+
+### Break-Even Analysis
+
+The MCP schema adds ~825 tokens of one-time overhead. With ~584 tokens saved per query:
+
+- **Break-even point: 2 queries**
+- After 5 queries: ~2,000 tokens saved
+- After 10 queries: ~5,000 tokens saved
+
+For typical coding sessions involving dozens of searches, agentika-grep provides substantial context savings.
+
 ## Profiling
 
 Build with the `profiling` feature to enable timing and memory logging:
@@ -223,6 +263,58 @@ See [docs/hooks-example.json](docs/hooks-example.json) for the full example.
 **Advisory vs Enforcement:**
 - CLAUDE.md instructions are *advisory* — Claude reads and follows them, but may still use built-in tools in some cases
 - Hooks are *deterministic* — they execute before every matching tool call, providing consistent reminders or blocks
+
+#### Pre-authorizing Permissions
+
+To avoid permission prompts for agentika-grep tools:
+
+**Project-Level (Recommended)** - Add to `.claude/settings.local.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__agentika-grep__*"
+    ]
+  }
+}
+```
+
+**Global (All Projects)** - Add to `~/.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__agentika-grep__*"
+    ]
+  }
+}
+```
+
+**Explicit Tool List** - If you prefer explicit permissions:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__agentika-grep__search",
+      "mcp__agentika-grep__relevant",
+      "mcp__agentika-grep__refs",
+      "mcp__agentika-grep__related",
+      "mcp__agentika-grep__outline",
+      "mcp__agentika-grep__context",
+      "mcp__agentika-grep__get",
+      "mcp__agentika-grep__toc",
+      "mcp__agentika-grep__stats",
+      "mcp__agentika-grep__index",
+      "mcp__agentika-grep__diff"
+    ]
+  }
+}
+```
+
+**Verify** - Run `/permissions` in Claude Code to see active permissions, or `/doctor` to check for issues.
 
 ### Cursor
 

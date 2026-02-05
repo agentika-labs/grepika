@@ -1,5 +1,13 @@
 //! Index management MCP tools.
+//!
+//! # Security
+//!
+//! The `diff` tool validates paths to prevent traversal attacks
+//! and blocks access to sensitive files.
+//!
+//! See [`crate::security`] for details.
 
+use crate::security;
 use crate::services::{Indexer, SearchService};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -111,14 +119,25 @@ pub struct DiffStats {
 
 /// Executes the diff tool.
 ///
+/// # Security
+///
+/// - Validates both paths stay within root directory
+/// - Blocks access to sensitive files (.env, credentials, keys)
+///
 /// # Errors
 ///
-/// Returns an error string if either file cannot be read.
+/// Returns an error string if:
+/// - Path traversal is detected
+/// - Either file is sensitive
+/// - Either file cannot be read
 pub fn execute_diff(service: &Arc<SearchService>, input: DiffInput) -> Result<DiffOutput, String> {
     use std::fs;
 
-    let path1 = service.root().join(&input.file1);
-    let path2 = service.root().join(&input.file2);
+    // Security: validate both paths and check for sensitive files
+    let path1 = security::validate_read_access(service.root(), &input.file1)
+        .map_err(|e| format!("file1: {e}"))?;
+    let path2 = security::validate_read_access(service.root(), &input.file2)
+        .map_err(|e| format!("file2: {e}"))?;
 
     let file1 = &input.file1;
     let content1 =

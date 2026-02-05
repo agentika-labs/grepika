@@ -35,8 +35,10 @@
 //!    └──────────────────────────────┘
 //! ```
 
+pub mod bench_utils;
 pub mod db;
 pub mod error;
+pub mod security;
 pub mod server;
 pub mod services;
 pub mod tools;

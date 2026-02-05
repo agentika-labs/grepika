@@ -2,8 +2,14 @@
 //!
 //! Uses a dedicated rayon ThreadPool to avoid contention with
 //! tokio's blocking thread pool.
+//!
+//! # Security
+//!
+//! This module includes ReDoS protection via pattern validation.
+//! See [`crate::security::validate_regex_pattern`] for details.
 
 use crate::error::{GrepError, SearchError};
+use crate::security;
 use crate::types::Score;
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcher;
@@ -104,14 +110,25 @@ impl GrepService {
 
     /// Searches for pattern in files under root directory.
     ///
+    /// # Security
+    ///
+    /// The pattern is validated for potential ReDoS vulnerabilities before
+    /// regex compilation. Patterns with nested quantifiers or excessive
+    /// complexity will be rejected.
+    ///
     /// # Errors
     ///
-    /// Returns `SearchError::InvalidPattern` if the regex pattern is invalid.
+    /// Returns `SearchError::InvalidPattern` if the regex pattern is invalid
+    /// or potentially dangerous.
     pub fn search_parallel(
         &self,
         pattern: &str,
         limit: usize,
     ) -> Result<Vec<GrepMatch>, SearchError> {
+        // Validate pattern for ReDoS vulnerabilities
+        security::validate_regex_pattern(pattern)
+            .map_err(|e| SearchError::InvalidPattern(e.to_string()))?;
+
         let matcher = RegexMatcher::new_line_matcher(pattern)
             .map_err(|e| SearchError::InvalidPattern(e.to_string()))?;
 
@@ -287,5 +304,32 @@ mod tests {
         let service = GrepService::new(dir.path().to_path_buf()).unwrap();
         let matches = service.search_parallel("println", 1).unwrap();
         assert_eq!(matches.len(), 1);
+    }
+
+    #[test]
+    fn test_redos_pattern_rejected() {
+        let dir = setup_test_dir();
+        let service = GrepService::new(dir.path().to_path_buf()).unwrap();
+
+        // These patterns should be rejected due to ReDoS risk
+        let result = service.search_parallel("(a+)+", 10);
+        assert!(result.is_err());
+
+        let result = service.search_parallel("(.*)*", 10);
+        assert!(result.is_err());
+
+        let result = service.search_parallel("(.+)+", 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_safe_patterns_accepted() {
+        let dir = setup_test_dir();
+        let service = GrepService::new(dir.path().to_path_buf()).unwrap();
+
+        // These patterns should be accepted
+        assert!(service.search_parallel("fn\\s+\\w+", 10).is_ok());
+        assert!(service.search_parallel("hello.*world", 10).is_ok());
+        assert!(service.search_parallel("[a-z]+", 10).is_ok());
     }
 }

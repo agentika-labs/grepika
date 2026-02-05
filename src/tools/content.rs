@@ -1,5 +1,14 @@
 //! Content retrieval MCP tools.
+//!
+//! # Security
+//!
+//! All file access in this module is protected by:
+//! - Path traversal validation (prevents escaping root directory)
+//! - Sensitive file blocking (.env, credentials, keys, etc.)
+//!
+//! See [`crate::security`] for details.
 
+use crate::security;
 use crate::services::SearchService;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -41,11 +50,21 @@ pub struct GetOutput {
 
 /// Executes the get tool.
 ///
+/// # Security
+///
+/// - Validates path stays within root directory
+/// - Blocks access to sensitive files (.env, credentials, keys)
+///
 /// # Errors
 ///
-/// Returns an error string if the file cannot be read.
+/// Returns an error string if:
+/// - Path traversal is detected
+/// - File is sensitive
+/// - File cannot be read
 pub fn execute_get(service: &Arc<SearchService>, input: GetInput) -> Result<GetOutput, String> {
-    let full_path = service.root().join(&input.path);
+    // Security: validate path and check for sensitive files
+    let full_path = security::validate_read_access(service.root(), &input.path)
+        .map_err(|e| e.to_string())?;
 
     let content =
         fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;
@@ -104,14 +123,24 @@ pub struct Symbol {
 
 /// Executes the outline tool.
 ///
+/// # Security
+///
+/// - Validates path stays within root directory
+/// - Blocks access to sensitive files (.env, credentials, keys)
+///
 /// # Errors
 ///
-/// Returns an error string if the file cannot be read.
+/// Returns an error string if:
+/// - Path traversal is detected
+/// - File is sensitive
+/// - File cannot be read
 pub fn execute_outline(
     service: &Arc<SearchService>,
     input: OutlineInput,
 ) -> Result<OutlineOutput, String> {
-    let full_path = service.root().join(&input.path);
+    // Security: validate path and check for sensitive files
+    let full_path = security::validate_read_access(service.root(), &input.path)
+        .map_err(|e| e.to_string())?;
 
     let content =
         fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;
@@ -174,11 +203,19 @@ pub struct TocEntry {
 
 /// Executes the toc tool.
 ///
+/// # Security
+///
+/// - Validates path stays within root directory
+///
 /// # Errors
 ///
-/// Returns an error string if the directory cannot be read.
+/// Returns an error string if:
+/// - Path traversal is detected
+/// - Directory cannot be read
 pub fn execute_toc(service: &Arc<SearchService>, input: TocInput) -> Result<TocOutput, String> {
-    let full_path = service.root().join(&input.path);
+    // Security: validate path (toc reads directories, so we use validate_path not validate_read_access)
+    let full_path = security::validate_path(service.root(), &input.path)
+        .map_err(|e| e.to_string())?;
 
     let (tree, files, dirs) = build_toc(&full_path, service.root(), input.depth, 0)?;
 
@@ -223,14 +260,24 @@ pub struct ContextOutput {
 
 /// Executes the context tool.
 ///
+/// # Security
+///
+/// - Validates path stays within root directory
+/// - Blocks access to sensitive files (.env, credentials, keys)
+///
 /// # Errors
 ///
-/// Returns an error string if the file cannot be read.
+/// Returns an error string if:
+/// - Path traversal is detected
+/// - File is sensitive
+/// - File cannot be read
 pub fn execute_context(
     service: &Arc<SearchService>,
     input: ContextInput,
 ) -> Result<ContextOutput, String> {
-    let full_path = service.root().join(&input.path);
+    // Security: validate path and check for sensitive files
+    let full_path = security::validate_read_access(service.root(), &input.path)
+        .map_err(|e| e.to_string())?;
 
     let content =
         fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;

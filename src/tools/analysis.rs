@@ -1,5 +1,13 @@
 //! Analysis-related MCP tools.
+//!
+//! # Security
+//!
+//! The `related` and `refs` tools validate paths to prevent traversal
+//! attacks and block access to sensitive files.
+//!
+//! See [`crate::security`] for details.
 
+use crate::security;
 use crate::services::{Indexer, SearchService};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -119,14 +127,25 @@ pub struct RelatedFile {
 
 /// Executes the related tool.
 ///
+/// # Security
+///
+/// - Validates path stays within root directory
+/// - Blocks access to sensitive files (.env, credentials, keys)
+///
 /// # Errors
 ///
-/// Returns an error string if the source file cannot be read or search fails.
+/// Returns an error string if:
+/// - Path traversal is detected
+/// - File is sensitive
+/// - Source file cannot be read
+/// - Search fails
 pub fn execute_related(
     service: &Arc<SearchService>,
     input: RelatedInput,
 ) -> Result<RelatedOutput, String> {
-    let full_path = service.root().join(&input.path);
+    // Security: validate path and check for sensitive files
+    let full_path = security::validate_read_access(service.root(), &input.path)
+        .map_err(|e| e.to_string())?;
 
     // Read source file
     let content =
@@ -233,6 +252,11 @@ pub struct Reference {
 
 /// Executes the refs tool.
 ///
+/// # Security
+///
+/// - Search results are filtered to exclude sensitive files
+/// - Grep already constrains search to the root directory
+///
 /// # Errors
 ///
 /// Returns an error string if the grep search fails.
@@ -249,6 +273,12 @@ pub fn execute_refs(service: &Arc<SearchService>, input: RefsInput) -> Result<Re
 
     for result in results.into_iter().take(input.limit) {
         let full_path = &result.path;
+
+        // Security: skip sensitive files from search results
+        if security::is_sensitive_file(full_path).is_some() {
+            continue;
+        }
+
         let content = match fs::read_to_string(full_path) {
             Ok(c) => c,
             Err(_) => continue,

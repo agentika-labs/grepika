@@ -53,3 +53,57 @@ Prefer agentika-grep MCP tools over built-in Grep/Glob for code search:
 
 These provide ranked results with FTS5+trigram indexing for better search quality.
 ```
+
+---
+
+## Pre-authorizing Permissions
+
+To avoid permission prompts for agentika-grep tools:
+
+**Project-Level (Recommended)** - Add to `.claude/settings.local.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__agentika-grep__*"
+    ]
+  }
+}
+```
+
+**Global (All Projects)** - Add to `~/.claude/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__agentika-grep__*"
+    ]
+  }
+}
+```
+
+**Explicit Tool List** - If you prefer explicit permissions:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__agentika-grep__search",
+      "mcp__agentika-grep__relevant",
+      "mcp__agentika-grep__refs",
+      "mcp__agentika-grep__related",
+      "mcp__agentika-grep__outline",
+      "mcp__agentika-grep__context",
+      "mcp__agentika-grep__get",
+      "mcp__agentika-grep__toc",
+      "mcp__agentika-grep__stats",
+      "mcp__agentika-grep__index",
+      "mcp__agentika-grep__diff"
+    ]
+  }
+}
+```
+
+**Verify** - Run `/permissions` in Claude Code to see active permissions, or `/doctor` to check for issues.
