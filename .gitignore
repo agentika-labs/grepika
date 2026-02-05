@@ -4,5 +4,7 @@
 # Project-specific index database (users generate their own)
 .agentika-grep/
 
-# Claude Code local project settings
-.claude/
+# Claude Code local settings (but track plugins/skills)
+.claude/settings.local.json
+.claude/.DS_Store
+.claude/*/.DS_Store

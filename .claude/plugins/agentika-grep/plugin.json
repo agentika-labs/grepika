@@ -1,0 +1,8 @@
+{
+  "name": "agentika-grep",
+  "version": "1.0.0",
+  "description": "Token-efficient codebase exploration using agentika-grep MCP server with trigram indexing, FTS5 search, and semantic file discovery.",
+  "author": {
+    "name": "Agentika"
+  }
+}
