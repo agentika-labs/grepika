@@ -27,13 +27,20 @@ sudo mv agentika-grep-macos-arm64 /usr/local/bin/agentika-grep
 agentika-grep --help
 ```
 
-### Build from Source
+### Build from Source (macOS Apple Silicon)
 
 Requires Rust 1.75+:
 
 ```bash
-cargo build --release
-# Binary at: target/release/agentika-grep
+# Build for Apple Silicon
+cargo build --release --target aarch64-apple-darwin
+
+# Binary location
+ls -la target/aarch64-apple-darwin/release/agentika-grep
+
+# Create distributable archive
+tar -czvf agentika-grep-macos-arm64.tar.gz \
+  -C target/aarch64-apple-darwin/release agentika-grep
 ```
 
 ## Quick Start
