@@ -305,8 +305,14 @@ cargo build --release --features profiling
 # Run tests
 cargo test
 
-# Run benchmarks
+# Run all benchmarks
 cargo bench
+
+# Run real-repo benchmarks (indexes and searches this repo)
+cargo bench --bench hot_paths -- real_repo
+
+# Run real-repo benchmarks against a different repository
+BENCH_REPO_PATH=/path/to/repo cargo bench --bench hot_paths -- real_repo
 ```
 
 ## Profiling

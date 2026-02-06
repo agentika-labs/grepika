@@ -10,11 +10,12 @@
 //! View reports: `open target/criterion/report/index.html`
 
 use agentika_grep::db::Database;
-use agentika_grep::services::{SearchService, TrigramIndex};
+use agentika_grep::services::{Indexer, SearchService, TrigramIndex};
 use agentika_grep::types::{FileId, Score};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::fs;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
 
 // ============================================================================
@@ -350,20 +351,12 @@ fn bench_fts_query_complexity(c: &mut Criterion) {
 // Combined Search Service Benchmarks
 // ============================================================================
 
-/// Benchmarks the full combined search pipeline.
+/// Creates benchmark files on disk and inserts them into the database.
 ///
-/// This is the most realistic benchmark - it measures end-to-end
-/// search performance including FTS, grep, and result merging.
-fn bench_combined_search(c: &mut Criterion) {
-    let mut group = c.benchmark_group("combined_search");
-    group.sample_size(50); // Reduce sample size for slower benchmarks
-
-    // Setup: Create temporary directory with files
-    let dir = TempDir::new().expect("Failed to create temp dir");
-    let db = Arc::new(Database::in_memory().expect("Failed to create database"));
-
-    // Create actual files on disk (needed for grep)
-    for i in 0..200 {
+/// Each file contains realistic Rust code with common patterns like
+/// `authenticate`, `Config`, and `Handler` — used by search benchmarks.
+fn setup_bench_files(dir: &std::path::Path, db: &Database, count: usize) {
+    for i in 0..count {
         let content = format!(
             r#"
             // Source file {i}
@@ -388,14 +381,27 @@ fn bench_combined_search(c: &mut Criterion) {
         );
 
         let filename = format!("file_{}.rs", i);
-        fs::write(dir.path().join(&filename), &content).expect("Failed to write file");
+        fs::write(dir.join(&filename), &content).expect("Failed to write file");
         db.upsert_file(
-            dir.path().join(&filename).to_string_lossy().as_ref(),
+            dir.join(&filename).to_string_lossy().as_ref(),
             &content,
             i as u64,
         )
         .expect("Failed to insert file");
     }
+}
+
+/// Benchmarks the full combined search pipeline at 200 files.
+///
+/// This is the most realistic benchmark - it measures end-to-end
+/// search performance including FTS, grep, and result merging.
+fn bench_combined_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("combined_search");
+    group.sample_size(50); // Reduce sample size for slower benchmarks
+
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let db = Arc::new(Database::in_memory().expect("Failed to create database"));
+    setup_bench_files(dir.path(), &db, 200);
 
     let search = SearchService::new(Arc::clone(&db), dir.path().to_path_buf())
         .expect("Failed to create search service");
@@ -414,6 +420,34 @@ fn bench_combined_search(c: &mut Criterion) {
     });
 
     group.bench_function("grep_only_200_files", |b| {
+        b.iter(|| black_box(search.search_grep("authenticate", 20)))
+    });
+
+    group.finish();
+}
+
+/// Benchmarks the full combined search pipeline at 2000 files.
+///
+/// At this scale, the walk phase takes ~2ms (vs ~200μs at 200 files),
+/// making WalkParallel walk+search overlap measurable. Searcher reuse
+/// and Arc<Path> savings also become significant (~225μs combined).
+fn bench_combined_search_2k(c: &mut Criterion) {
+    let mut group = c.benchmark_group("combined_search_2k");
+    group.sample_size(20); // Slower iterations need fewer samples
+
+    let dir = TempDir::new().expect("Failed to create temp dir");
+    let db = Arc::new(Database::in_memory().expect("Failed to create database"));
+    setup_bench_files(dir.path(), &db, 2000);
+
+    let search = SearchService::new(Arc::clone(&db), dir.path().to_path_buf())
+        .expect("Failed to create search service");
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("combined_2000_files", |b| {
+        b.iter(|| black_box(search.search("authenticate", 20)))
+    });
+
+    group.bench_function("grep_only_2000_files", |b| {
         b.iter(|| black_box(search.search_grep("authenticate", 20)))
     });
 
@@ -497,6 +531,48 @@ fn bench_db_read(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Real Repository Benchmarks
+// ============================================================================
+
+/// Benchmarks search against a real git repository.
+///
+/// By default, indexes and searches this repo (agentika-grep).
+/// Set `BENCH_REPO_PATH` to benchmark a different/larger repo.
+fn bench_real_repo(c: &mut Criterion) {
+    let mut group = c.benchmark_group("real_repo");
+    group.sample_size(20);
+
+    let root = std::env::var("BENCH_REPO_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+
+    // File-backed DB in target/ — persists across runs for fast incremental reindex
+    let db_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("bench_cache");
+    fs::create_dir_all(&db_dir).expect("Failed to create bench cache dir");
+    let db_path = db_dir.join("real_repo.db");
+    let db = Arc::new(Database::open(&db_path).expect("Failed to open database"));
+
+    // Index the real directory (incremental — fast on rerun)
+    let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+    let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
+    indexer.index(None, false).expect("Failed to index");
+
+    let search =
+        SearchService::new(Arc::clone(&db), root).expect("Failed to create search service");
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("combined_search", |b| {
+        b.iter(|| black_box(search.search("fn ", 20)))
+    });
+    group.bench_function("grep_search", |b| {
+        b.iter(|| black_box(search.search_grep("fn ", 20)))
+    });
+    group.finish();
+}
+
+// ============================================================================
 // Criterion Configuration
 // ============================================================================
 
@@ -522,6 +598,7 @@ criterion_group!(
 criterion_group!(
     search_benches,
     bench_combined_search,
+    bench_combined_search_2k,
 );
 
 criterion_group!(
@@ -530,10 +607,16 @@ criterion_group!(
     bench_db_read,
 );
 
+criterion_group!(
+    real_repo_benches,
+    bench_real_repo,
+);
+
 criterion_main!(
     trigram_benches,
     score_benches,
     fts_benches,
     search_benches,
     db_benches,
+    real_repo_benches,
 );
