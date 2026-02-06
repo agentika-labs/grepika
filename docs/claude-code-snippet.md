@@ -20,8 +20,11 @@ Use the agentika-grep MCP server for all code search operations instead of built
 | Find references | `mcp__agentika-grep__refs` | `Grep` for symbol |
 | Related files | `mcp__agentika-grep__related` | Multiple `Grep` calls |
 | Index statistics | `mcp__agentika-grep__stats` | N/A |
+| **Set workspace** | `mcp__agentika-grep__add_workspace` | N/A (global mode only) |
 
 **First time setup:** Run `mcp__agentika-grep__index` to build the search index before using other tools. The index updates incrementally on subsequent runs.
+
+**Global Mode:** When the server is started with `--mcp` (without `--root`), it runs in global mode. The LLM must call `mcp__agentika-grep__add_workspace` with the project root path before using any other tools. The server's `get_info()` response will guide this. This is the recommended setup — the LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
 
 **Why prefer agentika-grep:**
 - Combines FTS5 + ripgrep + trigram indexing for superior search quality
@@ -100,7 +103,8 @@ To avoid permission prompts for agentika-grep tools:
       "mcp__agentika-grep__toc",
       "mcp__agentika-grep__stats",
       "mcp__agentika-grep__index",
-      "mcp__agentika-grep__diff"
+      "mcp__agentika-grep__diff",
+      "mcp__agentika-grep__add_workspace"
     ]
   }
 }

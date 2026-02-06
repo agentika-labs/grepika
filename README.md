@@ -11,7 +11,7 @@ Token-efficient MCP server for code search. Combines three search backends for h
 ### npm (recommended for MCP users)
 
 ```bash
-npx -y agentika-grep --mcp --root .
+npx -y agentika-grep --mcp
 ```
 
 Or install globally:
@@ -37,39 +37,87 @@ cargo install agentika-grep
 ### GitHub Releases (manual download)
 
 Download the binary for your platform from
-[GitHub Releases](https://github.com/agentika/agentika-grep/releases),
-extract, and place in your `PATH`.
-
-<details>
-<summary>macOS quarantine removal</summary>
-
-macOS may quarantine unsigned binaries. After extracting:
+[GitHub Releases](https://github.com/agentika/agentika-grep/releases).
 
 ```bash
+# Extract the archive
+tar -xzf agentika-grep-macos-arm64.tar.gz
+
+# Remove macOS quarantine flag (required for unsigned binaries)
 xattr -d com.apple.quarantine agentika-grep
+
+# Make executable and install to user-local bin
 chmod +x agentika-grep
-sudo mv agentika-grep /usr/local/bin/
-```
-</details>
+mv agentika-grep ~/.local/bin/
 
-## Quick Start
-
-```bash
-# Index a codebase
-agentika-grep index --root /path/to/project
-
-# Search
-agentika-grep search "authentication" --root /path/to/project
-
-# Run as MCP server
-agentika-grep --mcp --root /path/to/project
+# Verify
+agentika-grep --help
 ```
 
 ## MCP Server Setup
 
-### Claude Code
+### Global Mode (Recommended)
 
-Add to your project's `.mcp.json` or global `~/.claude.json`:
+In global mode, the server starts without `--root`. The LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
+
+**Claude Code:**
+
+```bash
+claude mcp add agentika-grep -- npx -y agentika-grep --mcp
+```
+
+Or add to your project's `.mcp.json` (or global `~/.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "agentika-grep": {
+      "command": "npx",
+      "args": ["-y", "agentika-grep", "--mcp"]
+    }
+  }
+}
+```
+
+**Cursor:**
+
+Add to `~/.cursor/mcp.json` or project `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "agentika-grep": {
+      "command": "npx",
+      "args": ["-y", "agentika-grep", "--mcp"]
+    }
+  }
+}
+```
+
+**OpenCode:**
+
+Add to `opencode.config.json`:
+
+```json
+{
+  "mcp": {
+    "agentika-grep": {
+      "type": "local",
+      "command": ["npx", "-y", "agentika-grep", "--mcp"]
+    }
+  }
+}
+```
+
+### Single Project Mode (Alternative)
+
+Use `--root` to pre-load a specific workspace at startup. The LLM does not need to call `add_workspace`.
+
+**Claude Code:**
+
+```bash
+claude mcp add agentika-grep -- npx -y agentika-grep --mcp --root /path/to/project
+```
 
 ```json
 {
@@ -82,28 +130,39 @@ Add to your project's `.mcp.json` or global `~/.claude.json`:
 }
 ```
 
-Or with a locally installed binary:
+**Cursor:**
 
 ```json
 {
   "mcpServers": {
     "agentika-grep": {
-      "command": "agentika-grep",
-      "args": ["--mcp", "--root", "/path/to/project"]
+      "command": "npx",
+      "args": ["-y", "agentika-grep", "--mcp", "--root", "/path/to/project"]
     }
   }
 }
 ```
 
-Or use the CLI:
+**OpenCode:**
 
-```bash
-claude mcp add agentika-grep -- npx -y agentika-grep --mcp --root /path/to/project
+```json
+{
+  "mcp": {
+    "agentika-grep": {
+      "type": "local",
+      "command": ["npx", "-y", "agentika-grep", "--mcp", "--root", "/path/to/project"]
+    }
+  }
+}
 ```
 
-#### Configuring Tool Preference
+> **Tip:** Add `"--db", "/path/to/index.db"` to `args` to control where the index is stored.
 
-Claude Code has built-in Grep and Glob tools. To make Claude prefer agentika-grep's superior search capabilities, you have two options:
+## Claude Code Integration
+
+### Tool Preference
+
+Claude Code has built-in Grep and Glob tools. To make Claude prefer agentika-grep's superior search capabilities:
 
 **Option A: Advisory Instructions (CLAUDE.md)**
 
@@ -148,15 +207,11 @@ For deterministic enforcement, add PreToolUse hooks to `.claude/settings.json`:
 
 See [docs/hooks-example.json](docs/hooks-example.json) for the full example.
 
-**Advisory vs Enforcement:**
-- CLAUDE.md instructions are *advisory* — Claude reads and follows them, but may still use built-in tools in some cases
-- Hooks are *deterministic* — they execute before every matching tool call, providing consistent reminders or blocks
+CLAUDE.md instructions are *advisory* — Claude may still use built-in tools in some cases. Hooks are *deterministic* — they fire before every matching tool call.
 
-#### Pre-authorizing Permissions
+### Pre-authorizing Permissions
 
-To avoid permission prompts for agentika-grep tools:
-
-**Project-Level (Recommended)** - Add to `.claude/settings.local.json`:
+To avoid permission prompts, add to `.claude/settings.local.json` (project) or `~/.claude/settings.json` (global):
 
 ```json
 {
@@ -168,48 +223,26 @@ To avoid permission prompts for agentika-grep tools:
 }
 ```
 
-**Global (All Projects)** - Add to `~/.claude/settings.json`:
+## Usage
 
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__agentika-grep__*"
-    ]
-  }
-}
-```
+```bash
+# Index a codebase
+agentika-grep index --root /path/to/project
 
-**Verify** - Run `/permissions` in Claude Code to see active permissions, or `/doctor` to check for issues.
+# Search (modes: combined, fts, grep)
+agentika-grep search "authentication" --root /path/to/project -l 20 -m combined
 
-### Cursor
+# Get file content with line range
+agentika-grep get <path> -s 1 -e 100
 
-Add to `~/.cursor/mcp.json` or project `.cursor/mcp.json`:
+# View index statistics
+agentika-grep stats
 
-```json
-{
-  "mcpServers": {
-    "agentika-grep": {
-      "command": "npx",
-      "args": ["-y", "agentika-grep", "--mcp", "--root", "/path/to/project"]
-    }
-  }
-}
-```
+# Run as MCP server (global mode — LLM calls add_workspace)
+agentika-grep --mcp
 
-### OpenCode
-
-Add to `opencode.config.json`:
-
-```json
-{
-  "mcp": {
-    "agentika-grep": {
-      "type": "local",
-      "command": ["npx", "-y", "agentika-grep", "--mcp", "--root", "/path/to/project"]
-    }
-  }
-}
+# Run as MCP server (single workspace mode)
+agentika-grep --mcp --root /path/to/project
 ```
 
 ## Available Tools
@@ -227,28 +260,11 @@ Add to `opencode.config.json`:
 | `refs` | Find all references to a symbol |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
-
-## CLI Usage
-
-```bash
-# Index the codebase
-agentika-grep index
-
-# Search (modes: combined, fts, grep)
-agentika-grep search <query> -l 20 -m combined
-
-# Get file content with line range
-agentika-grep get <path> -s 1 -e 100
-
-# View index statistics
-agentika-grep stats
-```
+| `add_workspace` | Load a project workspace (global mode) |
 
 ## Token Efficiency
 
 agentika-grep's indexed search returns **83.8% fewer tokens** on average compared to Claude's built-in Grep tool (which uses ripgrep). This dramatically reduces context consumption when exploring codebases.
-
-### Results (on agentika-grep codebase)
 
 ```
 Query      │ agentika │  ripgrep │ Savings
@@ -262,17 +278,11 @@ database   │    242 B │   1048 B │  76.9%
 AVERAGE    │    359 B │   2693 B │  83.8%
 ```
 
-### Break-Even Analysis
+The MCP schema adds ~825 tokens of one-time overhead, which pays for itself after just 2 queries (~584 tokens saved per query).
 
-The MCP schema adds ~825 tokens of one-time overhead. With ~584 tokens saved per query:
+## Configuration
 
-- **Break-even point: 2 queries**
-- After 5 queries: ~2,000 tokens saved
-- After 10 queries: ~5,000 tokens saved
-
-For typical coding sessions involving dozens of searches, agentika-grep provides substantial context savings.
-
-## Index Location
+### Index Location
 
 By default, the index is stored in a **global cache directory**, not in the project:
 
@@ -290,7 +300,13 @@ Use `--db` to specify a custom location:
 agentika-grep --mcp --root /path/to/project --db /custom/path/index.db
 ```
 
-## Build from Source
+### Other Settings
+
+- **Max file size**: 1MB (files larger than this are skipped during indexing)
+- **Gitignore**: Patterns in `.gitignore` are respected during indexing
+- **Logging**: All logs go to stderr (stdout is reserved for JSON-RPC in MCP mode)
+
+## Development
 
 ```bash
 # Debug build
@@ -315,7 +331,7 @@ cargo bench --bench hot_paths -- real_repo
 BENCH_REPO_PATH=/path/to/repo cargo bench --bench hot_paths -- real_repo
 ```
 
-## Profiling
+### Profiling
 
 Build with the `profiling` feature to enable timing and memory logging:
 
@@ -330,7 +346,7 @@ When enabled, each tool invocation logs performance metrics to stderr:
 [index] 1.2s | mem: 256.0MB (+127.5MB)
 ```
 
-**MCP mode** - use `--log-file` to capture logs:
+**MCP mode** — use `--log-file` to capture logs:
 
 ```json
 {
@@ -344,12 +360,6 @@ When enabled, each tool invocation logs performance metrics to stderr:
 ```
 
 Then: `tail -f /tmp/agentika-grep.log`
-
-## Configuration
-
-- **Max file size**: 1MB (files larger than this are skipped during indexing)
-- **Gitignore**: Patterns in `.gitignore` are respected during indexing
-- **Logging**: All logs go to stderr (stdout is reserved for JSON-RPC in MCP mode)
 
 ## License
 

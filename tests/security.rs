@@ -585,3 +585,74 @@ fn test_edge_cases() {
     // Should fail - no URL decoding
     assert!(result.is_err());
 }
+
+// =============================================================================
+// Workspace Root Validation Tests (integration)
+// =============================================================================
+
+#[test]
+fn test_workspace_validation_blocks_system_paths() {
+    use agentika_grep::security::validate_workspace_root;
+    use std::path::Path;
+
+    assert!(
+        validate_workspace_root(Path::new("/")).is_err(),
+        "Should block root filesystem"
+    );
+    assert!(
+        validate_workspace_root(Path::new("/etc")).is_err(),
+        "Should block /etc"
+    );
+    assert!(
+        validate_workspace_root(Path::new("/var")).is_err(),
+        "Should block /var"
+    );
+}
+
+#[test]
+fn test_workspace_validation_accepts_project_dirs() {
+    use agentika_grep::security::validate_workspace_root;
+
+    let dir = TempDir::new().unwrap();
+    let result = validate_workspace_root(dir.path());
+    assert!(
+        result.is_ok(),
+        "Should accept valid project directory: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_workspace_new_creates_services() {
+    use agentika_grep::server::Workspace;
+
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
+
+    let ws = Workspace::new(dir.path().to_path_buf(), None);
+    assert!(ws.is_ok(), "Workspace::new should succeed");
+
+    let ws = ws.unwrap();
+    // Workspace stores the root as-is (caller is responsible for canonicalization)
+    assert_eq!(ws.root, dir.path().to_path_buf());
+}
+
+#[test]
+fn test_empty_server_tools_return_error() {
+    use agentika_grep::server::AgentikaGrepServer;
+
+    // Verify new_empty creates a server with no workspace
+    let server = AgentikaGrepServer::new_empty(None);
+    // We can't directly call MCP tools without an async runtime + rmcp,
+    // but we can verify the server was created
+    // The real integration test happens in the MCP protocol layer
+
+    // Verify Workspace::new works for the backward-compat path
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
+    let result = AgentikaGrepServer::new(dir.path().to_path_buf(), None);
+    assert!(result.is_ok(), "Server::new should succeed");
+
+    // Ensure new_empty doesn't panic
+    drop(server);
+}

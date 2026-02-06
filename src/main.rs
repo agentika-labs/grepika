@@ -1,7 +1,8 @@
 //! agentika-grep: Token-efficient MCP server for code search.
 //!
 //! Usage:
-//!   agentika-grep --mcp --root <path>   # Start MCP server
+//!   agentika-grep --mcp --root <path>   # Start MCP server (single workspace)
+//!   agentika-grep --mcp                 # Start MCP server (global mode, LLM calls add_workspace)
 //!   agentika-grep search <query>        # CLI search mode
 //!   agentika-grep index                 # Index the codebase
 
@@ -20,9 +21,9 @@ struct Cli {
     #[arg(long)]
     mcp: bool,
 
-    /// Root directory to search
-    #[arg(long, default_value = ".")]
-    root: PathBuf,
+    /// Root directory to search (omit for global mode where LLM calls add_workspace)
+    #[arg(long)]
+    root: Option<PathBuf>,
 
     /// Database path (default: ~/.cache/agentika-grep/<hash>.db)
     #[arg(long)]
@@ -91,18 +92,27 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Resolve root path
-    let root = cli.root.canonicalize().unwrap_or(cli.root);
-
     // Initialize profiling log file (if profiling feature enabled)
     #[cfg(feature = "profiling")]
     agentika_grep::server::init_profiling(cli.log_file.as_deref());
 
     if cli.mcp {
         // MCP server mode
-        run_mcp_server(root, cli.db).await
+        match cli.root {
+            Some(root) => {
+                // Explicit --root: backward compatible single-workspace mode
+                let root = root.canonicalize().unwrap_or(root);
+                run_mcp_server(root, cli.db).await
+            }
+            None => {
+                // Global mode: start empty, LLM calls add_workspace
+                run_mcp_server_global(cli.db).await
+            }
+        }
     } else if let Some(cmd) = cli.command {
-        // CLI mode
+        // CLI subcommands require --root
+        let root = cli.root.unwrap_or_else(|| PathBuf::from("."));
+        let root = root.canonicalize().unwrap_or(root);
         run_cli(root, cli.db, cmd).await
     } else {
         // Default: show help
@@ -118,6 +128,17 @@ async fn run_mcp_server(root: PathBuf, db: Option<PathBuf>) -> anyhow::Result<()
     let server = AgentikaGrepServer::new(root, db)?;
 
     // Run the MCP server on stdin/stdout
+    let service = server.serve(rmcp::transport::io::stdio()).await?;
+    service.waiting().await?;
+
+    Ok(())
+}
+
+async fn run_mcp_server_global(db: Option<PathBuf>) -> anyhow::Result<()> {
+    tracing::info!("Starting MCP server in global mode (no workspace pre-loaded)");
+
+    let server = AgentikaGrepServer::new_empty(db);
+
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
 

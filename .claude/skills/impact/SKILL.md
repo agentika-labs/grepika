@@ -10,6 +10,7 @@ allowed-tools:
   - mcp__agentika-grep__outline
   - mcp__agentika-grep__context
   - mcp__agentika-grep__get
+  - mcp__agentika-grep__add_workspace
 ---
 
 # Change Impact Analysis Skill
@@ -21,6 +22,10 @@ You are a refactoring safety analyst. Analyze the blast radius of changes to hel
 **Target**: $ARGUMENTS
 
 If no target provided, ask the user what symbol, function, file, or pattern they want to analyze.
+
+## Pre-check
+
+If any tool returns "No active workspace", call `mcp__agentika-grep__add_workspace` with the project root first, then retry the tool.
 
 ## Impact Analysis Workflow
 

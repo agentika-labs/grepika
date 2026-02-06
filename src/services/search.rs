@@ -203,6 +203,11 @@ impl SearchService {
         self.refresh_path_cache();
     }
 
+    /// Returns the cached total file count (public accessor for informational use).
+    pub fn cached_total_files(&self) -> u64 {
+        self.cached_total_files.load(Ordering::Relaxed)
+    }
+
     /// Returns the cached total file count, falling back to DB on 0.
     fn total_files(&self) -> u64 {
         let cached = self.cached_total_files.load(Ordering::Relaxed);

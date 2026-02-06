@@ -6,6 +6,7 @@ allowed-tools:
   - mcp__agentika-grep__stats
   - mcp__agentika-grep__index
   - mcp__agentika-grep__toc
+  - mcp__agentika-grep__add_workspace
 ---
 
 # Index Status Skill
@@ -17,6 +18,10 @@ You are a search index health checker. Diagnose issues with the agentika-grep se
 $ARGUMENTS
 
 If arguments include "reindex" or "rebuild", perform a full re-index. Otherwise, just report status.
+
+## Pre-check
+
+If any tool returns "No active workspace", call `mcp__agentika-grep__add_workspace` with the project root first, then retry the tool.
 
 ## Status Check Workflow
 

@@ -409,6 +409,102 @@ pub fn validate_read_access(root: &Path, user_path: &str) -> Result<PathBuf, Sec
 }
 
 // ============================================================================
+// Workspace Root Validation
+// ============================================================================
+
+/// System-critical paths that must never be used as workspace roots.
+/// Includes `/private/` variants for macOS (where /etc → /private/etc, etc.).
+const BLOCKED_SYSTEM_PATHS: &[&str] = &[
+    "/",
+    "/etc", "/var", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot", "/tmp",
+    "/lib", "/lib64", "/opt",
+    // macOS symlink targets
+    "/private/etc", "/private/var", "/private/tmp",
+];
+
+/// Sensitive user directories that must never be used as workspace roots.
+const BLOCKED_USER_DIRS: &[&str] = &[
+    ".ssh", ".aws", ".gnupg", ".gpg", ".config", ".local/share",
+];
+
+/// Validates that a path is safe to use as a workspace root.
+///
+/// Security checks (applied to LLM-provided paths via `add_workspace`):
+/// 1. Must exist and be a directory
+/// 2. Must not be a system-critical path
+/// 3. Must not be a sensitive user directory
+/// 4. Must have at least 3 path components (blocks `/`, `/home`, `/Users`)
+/// 5. Returns the canonicalized (symlink-resolved) path
+///
+/// The `--root` CLI flag bypasses this since it's user-provided, not LLM-provided.
+pub fn validate_workspace_root(path: &Path) -> Result<PathBuf, String> {
+    // Canonicalize first to resolve symlinks (e.g., /tmp/innocent -> /etc)
+    let canonical = path.canonicalize().map_err(|e| {
+        format!(
+            "Cannot access '{}': {}. Ensure the path exists and is readable.",
+            path.display(),
+            e
+        )
+    })?;
+
+    // Must be a directory
+    if !canonical.is_dir() {
+        return Err(format!(
+            "'{}' is not a directory. Provide a project root directory path.",
+            path.display()
+        ));
+    }
+
+    let canonical_str = canonical.to_string_lossy();
+
+    // Check system-critical paths (exact match after canonicalize)
+    for blocked in BLOCKED_SYSTEM_PATHS {
+        if canonical_str == *blocked {
+            return Err(format!(
+                "Cannot use '{}' as workspace root: system-critical directory.",
+                canonical.display()
+            ));
+        }
+    }
+
+    // Check sensitive user directories
+    let home_dir = dirs::home_dir();
+    if let Some(ref home) = home_dir {
+        // Reject home directory itself
+        if canonical == *home {
+            return Err(format!(
+                "Cannot use home directory '{}' as workspace root. Use a project subdirectory.",
+                canonical.display()
+            ));
+        }
+
+        for sensitive in BLOCKED_USER_DIRS {
+            let sensitive_path = home.join(sensitive);
+            if let Ok(sensitive_canonical) = sensitive_path.canonicalize() {
+                if canonical.starts_with(&sensitive_canonical) {
+                    return Err(format!(
+                        "Cannot use '{}' as workspace root: contains sensitive user data.",
+                        canonical.display()
+                    ));
+                }
+            }
+        }
+    }
+
+    // Minimum depth check: at least 3 components (e.g., /Users/adam/project)
+    let component_count = canonical.components().count();
+    if component_count < 3 {
+        return Err(format!(
+            "Path '{}' is too broad ({} components). Use a specific project directory.",
+            canonical.display(),
+            component_count
+        ));
+    }
+
+    Ok(canonical)
+}
+
+// ============================================================================
 // ReDoS Protection
 // ============================================================================
 
@@ -717,5 +813,92 @@ mod tests {
             validate_read_access(root, ".env"),
             Err(SecurityError::SensitiveFile { .. })
         ));
+    }
+
+    // Workspace root validation tests
+
+    #[test]
+    fn test_workspace_root_rejects_system_paths() {
+        assert!(validate_workspace_root(Path::new("/")).is_err());
+        assert!(validate_workspace_root(Path::new("/etc")).is_err());
+        assert!(validate_workspace_root(Path::new("/var")).is_err());
+        assert!(validate_workspace_root(Path::new("/usr")).is_err());
+        assert!(validate_workspace_root(Path::new("/bin")).is_err());
+        assert!(validate_workspace_root(Path::new("/tmp")).is_err());
+    }
+
+    #[test]
+    fn test_workspace_root_rejects_nonexistent() {
+        let err = validate_workspace_root(Path::new("/definitely/does/not/exist/xyzzy"));
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("Cannot access"));
+    }
+
+    #[test]
+    fn test_workspace_root_rejects_files() {
+        // /etc/passwd exists on macOS/Linux and is a file, not a directory
+        let result = validate_workspace_root(Path::new("/etc/passwd"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_workspace_root_rejects_too_shallow() {
+        // Paths with < 3 components should be rejected
+        // /tmp resolves to /private/tmp on macOS (3 components) so we test / and /etc directly
+        let err = validate_workspace_root(Path::new("/"));
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_workspace_root_accepts_valid_project() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let result = validate_workspace_root(dir.path());
+        // TempDir creates paths like /var/folders/xx/xx/T/xxx (deep enough)
+        // or /tmp/xxx which resolves to /private/tmp/xxx on macOS (4 components)
+        assert!(result.is_ok(), "Should accept valid temp dir: {:?}", result);
+        // Result should be canonicalized
+        let canonical = result.unwrap();
+        assert!(canonical.is_absolute());
+    }
+
+    #[test]
+    fn test_workspace_root_resolves_symlinks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real_dir = dir.path().join("real_project");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("symlink_project");
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
+            let result = validate_workspace_root(&link_path);
+            assert!(result.is_ok());
+            // Should resolve to the real path
+            let canonical = result.unwrap();
+            assert_eq!(
+                canonical,
+                real_dir.canonicalize().unwrap(),
+                "Should resolve symlink to real path"
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_root_rejects_home_directory() {
+        if let Some(home) = dirs::home_dir() {
+            let result = validate_workspace_root(&home);
+            assert!(result.is_err(), "Should reject home directory");
+        }
+    }
+
+    #[test]
+    fn test_workspace_root_rejects_sensitive_user_dirs() {
+        if let Some(home) = dirs::home_dir() {
+            let ssh_dir = home.join(".ssh");
+            if ssh_dir.exists() {
+                let result = validate_workspace_root(&ssh_dir);
+                assert!(result.is_err(), "Should reject ~/.ssh");
+            }
+        }
     }
 }

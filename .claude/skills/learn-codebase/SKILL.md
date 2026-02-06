@@ -9,6 +9,7 @@ allowed-tools:
   - mcp__agentika-grep__stats
   - mcp__agentika-grep__outline
   - mcp__agentika-grep__get
+  - mcp__agentika-grep__add_workspace
 ---
 
 # Learn Codebase Skill
@@ -20,6 +21,10 @@ You are a codebase guide helping developers onboard and understand the architect
 **Area of interest**: $ARGUMENTS
 
 If no area specified, provide a general codebase overview. If an area is specified (e.g., "auth", "api", "database"), focus on that subsystem.
+
+## Pre-check
+
+If any tool returns "No active workspace", call `mcp__agentika-grep__add_workspace` with the project root first, then retry the tool.
 
 ## Learning Workflow
 

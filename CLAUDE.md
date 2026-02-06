@@ -17,7 +17,10 @@ The server communicates via JSON-RPC over stdin/stdout when running as an MCP se
 # Build
 cargo build --release
 
-# Run MCP server (for IDE/editor integration)
+# Run MCP server — global mode (recommended, LLM calls add_workspace)
+./target/release/agentika-grep --mcp
+
+# Run MCP server — single workspace mode
 ./target/release/agentika-grep --mcp --root <path>
 
 # CLI commands
@@ -40,7 +43,9 @@ cargo build --release --features profiling
 ```
 MCP Server (rmcp)          ← JSON-RPC stdin/stdout
        │
-Tool Router (server.rs)    ← search, relevant, get, outline, toc, context, stats, refs, index, diff
+Tool Router (server.rs)    ← search, relevant, get, outline, toc, context, stats, refs, index, diff, add_workspace
+       │
+Workspace                  ← Holds root + SearchService + Indexer (None in global mode)
        │
 SearchService              ← spawn_blocking for async bridge
        │
@@ -91,6 +96,12 @@ SQLite + r2d2 pool         ← .agentika-grep/index.db
 | `refs` | Find all references to a symbol |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
+| `add_workspace` | Load a project workspace (global mode) |
+
+## Run Modes
+
+- **Single workspace**: `--mcp --root <path>` — workspace pre-loaded at startup, no `add_workspace` needed
+- **Global mode**: `--mcp` (no `--root`) — starts with no workspace; the LLM calls `add_workspace` with the project root. Recommended for IDE integration where the LLM reads its working directory from its system prompt.
 
 ## Verification
 

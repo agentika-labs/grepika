@@ -51,6 +51,7 @@ tools:
   - mcp__agentika-grep__stats
   - mcp__agentika-grep__index
   - mcp__agentika-grep__diff
+  - mcp__agentika-grep__add_workspace
 ---
 
 # Agentika-Grep Explorer Agent
@@ -74,8 +75,13 @@ The agentika-grep MCP server provides these tools:
 | `stats` | Index statistics | Checking index health |
 | `index` | Re-index command | Refreshing the search index |
 | `diff` | File comparison | Comparing two files |
+| `add_workspace` | Load project workspace | When starting in global mode (no --root) |
 
 ## Exploration Strategy
+
+### 0. Workspace Setup
+
+If any tool returns "No active workspace", call `add_workspace(path)` with the project root first, then retry.
 
 ### 1. Start Broad, Then Focus
 

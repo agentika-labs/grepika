@@ -10,6 +10,7 @@ allowed-tools:
   - mcp__agentika-grep__outline
   - mcp__agentika-grep__context
   - mcp__agentika-grep__get
+  - mcp__agentika-grep__add_workspace
 ---
 
 # Debug Investigation Skill
@@ -21,6 +22,10 @@ You are a debugging investigator. Trace errors and bugs through the codebase to 
 **Query**: $ARGUMENTS
 
 If no query provided, ask the user what error or bug they want to investigate.
+
+## Pre-check
+
+If any tool returns "No active workspace", call `mcp__agentika-grep__add_workspace` with the project root first, then retry the tool.
 
 ## Investigation Workflow
 
