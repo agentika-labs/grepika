@@ -18,20 +18,27 @@ const MAX_RESPONSE_BYTES: usize = 512 * 1024; // 512KB
 const NO_WORKSPACE_MSG: &str =
     "No active workspace. Call 'add_workspace' with your project's root path first.";
 
-/// Truncates a JSON response string at the last newline before the limit,
-/// appending a truncation notice.
-fn truncate_response(json: String) -> String {
+/// Truncates a JSON response string at a clean boundary before the limit,
+/// appending a truncation notice. Works with both compact and pretty JSON.
+fn truncate_response(mut json: String) -> String {
     if json.len() <= MAX_RESPONSE_BYTES {
         return json;
     }
-    let truncated = &json[..MAX_RESPONSE_BYTES];
-    // Find last newline for a clean cut
-    let cut_point = truncated.rfind('\n').unwrap_or(MAX_RESPONSE_BYTES);
-    format!(
-        "{}\n[TRUNCATED: response exceeded {} bytes]",
-        &json[..cut_point],
-        json.len()
-    )
+    let original_len = json.len();
+    // Find clean cut: last comma (JSON record boundary), then newline, then byte limit
+    let search_region = &json[..MAX_RESPONSE_BYTES];
+    let cut_point = search_region
+        .rfind(',')
+        .or_else(|| search_region.rfind('\n'))
+        .unwrap_or(MAX_RESPONSE_BYTES);
+    let safe_cut = json.floor_char_boundary(cut_point + 1);
+    // Reuse the existing allocation instead of format!()
+    json.truncate(safe_cut);
+    json.push_str(&format!(
+        "...\n[TRUNCATED: response exceeded {} bytes, showing first {}]",
+        original_len, safe_cut
+    ));
+    json
 }
 
 // ============ PROFILING ENABLED ============
@@ -42,8 +49,35 @@ mod profiling {
     use std::path::Path;
     use std::sync::Mutex;
     use std::sync::OnceLock;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static LOG_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+
+    /// Returns an ISO 8601 UTC timestamp string, e.g. "2026-02-07T15:04:05Z".
+    fn timestamp() -> String {
+        let dur = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let secs = dur.as_secs();
+        // Break epoch seconds into date/time components
+        let days = secs / 86400;
+        let time_of_day = secs % 86400;
+        let h = time_of_day / 3600;
+        let m = (time_of_day % 3600) / 60;
+        let s = time_of_day % 60;
+        // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant)
+        let z = days as i64 + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = (z - era * 146097) as u64;
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+        let y = if mo <= 2 { y + 1 } else { y };
+        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
+    }
 
     /// Initialize profiling with optional log file path.
     /// If path is None, logs go to stderr (default).
@@ -63,17 +97,23 @@ mod profiling {
                     .map(Mutex::new)
             })
         });
+        // Confirm profiling is active
+        match path {
+            Some(p) => log(&format!("profiling started → {}", p.display())),
+            None => log("profiling started → stderr"),
+        }
     }
 
     /// Log a profiling message to file or stderr.
     pub fn log(msg: &str) {
+        let ts = timestamp();
         if let Some(Some(file)) = LOG_FILE.get() {
             if let Ok(mut f) = file.lock() {
-                let _ = writeln!(f, "{}", msg);
+                let _ = writeln!(f, "{ts} {msg}");
                 let _ = f.flush();
             }
         } else {
-            eprintln!("{}", msg);
+            eprintln!("{ts} {msg}");
         }
     }
 
@@ -124,7 +164,7 @@ where
 
     match result {
         Ok(Ok(output)) => {
-            let json = serde_json::to_string_pretty(&output)
+            let json = serde_json::to_string(&output)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
 
             let json = truncate_response(json);
@@ -164,7 +204,7 @@ where
 
     match result {
         Ok(Ok(output)) => {
-            let json = serde_json::to_string_pretty(&output)
+            let json = serde_json::to_string(&output)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
             let json = truncate_response(json);
             Ok(CallToolResult::success(vec![Content::text(json)]))
@@ -295,11 +335,21 @@ impl AgentikaGrepServer {
         let db_override = self.db_override.clone();
         let workspace_lock = Arc::clone(&self.workspace);
 
+        #[cfg(feature = "profiling")]
+        let start = std::time::Instant::now();
+        #[cfg(feature = "profiling")]
+        let mem_before = profiling::get_memory_mb();
+
         // Workspace::new() is blocking (DB open, trigram load) — use spawn_blocking
         let result = tokio::task::spawn_blocking(move || {
             Workspace::new(validated.clone(), db_override)
         })
         .await;
+
+        #[cfg(feature = "profiling")]
+        let elapsed = start.elapsed();
+        #[cfg(feature = "profiling")]
+        let mem_after = profiling::get_memory_mb();
 
         match result {
             Ok(Ok(ws)) => {
@@ -309,6 +359,15 @@ impl AgentikaGrepServer {
 
                 // Store the new workspace
                 *workspace_lock.write().unwrap() = Some(Arc::new(ws));
+
+                #[cfg(feature = "profiling")]
+                profiling::log(&format!(
+                    "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | loaded {} files",
+                    elapsed,
+                    mem_after,
+                    mem_after - mem_before,
+                    file_count
+                ));
 
                 let msg = format!(
                     "Workspace loaded: {}\nDatabase: {}\nIndexed files: {}{}",
@@ -323,10 +382,20 @@ impl AgentikaGrepServer {
                 );
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
             }
-            Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "Failed to load workspace: {}",
-                e
-            ))])),
+            Ok(Err(e)) => {
+                #[cfg(feature = "profiling")]
+                profiling::log(&format!(
+                    "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
+                    elapsed,
+                    mem_after,
+                    mem_after - mem_before,
+                ));
+
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to load workspace: {}",
+                    e
+                ))]))
+            }
             Err(e) => Err(rmcp::Error::internal_error(e.to_string(), None)),
         }
     }

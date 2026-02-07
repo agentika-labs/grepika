@@ -92,28 +92,16 @@ fn default_diff_context() -> usize {
 /// Output for the diff tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiffOutput {
-    /// First file path
-    pub file1: String,
-    /// Second file path
-    pub file2: String,
     /// Diff hunks
     pub hunks: Vec<DiffHunk>,
     /// Summary statistics
     pub stats: DiffStats,
 }
 
-/// A diff hunk.
+/// A diff hunk (includes @@ header in content).
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiffHunk {
-    /// Starting line in file1
-    pub old_start: usize,
-    /// Number of lines in file1
-    pub old_lines: usize,
-    /// Starting line in file2
-    pub new_start: usize,
-    /// Number of lines in file2
-    pub new_lines: usize,
-    /// Hunk content with +/- prefixes
+    /// Hunk content with @@ header and +/- prefixes
     pub content: String,
 }
 
@@ -124,8 +112,6 @@ pub struct DiffStats {
     pub additions: usize,
     /// Lines removed
     pub deletions: usize,
-    /// Lines changed
-    pub changes: usize,
 }
 
 /// Executes the diff tool.
@@ -164,8 +150,6 @@ pub fn execute_diff(service: &Arc<SearchService>, input: DiffInput) -> Result<Di
     let (hunks, stats) = compute_diff(&lines1, &lines2, input.context);
 
     Ok(DiffOutput {
-        file1: input.file1,
-        file2: input.file2,
         hunks,
         stats,
     })
@@ -235,12 +219,11 @@ fn compute_diff(
 
             if remaining_old > context && remaining_new > context {
                 // End hunk and start fresh
+                let old_count = old_idx - hunk_old_start + 2;
+                let new_count = new_idx - hunk_new_start + 2;
+                let header = format!("@@ -{},{} +{},{} @@", hunk_old_start, old_count, hunk_new_start, new_count);
                 hunks.push(DiffHunk {
-                    old_start: hunk_old_start,
-                    old_lines: old_idx - hunk_old_start + 2,
-                    new_start: hunk_new_start,
-                    new_lines: new_idx - hunk_new_start + 2,
-                    content: hunk_lines.join("\n"),
+                    content: format!("{}\n{}", header, hunk_lines.join("\n")),
                 });
                 hunk_lines.clear();
                 in_hunk = false;
@@ -278,19 +261,17 @@ fn compute_diff(
 
     // Finalize last hunk
     if in_hunk && !hunk_lines.is_empty() {
+        let old_count = old_lines.len() - hunk_old_start + 1;
+        let new_count = new_lines.len() - hunk_new_start + 1;
+        let header = format!("@@ -{},{} +{},{} @@", hunk_old_start, old_count, hunk_new_start, new_count);
         hunks.push(DiffHunk {
-            old_start: hunk_old_start,
-            old_lines: old_lines.len() - hunk_old_start + 1,
-            new_start: hunk_new_start,
-            new_lines: new_lines.len() - hunk_new_start + 1,
-            content: hunk_lines.join("\n"),
+            content: format!("{}\n{}", header, hunk_lines.join("\n")),
         });
     }
 
     let stats = DiffStats {
         additions,
         deletions,
-        changes: additions.min(deletions),
     };
 
     (hunks, stats)

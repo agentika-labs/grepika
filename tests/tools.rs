@@ -178,7 +178,7 @@ fn test_search_tool_happy_path() {
         result.results.iter().any(|r| r.path.contains("auth")),
         "Should include auth.rs in results"
     );
-    assert!(result.total_returned > 0);
+    assert!(!result.results.is_empty());
 }
 
 #[test]
@@ -238,7 +238,6 @@ fn test_search_tool_no_matches() {
     let result = execute_search(&search, input).unwrap();
 
     assert!(result.results.is_empty());
-    assert_eq!(result.total_returned, 0);
 }
 
 #[test]
@@ -272,7 +271,6 @@ fn test_relevant_tool_happy_path() {
     let result = execute_relevant(&search, input).unwrap();
 
     assert!(!result.files.is_empty());
-    assert_eq!(result.topic, "authentication");
     // Should find auth-related files
     assert!(
         result.files.iter().any(|f| f.path.contains("auth")),
@@ -461,11 +459,7 @@ fn test_toc_tool_happy_path() {
     assert!(result.total_files > 0);
 
     // Should find our test files
-    let has_main = result
-        .tree
-        .iter()
-        .any(|e| e.name == "main.rs" && e.entry_type == "file");
-    assert!(has_main, "Should include main.rs");
+    assert!(result.tree.contains("main.rs"), "Should include main.rs");
 }
 
 #[test]
@@ -480,15 +474,14 @@ fn test_toc_tool_respects_depth() {
 
     let result = execute_toc(&search, input).unwrap();
 
-    // src directory should have empty children at depth 1
-    for entry in &result.tree {
-        if entry.entry_type == "dir" {
-            assert!(
-                entry.children.is_empty(),
-                "At depth 1, directories should have no children"
-            );
-        }
-    }
+    // At depth 1, directories should be listed but no children shown
+    // The tree string should contain top-level items but no indented entries
+    assert!(!result.tree.is_empty());
+    // No lines should have 2-space indentation (depth 1 means only top-level)
+    assert!(
+        !result.tree.lines().any(|l| l.starts_with("  ")),
+        "At depth 1, directories should have no children listed"
+    );
 }
 
 #[test]
@@ -503,12 +496,8 @@ fn test_toc_tool_nested_directory() {
     let result = execute_toc(&search, input).unwrap();
 
     assert!(!result.tree.is_empty());
-    // Should find utils subdirectory
-    let has_utils = result
-        .tree
-        .iter()
-        .any(|e| e.name == "utils" && e.entry_type == "dir");
-    assert!(has_utils, "Should find utils subdirectory");
+    // Should find utils subdirectory (listed with trailing slash)
+    assert!(result.tree.contains("utils/"), "Should find utils subdirectory");
 }
 
 // ============================================================================
@@ -627,7 +616,6 @@ fn test_refs_tool_finds_usages() {
     let result = execute_refs(&search, input).unwrap();
 
     assert!(!result.references.is_empty());
-    assert_eq!(result.symbol, "authenticate");
 
     // Should include the definition
     let has_definition = result
@@ -635,7 +623,7 @@ fn test_refs_tool_finds_usages() {
         .iter()
         .any(|r| r.ref_type == "definition" || r.content.contains("pub fn authenticate"));
     assert!(
-        has_definition || result.total > 0,
+        has_definition || !result.references.is_empty(),
         "Should find at least one reference"
     );
 }
@@ -666,7 +654,6 @@ fn test_refs_tool_no_matches() {
     let result = execute_refs(&search, input).unwrap();
 
     assert!(result.references.is_empty());
-    assert_eq!(result.total, 0);
 }
 
 // ============================================================================

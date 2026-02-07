@@ -183,28 +183,12 @@ fn default_toc_depth() -> usize {
 /// Output for the toc tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TocOutput {
-    /// Directory path
-    pub path: String,
-    /// Directory tree
-    pub tree: Vec<TocEntry>,
+    /// Indented directory tree (like `tree` command output)
+    pub tree: String,
     /// Total files
     pub total_files: usize,
     /// Total directories
     pub total_dirs: usize,
-}
-
-/// A TOC entry.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct TocEntry {
-    /// Entry name
-    pub name: String,
-    /// Entry type ("file" or "dir")
-    pub entry_type: String,
-    /// Relative path
-    pub path: String,
-    /// Children (for directories)
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub children: Vec<TocEntry>,
 }
 
 /// Executes the toc tool.
@@ -223,13 +207,16 @@ pub fn execute_toc(service: &Arc<SearchService>, input: TocInput) -> Result<TocO
     let full_path = security::validate_path(service.root(), &input.path)
         .map_err(|e| e.to_string())?;
 
-    let (tree, files, dirs) = build_toc(&full_path, service.root(), input.depth, 0)?;
+    let mut tree = String::with_capacity(4096); // Pre-allocate, ~40 bytes per entry
+    let mut total_files = 0;
+    let mut total_dirs = 0;
+
+    build_toc_text(&full_path, input.depth, 0, &mut tree, &mut total_files, &mut total_dirs)?;
 
     Ok(TocOutput {
-        path: input.path,
         tree,
-        total_files: files,
-        total_dirs: dirs,
+        total_files,
+        total_dirs,
     })
 }
 
@@ -829,19 +816,18 @@ fn extract_go_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
     None
 }
 
-fn build_toc(
+/// Builds an indented text tree, writing directly into the output string.
+fn build_toc_text(
     path: &Path,
-    root: &Path,
     max_depth: usize,
     current_depth: usize,
-) -> Result<(Vec<TocEntry>, usize, usize), String> {
+    output: &mut String,
+    total_files: &mut usize,
+    total_dirs: &mut usize,
+) -> Result<(), String> {
     if current_depth >= max_depth || !path.is_dir() {
-        return Ok((vec![], 0, 0));
+        return Ok(());
     }
-
-    let mut entries = Vec::new();
-    let mut total_files = 0;
-    let mut total_dirs = 0;
 
     let mut items: Vec<_> = fs::read_dir(path)
         .map_err(|e| format!("Failed to read directory: {e}"))?
@@ -859,6 +845,8 @@ fn build_toc(
         }
     });
 
+    let indent = "  ".repeat(current_depth);
+
     for item in items {
         let item_path = item.path();
         let name = item.file_name().to_string_lossy().to_string();
@@ -868,35 +856,19 @@ fn build_toc(
             continue;
         }
 
-        let relative = item_path
-            .strip_prefix(root)
-            .unwrap_or(&item_path)
-            .to_string_lossy()
-            .to_string();
-
         if item_path.is_dir() {
-            total_dirs += 1;
-            let (children, sub_files, sub_dirs) =
-                build_toc(&item_path, root, max_depth, current_depth + 1)?;
-            total_files += sub_files;
-            total_dirs += sub_dirs;
-
-            entries.push(TocEntry {
-                name,
-                entry_type: "dir".to_string(),
-                path: relative,
-                children,
-            });
+            *total_dirs += 1;
+            output.push_str(&indent);
+            output.push_str(&name);
+            output.push_str("/\n");
+            build_toc_text(&item_path, max_depth, current_depth + 1, output, total_files, total_dirs)?;
         } else {
-            total_files += 1;
-            entries.push(TocEntry {
-                name,
-                entry_type: "file".to_string(),
-                path: relative,
-                children: vec![],
-            });
+            *total_files += 1;
+            output.push_str(&indent);
+            output.push_str(&name);
+            output.push('\n');
         }
     }
 
-    Ok((entries, total_files, total_dirs))
+    Ok(())
 }

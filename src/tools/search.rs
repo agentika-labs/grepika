@@ -113,14 +113,8 @@ fn is_zero(v: &usize) -> bool {
 pub struct SearchOutput {
     /// Search results
     pub results: Vec<SearchResultItem>,
-    /// Number of results returned
-    pub total_returned: usize,
     /// Whether more results exist beyond the limit
     pub has_more: bool,
-    /// Query that was executed
-    pub query: String,
-    /// Score interpretation guide
-    pub score_guide: &'static str,
 }
 
 /// A single search result.
@@ -136,9 +130,6 @@ pub struct SearchResultItem {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<MatchSnippetOutput>,
 }
-
-/// Score guide text for search results
-const SCORE_GUIDE: &str = "Scores: 0.0-1.0 scale. >0.7 excellent, 0.4-0.7 good, <0.4 weak";
 
 /// Executes the search tool.
 ///
@@ -189,11 +180,8 @@ pub fn execute_search(
         .collect();
 
     Ok(SearchOutput {
-        total_returned: items.len(),
-        has_more,
         results: items,
-        query: input.query,
-        score_guide: SCORE_GUIDE,
+        has_more,
     })
 }
 
@@ -216,10 +204,6 @@ fn default_relevant_limit() -> usize {
 pub struct RelevantOutput {
     /// Most relevant files
     pub files: Vec<RelevantFile>,
-    /// Topic searched
-    pub topic: String,
-    /// Number of results returned
-    pub total_returned: usize,
     /// Whether more results exist
     pub has_more: bool,
 }
@@ -278,11 +262,8 @@ pub fn execute_relevant(
         })
         .collect();
 
-    let total_returned = files.len();
     Ok(RelevantOutput {
         files,
-        topic: input.topic,
-        total_returned,
         has_more,
     })
 }

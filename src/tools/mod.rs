@@ -14,7 +14,7 @@ pub use analysis::{
 // content
 pub use content::{
     execute_context, execute_get, execute_outline, execute_toc, ContextInput, ContextOutput,
-    GetInput, GetOutput, OutlineInput, OutlineOutput, Symbol, TocEntry, TocInput, TocOutput,
+    GetInput, GetOutput, OutlineInput, OutlineOutput, Symbol, TocInput, TocOutput,
 };
 
 // index

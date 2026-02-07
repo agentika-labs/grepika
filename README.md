@@ -6,6 +6,41 @@ Token-efficient MCP server for code search. Combines three search backends for h
 - **Grep** - Parallel regex search using ripgrep internals
 - **Trigram** - Fast substring search via 3-byte sequence indexing
 
+## Why agentika-grep?
+
+Every built-in grep call burns **6x more context** than it needs to. agentika-grep breaks even after just **2 searches** — then every query after that is pure savings.
+
+**Not faster grep — a codebase understanding engine.**
+
+| You want to... | Built-in Grep | agentika-grep |
+|----------------|---------------|---------------|
+| Find a pattern | Unranked file list | **Ranked results** with relevance scores |
+| Understand a symbol | Multiple grep calls, manual assembly | `refs` classifies definitions, imports, usages |
+| Explore structure | Read entire files | `outline` extracts functions/classes/structs |
+| Find related code | Guess-and-grep loop | `related` finds files sharing symbols |
+| Natural language query | Doesn't work (needs regex) | `search` with intent detection routes to BM25 |
+
+### Performance
+
+Benchmarked on the same codebase, same queries ([criterion](https://github.com/bheisler/criterion.rs)):
+
+| Metric | agentika-grep | Built-in Grep (ripgrep) |
+|--------|--------------|------------------------|
+| Search latency | **2.5 ms** | 5.3 ms |
+| Response size | **364 bytes avg** | 2,693 bytes avg |
+| Relevance ranking | BM25 + trigram IDF | None (unranked) |
+| Break-even | **2 queries** | N/A |
+
+**2x faster search. 6x smaller responses. Ranked results.**
+
+**Technical architecture:**
+- **3 search backends** (FTS5 + grep + trigram) with weighted score merging
+- **BM25 ranking** with tuned column weights — the same algorithm powering Elasticsearch
+- **Query intent detection** — automatically classifies regex vs natural language vs exact symbol
+- **190 tests**, zero clippy warnings, Criterion benchmarks for every claim
+
+**Add to your MCP config. Index once. Search smarter.**
+
 ## Installation
 
 ### npm (recommended for MCP users)

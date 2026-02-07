@@ -229,12 +229,8 @@ fn default_refs_limit() -> usize {
 /// Output for the refs tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RefsOutput {
-    /// Symbol searched
-    pub symbol: String,
     /// References found
     pub references: Vec<Reference>,
-    /// Total count
-    pub total: usize,
 }
 
 /// A reference to a symbol.
@@ -298,7 +294,7 @@ pub fn execute_refs(service: &Arc<SearchService>, input: RefsInput) -> Result<Re
                 references.push(Reference {
                     path: relative,
                     line: line_num + 1,
-                    content: line.trim().to_string(),
+                    content: trim_around_match(line.trim(), &input.symbol),
                     ref_type,
                 });
 
@@ -313,12 +309,8 @@ pub fn execute_refs(service: &Arc<SearchService>, input: RefsInput) -> Result<Re
         }
     }
 
-    let total = references.len();
-
     Ok(RefsOutput {
-        symbol: input.symbol,
         references,
-        total,
     })
 }
 
@@ -392,6 +384,34 @@ fn is_common_keyword(word: &str) -> bool {
             | "some"
             | "none"
     )
+}
+
+/// Trims a line to ~60 chars centered on the first occurrence of `symbol`.
+/// If the line is short enough, returns it unchanged.
+fn trim_around_match(line: &str, symbol: &str) -> String {
+    const MAX_LEN: usize = 60;
+    if line.len() <= MAX_LEN {
+        return line.to_string();
+    }
+    let match_pos = match line.find(symbol) {
+        Some(pos) => pos,
+        None => return line[..line.floor_char_boundary(MAX_LEN)].to_string(),
+    };
+    // Center a window around the match
+    let window_start = match_pos.saturating_sub((MAX_LEN - symbol.len()) / 2);
+    let window_end = (window_start + MAX_LEN).min(line.len());
+    // Snap to char boundaries
+    let safe_start = line.ceil_char_boundary(window_start);
+    let safe_end = line.floor_char_boundary(window_end);
+    let mut result = String::with_capacity(MAX_LEN + 6);
+    if safe_start > 0 {
+        result.push_str("...");
+    }
+    result.push_str(&line[safe_start..safe_end]);
+    if safe_end < line.len() {
+        result.push_str("...");
+    }
+    result
 }
 
 fn classify_reference(line: &str, symbol: &str) -> String {

@@ -96,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "profiling")]
     agentika_grep::server::init_profiling(cli.log_file.as_deref());
 
+    #[cfg(not(feature = "profiling"))]
+    if cli.log_file.is_some() {
+        eprintln!("warning: --log-file has no effect without --features profiling");
+    }
+
     if cli.mcp {
         // MCP server mode
         match cli.root {

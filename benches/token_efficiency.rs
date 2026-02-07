@@ -329,16 +329,13 @@ fn measure_agentika_search(service: &SearchService, query: &str, limit: usize) -
         })
         .collect();
 
-    let total_returned = items.len();
+    let result_count = items.len();
     let output = SearchOutput {
         results: items,
-        total_returned,
         has_more: false,
-        query: query.to_string(),
-        score_guide: "Scores: 0.0-1.0 scale. >0.7 excellent, 0.4-0.7 good, <0.4 weak",
     };
 
-    TokenMetrics::from_output(&output, output.total_returned, output.total_returned)
+    TokenMetrics::from_output(&output, result_count, result_count)
 }
 
 // ============================================================================
