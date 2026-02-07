@@ -4,7 +4,29 @@ use crate::security;
 use crate::services::SearchService;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
+
+/// Relativizes a path against the workspace root.
+fn relativize_path(path: &Path, root: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Maps internal `MatchSnippet` to the output representation.
+fn map_snippets(snippets: &[crate::services::MatchSnippet]) -> Vec<MatchSnippetOutput> {
+    snippets
+        .iter()
+        .map(|s| MatchSnippetOutput {
+            line: s.line_number,
+            text: s.line_content.clone(),
+            highlight_start: s.match_start,
+            highlight_end: s.match_end,
+        })
+        .collect()
+}
 
 /// Search mode for controlling which backend(s) to use.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -158,42 +180,11 @@ pub fn execute_search(
         .iter()
         .take(input.limit)
         .filter(|r| security::is_sensitive_file(&r.path).is_none())
-        .map(|r| {
-            let relative_path = r
-                .path
-                .strip_prefix(root)
-                .unwrap_or(&r.path)
-                .to_string_lossy()
-                .to_string();
-
-            let mut sources = Vec::new();
-            if r.sources.fts {
-                sources.push("fts".to_string());
-            }
-            if r.sources.grep {
-                sources.push("grep".to_string());
-            }
-            if r.sources.trigram {
-                sources.push("trigram".to_string());
-            }
-
-            let snippets: Vec<MatchSnippetOutput> = r
-                .snippets
-                .iter()
-                .map(|s| MatchSnippetOutput {
-                    line: s.line_number,
-                    text: s.line_content.clone(),
-                    highlight_start: s.match_start,
-                    highlight_end: s.match_end,
-                })
-                .collect();
-
-            SearchResultItem {
-                path: relative_path,
-                score: r.score.as_f64(),
-                sources,
-                snippets,
-            }
+        .map(|r| SearchResultItem {
+            path: relativize_path(&r.path, root),
+            score: r.score.as_f64(),
+            sources: r.sources.to_labels(),
+            snippets: map_snippets(&r.snippets),
         })
         .collect();
 
@@ -275,32 +266,14 @@ pub fn execute_relevant(
         .take(input.limit)
         .filter(|r| security::is_sensitive_file(&r.path).is_none())
         .map(|r| {
-            let relative_path = r
-                .path
-                .strip_prefix(root)
-                .unwrap_or(&r.path)
-                .to_string_lossy()
-                .to_string();
-
-            // Generate keyword-based reason from snippets and query
+            let relative_path = relativize_path(&r.path, root);
             let reason = generate_relevant_reason(r, &query_words, &relative_path);
-
-            let snippets: Vec<MatchSnippetOutput> = r
-                .snippets
-                .iter()
-                .map(|s| MatchSnippetOutput {
-                    line: s.line_number,
-                    text: s.line_content.clone(),
-                    highlight_start: s.match_start,
-                    highlight_end: s.match_end,
-                })
-                .collect();
 
             RelevantFile {
                 path: relative_path,
                 score: r.score.as_f64(),
                 reason,
-                snippets,
+                snippets: map_snippets(&r.snippets),
             }
         })
         .collect();
@@ -352,9 +325,7 @@ fn generate_relevant_reason(
         format!("Matches keywords: {}", matched_keywords.join(", "))
     } else {
         // Fallback to source-based reason
-        let source_count =
-            result.sources.fts as u8 + result.sources.grep as u8 + result.sources.trigram as u8;
-        match source_count {
+        match result.sources.count() {
             3 => "Strong match across all search backends".to_string(),
             2 => "Good match across multiple search backends".to_string(),
             _ => "Match found".to_string(),

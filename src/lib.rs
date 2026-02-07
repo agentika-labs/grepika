@@ -35,6 +35,7 @@
 //!    └──────────────────────────────┘
 //! ```
 
+#[doc(hidden)]
 pub mod bench_utils;
 pub mod db;
 pub mod error;

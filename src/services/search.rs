@@ -93,6 +93,28 @@ pub struct SearchSources {
     pub trigram: bool,
 }
 
+impl SearchSources {
+    /// Returns human-readable labels for each active source.
+    pub fn to_labels(&self) -> Vec<String> {
+        let mut labels = Vec::with_capacity(3);
+        if self.fts {
+            labels.push("fts".to_string());
+        }
+        if self.grep {
+            labels.push("grep".to_string());
+        }
+        if self.trigram {
+            labels.push("trigram".to_string());
+        }
+        labels
+    }
+
+    /// Returns how many sources contributed to this result.
+    pub fn count(&self) -> u8 {
+        self.fts as u8 + self.grep as u8 + self.trigram as u8
+    }
+}
+
 /// Configuration for combined search.
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
@@ -164,7 +186,7 @@ impl SearchService {
         let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
 
         // Pre-populate cached total_files from DB (best-effort)
-        let total = db.total_files().unwrap_or(0);
+        let total = db.file_count().unwrap_or(0);
 
         // Eagerly load path cache from DB
         let path_cache = Self::load_path_cache(&db);
@@ -197,7 +219,7 @@ impl SearchService {
 
     /// Updates the cached total file count and path cache (call after indexing).
     pub fn refresh_total_files(&self) {
-        if let Ok(total) = self.db.total_files() {
+        if let Ok(total) = self.db.file_count() {
             self.cached_total_files.store(total, Ordering::Relaxed);
         }
         self.refresh_path_cache();
@@ -215,7 +237,7 @@ impl SearchService {
             return cached;
         }
         // Fallback: cache was never populated
-        let total = self.db.total_files().unwrap_or(1);
+        let total = self.db.file_count().unwrap_or(1);
         self.cached_total_files.store(total, Ordering::Relaxed);
         total
     }
@@ -561,8 +583,7 @@ impl SearchService {
         let mut results: Vec<SearchResult> = score_accum
             .into_iter()
             .map(|(file_id, (score_sum, weight_sum, sources, path))| {
-                let source_count =
-                    sources.fts as u8 + sources.grep as u8 + sources.trigram as u8;
+                let source_count = sources.count();
 
                 let base_score = if weight_sum > 0.0 {
                     score_sum / weight_sum

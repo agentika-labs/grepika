@@ -23,6 +23,24 @@ pub struct FileData {
     pub hash: u64,
 }
 
+/// Executes a `query_row` and maps `QueryReturnedNoRows` to `Ok(None)`.
+fn query_row_optional<T, P, F>(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: P,
+    f: F,
+) -> DbResult<Option<T>>
+where
+    P: rusqlite::Params,
+    F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+{
+    match conn.query_row(sql, params, f) {
+        Ok(val) => Ok(Some(val)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(DbError::Sqlite(e)),
+    }
+}
+
 /// Database handle with connection pooling.
 ///
 /// Uses r2d2 because `rusqlite::Connection` is NOT Sync.
@@ -158,17 +176,12 @@ impl Database {
     /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file(&self, file_id: FileId) -> DbResult<Option<(String, String)>> {
         let conn = self.conn()?;
-        let result = conn.query_row(
+        query_row_optional(
+            &conn,
             "SELECT path, content FROM files WHERE file_id = ?1",
             rusqlite::params![file_id.as_u32()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        );
-
-        match result {
-            Ok(data) => Ok(Some(data)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(DbError::Sqlite(e)),
-        }
+        )
     }
 
     /// Gets file content by path.
@@ -179,17 +192,12 @@ impl Database {
     /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file_by_path(&self, path: &str) -> DbResult<Option<(FileId, String)>> {
         let conn = self.conn()?;
-        let result = conn.query_row(
+        query_row_optional(
+            &conn,
             "SELECT file_id, content FROM files WHERE path = ?1",
             rusqlite::params![path],
             |row| Ok((FileId::new(row.get::<_, u32>(0)?), row.get::<_, String>(1)?)),
-        );
-
-        match result {
-            Ok(data) => Ok(Some(data)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(DbError::Sqlite(e)),
-        }
+        )
     }
 
     /// Stores trigram index data.
@@ -219,17 +227,12 @@ impl Database {
     /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_trigram_files(&self, trigram: &[u8]) -> DbResult<Option<Vec<u8>>> {
         let conn = self.conn()?;
-        let result = conn.query_row(
+        query_row_optional(
+            &conn,
             "SELECT file_ids FROM trigrams WHERE trigram = ?1",
             rusqlite::params![trigram],
             |row| row.get::<_, Vec<u8>>(0),
-        );
-
-        match result {
-            Ok(data) => Ok(Some(data)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(DbError::Sqlite(e)),
-        }
+        )
     }
 
     /// Loads all trigrams from the database.
@@ -440,17 +443,12 @@ impl Database {
     /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file_path(&self, file_id: FileId) -> DbResult<Option<String>> {
         let conn = self.conn()?;
-        let result = conn.query_row(
+        query_row_optional(
+            &conn,
             "SELECT path FROM files WHERE file_id = ?1",
             rusqlite::params![file_id.as_u32()],
             |row| row.get::<_, String>(0),
-        );
-
-        match result {
-            Ok(path) => Ok(Some(path)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(DbError::Sqlite(e)),
-        }
+        )
     }
 
     /// Gets file ID by path (without loading content).
@@ -461,17 +459,12 @@ impl Database {
     /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file_id(&self, path: &str) -> DbResult<Option<FileId>> {
         let conn = self.conn()?;
-        let result = conn.query_row(
+        query_row_optional(
+            &conn,
             "SELECT file_id FROM files WHERE path = ?1",
             rusqlite::params![path],
-            |row| row.get::<_, u32>(0),
-        );
-
-        match result {
-            Ok(id) => Ok(Some(FileId::new(id))),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(DbError::Sqlite(e)),
-        }
+            |row| Ok(FileId::new(row.get::<_, u32>(0)?)),
+        )
     }
 
     /// Batch gets file paths by IDs (without loading content).
@@ -550,18 +543,6 @@ impl Database {
             .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
 
         Ok(results)
-    }
-
-    /// Gets the total number of indexed files.
-    ///
-    /// Used by trigram IDF scoring to calculate inverse document frequency.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
-    pub fn total_files(&self) -> DbResult<u64> {
-        self.file_count()
     }
 
     /// Gets total file count.
