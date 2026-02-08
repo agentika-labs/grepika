@@ -4,7 +4,7 @@ use crate::db::Database;
 use crate::services::{Indexer, SearchService, TrigramIndex};
 use crate::tools;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::{schemars, tool, ServerHandler};
+use rmcp::{tool, ServerHandler};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -117,17 +117,24 @@ mod profiling {
         }
     }
 
-    /// Gets current memory usage in MB (macOS/Linux only).
+    /// Gets current memory usage in MB.
     pub fn get_memory_mb() -> f64 {
-        use std::process::Command;
-        Command::new("ps")
-            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .map(|kb| kb as f64 / 1024.0)
-            .unwrap_or(0.0)
+        #[cfg(unix)]
+        {
+            use std::process::Command;
+            Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(|kb| kb as f64 / 1024.0)
+                .unwrap_or(0.0)
+        }
+        #[cfg(not(unix))]
+        {
+            0.0
+        }
     }
 }
 

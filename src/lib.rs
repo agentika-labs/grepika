@@ -73,7 +73,7 @@ pub fn default_db_path(root: &Path) -> PathBuf {
     let hash: String = result[..8].iter().map(|b| format!("{b:02x}")).collect();
 
     let cache_dir = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join("agentika-grep");
 
     cache_dir.join(format!("{hash}.db"))

@@ -45,6 +45,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # Platform-specific directories
 dirs = "5"
 
+# Windows-safe canonicalization (strips \\?\ prefix)
+dunce = "1"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

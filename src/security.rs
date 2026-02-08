@@ -108,18 +108,18 @@ pub fn validate_path(root: &Path, user_path: &str) -> Result<PathBuf, SecurityEr
 
     // Try to canonicalize for existing paths, use normalized for non-existent
     let resolved = if joined.exists() {
-        joined.canonicalize().map_err(|_| SecurityError::PathTraversal {
+        dunce::canonicalize(&joined).map_err(|_| SecurityError::PathTraversal {
             attempted: user_path.to_string(),
             root: root.to_path_buf(),
         })?
     } else {
         // For non-existent paths, verify the normalized path is safe
-        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
         canonical_root.join(&normalized)
     };
 
     // Final verification: resolved path must start with root
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     if !resolved.starts_with(&canonical_root) {
         return Err(SecurityError::PathTraversal {
             attempted: user_path.to_string(),
@@ -344,7 +344,19 @@ impl SensitivePattern {
             PatternMatchType::Prefix => filename.starts_with(self.pattern),
             PatternMatchType::Suffix => filename.ends_with(self.pattern),
             PatternMatchType::Contains => filename.contains(self.pattern),
-            PatternMatchType::PathContains => path_str.contains(self.pattern),
+            PatternMatchType::PathContains => {
+                #[cfg(windows)]
+                {
+                    // Normalize backslashes for Windows compatibility
+                    // (patterns use '/' but Windows paths use '\')
+                    let normalized = path_str.replace('\\', "/");
+                    normalized.contains(self.pattern)
+                }
+                #[cfg(not(windows))]
+                {
+                    path_str.contains(self.pattern)
+                }
+            }
         }
     }
 }
@@ -412,15 +424,86 @@ pub fn validate_read_access(root: &Path, user_path: &str) -> Result<PathBuf, Sec
 // Workspace Root Validation
 // ============================================================================
 
-/// System-critical paths that must never be used as workspace roots.
-/// Includes `/private/` variants for macOS (where /etc → /private/etc, etc.).
-const BLOCKED_SYSTEM_PATHS: &[&str] = &[
-    "/",
-    "/etc", "/var", "/usr", "/bin", "/sbin", "/sys", "/proc", "/dev", "/boot", "/tmp",
-    "/lib", "/lib64", "/opt",
-    // macOS symlink targets
-    "/private/etc", "/private/var", "/private/tmp",
-];
+/// Returns true if the canonicalized path is a blocked system location.
+///
+/// On Unix: exact match against known system paths.
+/// On Windows: structural analysis using `Path::components()` to handle
+/// drive letter variation, case-insensitivity, and UNC paths.
+fn is_blocked_system_path(canonical: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let components: Vec<_> = canonical.components().collect();
+
+        // Block ALL drive roots (C:\, D:\, etc.)
+        if matches!(
+            components.as_slice(),
+            [Component::Prefix(_), Component::RootDir] | [Component::Prefix(_)]
+        ) {
+            return true;
+        }
+
+        // Block UNC and device paths entirely (network shares).
+        // Note: Prefix::VerbatimDisk is not listed because dunce::canonicalize()
+        // strips the \\?\ prefix, converting VerbatimDisk to Disk before we get here.
+        if let Some(Component::Prefix(p)) = components.first() {
+            if matches!(
+                p.kind(),
+                Prefix::UNC(..)
+                    | Prefix::VerbatimUNC(..)
+                    | Prefix::DeviceNS(..)
+                    | Prefix::Verbatim(..)
+            ) {
+                return true;
+            }
+        }
+
+        // Block known system directories (case-insensitive)
+        if components.len() == 3 {
+            if let Some(Component::Normal(first_dir)) = components.get(2) {
+                let dir_lower = first_dir.to_string_lossy().to_lowercase();
+                let blocked = [
+                    "windows",
+                    "users",
+                    "program files",
+                    "program files (x86)",
+                    "programdata",
+                    "recovery",
+                    "system volume information",
+                ];
+                if blocked.contains(&dir_lower.as_str()) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        let canonical_str = canonical.to_string_lossy();
+        const BLOCKED: &[&str] = &[
+            "/",
+            "/etc",
+            "/var",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/sys",
+            "/proc",
+            "/dev",
+            "/boot",
+            "/tmp",
+            "/lib",
+            "/lib64",
+            "/opt",
+            // macOS symlink targets
+            "/private/etc",
+            "/private/var",
+            "/private/tmp",
+        ];
+        BLOCKED.iter().any(|b| canonical_str == *b)
+    }
+}
 
 /// Sensitive user directories that must never be used as workspace roots.
 const BLOCKED_USER_DIRS: &[&str] = &[
@@ -439,7 +522,7 @@ const BLOCKED_USER_DIRS: &[&str] = &[
 /// The `--root` CLI flag bypasses this since it's user-provided, not LLM-provided.
 pub fn validate_workspace_root(path: &Path) -> Result<PathBuf, String> {
     // Canonicalize first to resolve symlinks (e.g., /tmp/innocent -> /etc)
-    let canonical = path.canonicalize().map_err(|e| {
+    let canonical = dunce::canonicalize(path).map_err(|e| {
         format!(
             "Cannot access '{}': {}. Ensure the path exists and is readable.",
             path.display(),
@@ -455,16 +538,12 @@ pub fn validate_workspace_root(path: &Path) -> Result<PathBuf, String> {
         ));
     }
 
-    let canonical_str = canonical.to_string_lossy();
-
-    // Check system-critical paths (exact match after canonicalize)
-    for blocked in BLOCKED_SYSTEM_PATHS {
-        if canonical_str == *blocked {
-            return Err(format!(
-                "Cannot use '{}' as workspace root: system-critical directory.",
-                canonical.display()
-            ));
-        }
+    // Check system-critical paths (structural on Windows, exact match on Unix)
+    if is_blocked_system_path(&canonical) {
+        return Err(format!(
+            "Cannot use '{}' as workspace root: system-critical directory.",
+            canonical.display()
+        ));
     }
 
     // Check sensitive user directories
@@ -480,7 +559,7 @@ pub fn validate_workspace_root(path: &Path) -> Result<PathBuf, String> {
 
         for sensitive in BLOCKED_USER_DIRS {
             let sensitive_path = home.join(sensitive);
-            if let Ok(sensitive_canonical) = sensitive_path.canonicalize() {
+            if let Ok(sensitive_canonical) = dunce::canonicalize(&sensitive_path) {
                 if canonical.starts_with(&sensitive_canonical) {
                     return Err(format!(
                         "Cannot use '{}' as workspace root: contains sensitive user data.",
@@ -815,39 +894,7 @@ mod tests {
         ));
     }
 
-    // Workspace root validation tests
-
-    #[test]
-    fn test_workspace_root_rejects_system_paths() {
-        assert!(validate_workspace_root(Path::new("/")).is_err());
-        assert!(validate_workspace_root(Path::new("/etc")).is_err());
-        assert!(validate_workspace_root(Path::new("/var")).is_err());
-        assert!(validate_workspace_root(Path::new("/usr")).is_err());
-        assert!(validate_workspace_root(Path::new("/bin")).is_err());
-        assert!(validate_workspace_root(Path::new("/tmp")).is_err());
-    }
-
-    #[test]
-    fn test_workspace_root_rejects_nonexistent() {
-        let err = validate_workspace_root(Path::new("/definitely/does/not/exist/xyzzy"));
-        assert!(err.is_err());
-        assert!(err.unwrap_err().contains("Cannot access"));
-    }
-
-    #[test]
-    fn test_workspace_root_rejects_files() {
-        // /etc/passwd exists on macOS/Linux and is a file, not a directory
-        let result = validate_workspace_root(Path::new("/etc/passwd"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_workspace_root_rejects_too_shallow() {
-        // Paths with < 3 components should be rejected
-        // /tmp resolves to /private/tmp on macOS (3 components) so we test / and /etc directly
-        let err = validate_workspace_root(Path::new("/"));
-        assert!(err.is_err());
-    }
+    // Workspace root validation tests (cross-platform)
 
     #[test]
     fn test_workspace_root_accepts_valid_project() {
@@ -855,6 +902,7 @@ mod tests {
         let result = validate_workspace_root(dir.path());
         // TempDir creates paths like /var/folders/xx/xx/T/xxx (deep enough)
         // or /tmp/xxx which resolves to /private/tmp/xxx on macOS (4 components)
+        // On Windows: C:\Users\...\AppData\Local\Temp\xxx (deep enough)
         assert!(result.is_ok(), "Should accept valid temp dir: {:?}", result);
         // Result should be canonicalized
         let canonical = result.unwrap();
@@ -862,25 +910,15 @@ mod tests {
     }
 
     #[test]
-    fn test_workspace_root_resolves_symlinks() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let real_dir = dir.path().join("real_project");
-        std::fs::create_dir(&real_dir).unwrap();
-        let link_path = dir.path().join("symlink_project");
-
+    fn test_workspace_root_rejects_nonexistent() {
         #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
-            let result = validate_workspace_root(&link_path);
-            assert!(result.is_ok());
-            // Should resolve to the real path
-            let canonical = result.unwrap();
-            assert_eq!(
-                canonical,
-                real_dir.canonicalize().unwrap(),
-                "Should resolve symlink to real path"
-            );
-        }
+        let path = Path::new("/definitely/does/not/exist/xyzzy");
+        #[cfg(windows)]
+        let path = Path::new("C:\\definitely\\does\\not\\exist\\xyzzy");
+
+        let err = validate_workspace_root(path);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().contains("Cannot access"));
     }
 
     #[test]
@@ -900,5 +938,164 @@ mod tests {
                 assert!(result.is_err(), "Should reject ~/.ssh");
             }
         }
+    }
+
+    // Unix-specific workspace root tests
+
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_root_rejects_system_paths() {
+        assert!(validate_workspace_root(Path::new("/")).is_err());
+        assert!(validate_workspace_root(Path::new("/etc")).is_err());
+        assert!(validate_workspace_root(Path::new("/var")).is_err());
+        assert!(validate_workspace_root(Path::new("/usr")).is_err());
+        assert!(validate_workspace_root(Path::new("/bin")).is_err());
+        assert!(validate_workspace_root(Path::new("/tmp")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_root_rejects_files() {
+        // /etc/passwd exists on macOS/Linux and is a file, not a directory
+        let result = validate_workspace_root(Path::new("/etc/passwd"));
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_root_rejects_too_shallow() {
+        // Paths with < 3 components should be rejected
+        let err = validate_workspace_root(Path::new("/"));
+        assert!(err.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_workspace_root_resolves_symlinks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real_dir = dir.path().join("real_project");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("symlink_project");
+
+        std::os::unix::fs::symlink(&real_dir, &link_path).unwrap();
+        let result = validate_workspace_root(&link_path);
+        assert!(result.is_ok());
+        // Should resolve to the real path
+        let canonical = result.unwrap();
+        assert_eq!(
+            canonical,
+            dunce::canonicalize(&real_dir).unwrap(),
+            "Should resolve symlink to real path"
+        );
+    }
+
+    // Windows-specific workspace root tests
+
+    #[cfg(windows)]
+    #[test]
+    fn test_workspace_root_rejects_drive_root() {
+        // C:\ should be rejected as too broad / system-critical
+        assert!(validate_workspace_root(Path::new("C:\\")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_workspace_root_rejects_system_dirs() {
+        // Windows system directories (case-insensitive check)
+        let windows_dir = Path::new("C:\\Windows");
+        if windows_dir.exists() {
+            assert!(
+                validate_workspace_root(windows_dir).is_err(),
+                "Should reject C:\\Windows"
+            );
+        }
+        let program_files = Path::new("C:\\Program Files");
+        if program_files.exists() {
+            assert!(
+                validate_workspace_root(program_files).is_err(),
+                "Should reject C:\\Program Files"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_workspace_root_rejects_files_windows() {
+        // A known file on Windows
+        let result = validate_workspace_root(Path::new("C:\\Windows\\System32\\notepad.exe"));
+        assert!(result.is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_workspace_root_resolves_symlinks_windows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let real_dir = dir.path().join("real_project");
+        std::fs::create_dir(&real_dir).unwrap();
+        let link_path = dir.path().join("symlink_project");
+
+        match std::os::windows::fs::symlink_dir(&real_dir, &link_path) {
+            Ok(()) => {
+                let result = validate_workspace_root(&link_path);
+                assert!(result.is_ok());
+                let canonical = result.unwrap();
+                assert_eq!(
+                    canonical,
+                    dunce::canonicalize(&real_dir).unwrap(),
+                    "Should resolve symlink to real path"
+                );
+            }
+            Err(e) if e.raw_os_error() == Some(1314) => {
+                // ERROR_PRIVILEGE_NOT_HELD — symlink creation requires elevated privileges
+                // Skip test gracefully on non-admin accounts
+            }
+            Err(e) => panic!("Unexpected error creating symlink: {}", e),
+        }
+    }
+
+    // is_blocked_system_path unit tests
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_blocked_system_path_unix() {
+        assert!(is_blocked_system_path(Path::new("/")));
+        assert!(is_blocked_system_path(Path::new("/etc")));
+        assert!(is_blocked_system_path(Path::new("/var")));
+        assert!(is_blocked_system_path(Path::new("/private/etc")));
+        assert!(!is_blocked_system_path(Path::new("/home/user/project")));
+        assert!(!is_blocked_system_path(Path::new("/Users/adam/code")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_is_blocked_system_path_windows() {
+        use std::path::PathBuf;
+
+        // Drive roots
+        assert!(is_blocked_system_path(&PathBuf::from("C:\\")));
+        assert!(is_blocked_system_path(&PathBuf::from("D:\\")));
+
+        // System directories
+        assert!(is_blocked_system_path(&PathBuf::from("C:\\Windows")));
+        assert!(is_blocked_system_path(&PathBuf::from("C:\\Program Files")));
+        assert!(is_blocked_system_path(&PathBuf::from("C:\\Program Files (x86)")));
+        assert!(is_blocked_system_path(&PathBuf::from("C:\\ProgramData")));
+
+        // C:\Users itself should be blocked (contains all user home dirs)
+        assert!(is_blocked_system_path(&PathBuf::from("C:\\Users")));
+
+        // Valid project paths should not be blocked
+        assert!(!is_blocked_system_path(&PathBuf::from(
+            "C:\\Users\\adam\\project"
+        )));
+        assert!(!is_blocked_system_path(&PathBuf::from(
+            "D:\\code\\my-app"
+        )));
+
+        // Subdirectories of system dirs should not be blocked
+        // (only the top-level system dir itself is blocked)
+        assert!(!is_blocked_system_path(&PathBuf::from(
+            "C:\\Windows\\Temp\\my-project"
+        )));
     }
 }

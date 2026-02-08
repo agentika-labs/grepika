@@ -29,21 +29,16 @@ fn map_snippets(snippets: &[crate::services::MatchSnippet]) -> Vec<MatchSnippetO
 }
 
 /// Search mode for controlling which backend(s) to use.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
     /// Use all backends with weighted score merging (best quality)
+    #[default]
     Combined,
     /// FTS5 full-text search only (best for natural language)
     Fts,
     /// Grep regex search only (best for patterns)
     Grep,
-}
-
-impl Default for SearchMode {
-    fn default() -> Self {
-        Self::Combined
-    }
 }
 
 impl std::fmt::Display for SearchMode {
