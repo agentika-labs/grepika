@@ -7,7 +7,7 @@ mod search;
 mod trigram;
 
 pub use fts::FtsService;
-pub use grep::GrepService;
+pub use grep::{GrepMatch, GrepService};
 pub use indexer::Indexer;
 pub use search::{MatchSnippet, SearchResult as SearchHit, SearchService, SearchSources};
 pub use trigram::TrigramIndex;

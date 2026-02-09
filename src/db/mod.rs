@@ -3,7 +3,7 @@
 mod pragmas;
 mod schema;
 
-pub use pragmas::apply_pragmas;
+pub use pragmas::{apply_pragmas, apply_pragmas_raw};
 pub use schema::{init_schema, SCHEMA_VERSION};
 
 use crate::error::{DbError, DbResult};
@@ -11,6 +11,21 @@ use crate::types::FileId;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
 use std::path::Path;
+
+/// Applies per-connection pragmas on every new pool connection.
+///
+/// SQLite PRAGMAs like `cache_size`, `mmap_size`, `temp_store`, and
+/// `busy_timeout` are per-connection state. Without this customizer,
+/// only the first connection gets the tuned settings — the rest run
+/// with SQLite defaults (e.g., 2MB cache instead of 8MB).
+#[derive(Debug)]
+struct PragmaCustomizer;
+
+impl r2d2::CustomizeConnection<rusqlite::Connection, rusqlite::Error> for PragmaCustomizer {
+    fn on_acquire(&self, conn: &mut rusqlite::Connection) -> Result<(), rusqlite::Error> {
+        apply_pragmas_raw(conn)
+    }
+}
 
 /// File data for batch upsert operations.
 #[derive(Debug)]
@@ -63,12 +78,13 @@ impl Database {
         let pool = Pool::builder()
             .max_size(4)
             .min_idle(Some(1))
+            .connection_customizer(Box::new(PragmaCustomizer))
             .build(manager)?;
 
-        // Initialize schema on first connection
+        // Initialize schema (database-wide, only needed once).
+        // Pragmas are applied per-connection by PragmaCustomizer.
         {
             let conn = pool.get()?;
-            apply_pragmas(&conn)?;
             init_schema(&conn)?;
         }
 
@@ -83,11 +99,13 @@ impl Database {
     /// Returns `DbError::Sqlite` if schema initialization fails.
     pub fn in_memory() -> DbResult<Self> {
         let manager = SqliteConnectionManager::memory();
-        let pool = Pool::builder().max_size(1).build(manager)?;
+        let pool = Pool::builder()
+            .max_size(1)
+            .connection_customizer(Box::new(PragmaCustomizer))
+            .build(manager)?;
 
         {
             let conn = pool.get()?;
-            apply_pragmas(&conn)?;
             init_schema(&conn)?;
         }
 

@@ -85,7 +85,7 @@ pub struct DiffInput {
     pub context: usize,
 }
 
-fn default_diff_context() -> usize {
+const fn default_diff_context() -> usize {
     3
 }
 
@@ -155,12 +155,31 @@ pub fn execute_diff(service: &Arc<SearchService>, input: DiffInput) -> Result<Di
     })
 }
 
+/// Maximum LCS table cells before falling back to a synthetic error.
+/// 25M cells * 8 bytes ≈ 200MB — keeps peak memory manageable.
+const MAX_LCS_CELLS: usize = 25_000_000;
+
 /// Computes a simple diff between two sets of lines.
 fn compute_diff(
     old_lines: &[&str],
     new_lines: &[&str],
     context: usize,
 ) -> (Vec<DiffHunk>, DiffStats) {
+    let m = old_lines.len();
+    let n = new_lines.len();
+
+    // Guard against O(n*m) memory blow-up for very large files
+    if m.saturating_mul(n) > MAX_LCS_CELLS {
+        let mb = m * n * 8 / (1024 * 1024);
+        let hunk = DiffHunk {
+            content: format!(
+                "Files too large for line-by-line diff ({m} + {n} lines, would require {mb}MB). \
+                 Use the 'get' tool to compare specific line ranges instead."
+            ),
+        };
+        return (vec![hunk], DiffStats { additions: 0, deletions: 0 });
+    }
+
     let mut hunks = Vec::new();
     let mut additions = 0;
     let mut deletions = 0;

@@ -101,7 +101,7 @@ pub struct RelatedInput {
     pub limit: usize,
 }
 
-fn default_related_limit() -> usize {
+const fn default_related_limit() -> usize {
     10
 }
 
@@ -222,7 +222,7 @@ pub struct RefsInput {
     pub limit: usize,
 }
 
-fn default_refs_limit() -> usize {
+const fn default_refs_limit() -> usize {
     50
 }
 
@@ -257,50 +257,49 @@ pub struct Reference {
 ///
 /// Returns an error string if the grep search fails.
 pub fn execute_refs(service: &Arc<SearchService>, input: RefsInput) -> Result<RefsOutput, String> {
-    // Use grep to find exact symbol matches
-    let results = service
-        .search_grep(
+    // Use grep to find exact symbol matches, keeping raw GrepMatch data
+    // to avoid re-reading files (the old approach doubled I/O).
+    let matches_by_file = service
+        .search_grep_with_matches(
             &format!(r"\b{}\b", regex::escape(&input.symbol)),
             input.limit * 2,
         )
         .map_err(|e| e.to_string())?;
 
+    let root = service.root();
     let mut references = Vec::new();
 
-    for result in results.into_iter().take(input.limit) {
-        let full_path = &result.path;
+    // Pre-build contains-check strings once (avoids per-call format! allocations)
+    let pat_space = format!(" {}", input.symbol);
+    let pat_paren = format!(" {}(", input.symbol);
+    let pat_angle = format!(" {}<", input.symbol);
+    let contains_pats = (pat_space.as_str(), pat_paren.as_str(), pat_angle.as_str());
 
+    for (path, matches) in &matches_by_file {
         // Security: skip sensitive files from search results
-        if security::is_sensitive_file(full_path).is_some() {
+        if security::is_sensitive_file(path).is_some() {
             continue;
         }
 
-        let content = match fs::read_to_string(full_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
 
-        // Find lines containing the symbol
-        for (line_num, line) in content.lines().enumerate() {
-            if line.contains(&input.symbol) {
-                let relative = full_path
-                    .strip_prefix(service.root())
-                    .unwrap_or(full_path)
-                    .to_string_lossy()
-                    .to_string();
+        for m in matches {
+            let trimmed = m.line_content.trim();
+            let ref_type = classify_reference(trimmed, &input.symbol, contains_pats);
 
-                let ref_type = classify_reference(line, &input.symbol);
+            references.push(Reference {
+                path: relative.clone(),
+                line: m.line_number as usize,
+                content: trim_around_match(trimmed, &input.symbol),
+                ref_type: ref_type.to_string(),
+            });
 
-                references.push(Reference {
-                    path: relative,
-                    line: line_num + 1,
-                    content: trim_around_match(line.trim(), &input.symbol),
-                    ref_type,
-                });
-
-                if references.len() >= input.limit {
-                    break;
-                }
+            if references.len() >= input.limit {
+                break;
             }
         }
 
@@ -309,9 +308,7 @@ pub fn execute_refs(service: &Arc<SearchService>, input: RefsInput) -> Result<Re
         }
     }
 
-    Ok(RefsOutput {
-        references,
-    })
+    Ok(RefsOutput { references })
 }
 
 // Helper functions
@@ -414,7 +411,15 @@ fn trim_around_match(line: &str, symbol: &str) -> String {
     result
 }
 
-fn classify_reference(line: &str, symbol: &str) -> String {
+/// Classifies a reference line as definition/import/type_usage/usage.
+///
+/// `contains_pats` are pre-built " symbol", " symbol(", " symbol<" strings
+/// to avoid per-call `format!` allocations.
+fn classify_reference(
+    line: &str,
+    symbol: &str,
+    contains_pats: (&str, &str, &str),
+) -> &'static str {
     let trimmed = line.trim();
 
     // Check for definitions
@@ -428,12 +433,12 @@ fn classify_reference(line: &str, symbol: &str) -> String {
         || trimmed.starts_with("type ")
         || trimmed.starts_with("interface ");
 
-    let contains_symbol = trimmed.contains(&format!(" {symbol}"))
-        || trimmed.contains(&format!(" {symbol}("))
-        || trimmed.contains(&format!(" {symbol}<"));
+    let contains_symbol = trimmed.contains(contains_pats.0)
+        || trimmed.contains(contains_pats.1)
+        || trimmed.contains(contains_pats.2);
 
     if is_definition_keyword && contains_symbol {
-        return "definition".to_string();
+        return "definition";
     }
 
     // Check for imports
@@ -442,7 +447,7 @@ fn classify_reference(line: &str, symbol: &str) -> String {
         || trimmed.starts_with("from ")
         || trimmed.contains("require(")
     {
-        return "import".to_string();
+        return "import";
     }
 
     // Check for type annotations
@@ -450,10 +455,10 @@ fn classify_reference(line: &str, symbol: &str) -> String {
         || trimmed.contains(&format!("-> {symbol}"))
         || trimmed.contains(&format!("<{symbol}"))
     {
-        return "type_usage".to_string();
+        return "type_usage";
     }
 
-    "usage".to_string()
+    "usage"
 }
 
 fn format_bytes(bytes: u64) -> String {

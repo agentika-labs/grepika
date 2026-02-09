@@ -29,7 +29,6 @@ ignore = "0.4"
 
 # Parallel processing
 rayon = "1.10"
-num_cpus = "1.16"
 
 # SQLite with bundled-full (includes FTS5)
 rusqlite = { version = "0.33", features = ["bundled-full"] }

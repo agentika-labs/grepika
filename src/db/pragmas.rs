@@ -3,17 +3,11 @@
 use crate::error::DbResult;
 use rusqlite::Connection;
 
-/// Applies performance-tuned PRAGMA settings.
+/// Applies performance-tuned PRAGMA settings (raw rusqlite version).
 ///
-/// These settings optimize for:
-/// - Concurrent reads (WAL mode)
-/// - Large working sets (8MB cache, 64MB mmap)
-/// - Reliability (foreign keys, busy timeout)
-///
-/// # Errors
-///
-/// Returns `DbError::Sqlite` if any PRAGMA statement fails.
-pub fn apply_pragmas(conn: &Connection) -> DbResult<()> {
+/// Used by `PragmaCustomizer` to apply pragmas on every pool connection.
+/// Returns raw `rusqlite::Result` for compatibility with r2d2's error types.
+pub fn apply_pragmas_raw(conn: &Connection) -> rusqlite::Result<()> {
     // Use prepare + step pattern which handles both void and result-returning statements
 
     // WAL mode enables concurrent readers during writes
@@ -51,6 +45,21 @@ pub fn apply_pragmas(conn: &Connection) -> DbResult<()> {
         .query([])?
         .next()?;
 
+    Ok(())
+}
+
+/// Applies performance-tuned PRAGMA settings.
+///
+/// These settings optimize for:
+/// - Concurrent reads (WAL mode)
+/// - Large working sets (8MB cache, 64MB mmap)
+/// - Reliability (foreign keys, busy timeout)
+///
+/// # Errors
+///
+/// Returns `DbError::Sqlite` if any PRAGMA statement fails.
+pub fn apply_pragmas(conn: &Connection) -> DbResult<()> {
+    apply_pragmas_raw(conn)?;
     Ok(())
 }
 

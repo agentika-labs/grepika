@@ -95,16 +95,16 @@ pub struct SearchSources {
 
 impl SearchSources {
     /// Returns human-readable labels for each active source.
-    pub fn to_labels(&self) -> Vec<String> {
+    pub fn to_labels(&self) -> Vec<&'static str> {
         let mut labels = Vec::with_capacity(3);
         if self.fts {
-            labels.push("fts".to_string());
+            labels.push("fts");
         }
         if self.grep {
-            labels.push("grep".to_string());
+            labels.push("grep");
         }
         if self.trigram {
-            labels.push("trigram".to_string());
+            labels.push("trigram");
         }
         labels
     }
@@ -114,6 +114,9 @@ impl SearchSources {
         self.fts as u8 + self.grep as u8 + self.trigram as u8
     }
 }
+
+/// Default limit when callers pass 0 (i.e. "no preference").
+const DEFAULT_SEARCH_LIMIT: usize = 50;
 
 /// Configuration for combined search.
 #[derive(Debug, Clone)]
@@ -126,8 +129,6 @@ pub struct SearchConfig {
     pub trigram_weight: f64,
     /// Bonus for results found by multiple methods
     pub multi_source_bonus: f64,
-    /// Maximum results to return
-    pub limit: usize,
 }
 
 impl Default for SearchConfig {
@@ -137,7 +138,6 @@ impl Default for SearchConfig {
             grep_weight: 0.4,
             trigram_weight: 0.2,
             multi_source_bonus: 0.1,
-            limit: 50,
         }
     }
 }
@@ -339,7 +339,7 @@ impl SearchService {
     ///
     /// Returns `SearchError` if result merging or database access fails.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
-        let limit = if limit > 0 { limit } else { self.config.limit };
+        let limit = if limit > 0 { limit } else { DEFAULT_SEARCH_LIMIT };
         let intent = classify_query(query);
 
         // Run searches based on intent
@@ -365,24 +365,33 @@ impl SearchService {
             .search_files_with_matches_filtered(query, limit * 2, file_filter.as_ref())
             .unwrap_or_default();
 
-        // Override weights based on intent
-        let config = match intent {
-            QueryIntent::Regex => SearchConfig {
-                fts_weight: 0.0,
-                grep_weight: 0.7,
-                trigram_weight: 0.3,
-                ..self.config.clone()
-            },
-            QueryIntent::NaturalLanguage => SearchConfig {
-                fts_weight: 0.6,
-                grep_weight: 0.2,
-                trigram_weight: 0.2,
-                ..self.config.clone()
-            },
-            QueryIntent::ExactSymbol | QueryIntent::ShortToken => self.config.clone(),
+        // Override weights based on intent.
+        // Common case (ExactSymbol/ShortToken ~80% of queries) borrows self.config directly.
+        // Rare cases construct a new config only when weights differ.
+        let override_config;
+        let config_ref = match intent {
+            QueryIntent::Regex => {
+                override_config = SearchConfig {
+                    fts_weight: 0.0,
+                    grep_weight: 0.7,
+                    trigram_weight: 0.3,
+                    multi_source_bonus: self.config.multi_source_bonus,
+                };
+                &override_config
+            }
+            QueryIntent::NaturalLanguage => {
+                override_config = SearchConfig {
+                    fts_weight: 0.6,
+                    grep_weight: 0.2,
+                    trigram_weight: 0.2,
+                    multi_source_bonus: self.config.multi_source_bonus,
+                };
+                &override_config
+            }
+            QueryIntent::ExactSymbol | QueryIntent::ShortToken => &self.config,
         };
 
-        self.merge_results(fts_results, grep_results, grep_matches, trigram_results, limit, &config)
+        self.merge_results(fts_results, grep_results, grep_matches, trigram_results, limit, config_ref)
     }
 
     /// Performs FTS-only search.
@@ -439,6 +448,23 @@ impl SearchService {
             .collect();
 
         Ok(results)
+    }
+
+    /// Performs grep-only search, returning raw `GrepMatch` data grouped by file.
+    ///
+    /// Unlike `search_grep()`, this preserves the underlying match details
+    /// (line numbers, content, match offsets) so callers can avoid re-reading files.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SearchError::InvalidPattern` if the regex pattern is invalid.
+    pub fn search_grep_with_matches(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<HashMap<Arc<Path>, Vec<GrepMatch>>, SearchError> {
+        let (_, matches) = self.grep.search_files_with_matches(query, limit)?;
+        Ok(matches)
     }
 
     /// Gets the trigram index for modifications.
@@ -849,7 +875,6 @@ mod tests {
             grep_weight: 0.1,
             trigram_weight: 0.1,
             multi_source_bonus: 0.05,
-            limit: 10,
         };
 
         let service =

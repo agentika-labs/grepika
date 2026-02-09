@@ -234,25 +234,30 @@ impl Indexer {
             current_file: None,
         };
 
-        // Process files in batches
-        for batch in file_data.chunks(BATCH_SIZE) {
-            // Report progress at batch level
-            if let Some(ref cb) = progress {
-                state.current_file = batch.first().map(|f| PathBuf::from(&f.path));
-                cb(state.clone());
+        // Acquire trigram write lock once for the entire Phase 2 batch loop.
+        // Avoids per-file lock acquire/release overhead (atomic CAS + potential syscall).
+        {
+            let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+
+            for batch in file_data.chunks(BATCH_SIZE) {
+                // Report progress at batch level
+                if let Some(ref cb) = progress {
+                    state.current_file = batch.first().map(|f| PathBuf::from(&f.path));
+                    cb(state.clone());
+                }
+
+                // Batch upsert returns FileIds in same order as input
+                let file_ids = self.db.upsert_files_batch(batch)?;
+
+                // Update trigram index for each file (guard held, no per-file lock)
+                for (data, file_id) in batch.iter().zip(file_ids) {
+                    trigram_guard.add_file(file_id, &data.content);
+                }
+
+                state.files_indexed += batch.len();
+                state.files_processed += batch.len();
             }
-
-            // Batch upsert returns FileIds in same order as input
-            let file_ids = self.db.upsert_files_batch(batch)?;
-
-            // Update trigram index for each file
-            for (data, file_id) in batch.iter().zip(file_ids) {
-                self.index_trigrams(file_id, &data.content);
-            }
-
-            state.files_indexed += batch.len();
-            state.files_processed += batch.len();
-        }
+        } // Drop write guard before save_trigrams (which takes a read lock)
 
         // Remove deleted files
         for path in existing_paths.difference(&seen_paths) {
@@ -321,22 +326,34 @@ impl Indexer {
             let path = entry.path();
 
             // Check extension using pre-built HashSet (P7: O(1) vs O(n))
+            // Uses stack-buffer ASCII lowercase to avoid heap allocation per file
             if !self.extension_set.is_empty() {
-                let ext = path
+                let ext_str = path
                     .extension()
                     .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
+                    .unwrap_or("");
 
-                if !self.extension_set.contains(&ext) {
+                let ext_matched = match ascii_lower_check(ext_str, &self.extension_set) {
+                    Some(matched) => matched,
+                    None => {
+                        // Fallback for non-ASCII or very long extensions
+                        self.extension_set.contains(&ext_str.to_lowercase())
+                    }
+                };
+
+                if !ext_matched {
                     // Check for extensionless files like Makefile, Dockerfile
-                    let filename = path
+                    let filename_str = path
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
+                        .unwrap_or("");
 
-                    if !self.extension_set.contains(&filename) {
+                    let filename_matched = match ascii_lower_check(filename_str, &self.extension_set) {
+                        Some(matched) => matched,
+                        None => self.extension_set.contains(&filename_str.to_lowercase()),
+                    };
+
+                    if !filename_matched {
                         continue;
                     }
                 }
@@ -399,6 +416,24 @@ pub struct IndexStats {
 /// Builds a HashSet of lowercased extensions for O(1) lookup (P7).
 fn build_extension_set(extensions: &[String]) -> HashSet<String> {
     extensions.iter().map(|e| e.to_lowercase()).collect()
+}
+
+/// Checks if `s`, lowercased, is in `set` — using a stack buffer to avoid heap allocation.
+///
+/// Returns `Some(true/false)` if the string is ASCII and fits in the 16-byte buffer.
+/// Returns `None` if the string is non-ASCII or exceeds 16 bytes (caller should fall back).
+fn ascii_lower_check(s: &str, set: &HashSet<String>) -> Option<bool> {
+    let bytes = s.as_bytes();
+    if bytes.len() > 16 || !s.is_ascii() {
+        return None;
+    }
+    let mut buf = [0u8; 16];
+    for (i, &b) in bytes.iter().enumerate() {
+        buf[i] = b.to_ascii_lowercase();
+    }
+    // Safety: input is ASCII, to_ascii_lowercase preserves valid UTF-8
+    let lowered = std::str::from_utf8(&buf[..bytes.len()]).ok()?;
+    Some(set.contains(lowered))
 }
 
 /// Computes xxHash (xxh3_64) of content.

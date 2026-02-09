@@ -43,7 +43,7 @@ pub struct GetInput {
     pub end_line: usize,
 }
 
-fn default_start_line() -> usize {
+const fn default_start_line() -> usize {
     1
 }
 
@@ -176,7 +176,7 @@ fn default_toc_path() -> String {
     ".".to_string()
 }
 
-fn default_toc_depth() -> usize {
+const fn default_toc_depth() -> usize {
     3
 }
 
@@ -232,7 +232,7 @@ pub struct ContextInput {
     pub context_lines: usize,
 }
 
-fn default_context_lines() -> usize {
+const fn default_context_lines() -> usize {
     10
 }
 
@@ -393,6 +393,10 @@ fn read_context_streaming(
 }
 
 /// Streaming implementation for context reading.
+///
+/// Stops reading as soon as we've collected all lines up to `end_target`,
+/// rather than iterating to EOF just to count total lines (which the
+/// caller doesn't use).
 fn read_context_streaming_impl(
     path: &Path,
     center_line: usize,
@@ -406,21 +410,25 @@ fn read_context_streaming_impl(
     let end_target = center + context_lines + 1;
 
     let mut lines_buffer = Vec::new();
-    let mut total_lines = 0;
+    let mut last_line_seen = 0;
 
     for (i, line_result) in reader.lines().enumerate() {
-        total_lines = i + 1;
-        let line_num = i; // 0-indexed for comparison
+        last_line_seen = i + 1;
 
-        if line_num >= start && line_num < end_target {
+        if i >= start && i < end_target {
             let line = line_result.map_err(|e| format!("Failed to read line: {e}"))?;
             lines_buffer.push(line);
         }
+
+        // Stop once we've passed the context window — no need to read to EOF
+        if i >= end_target {
+            break;
+        }
     }
 
-    let actual_end = end_target.min(total_lines);
+    let actual_end = end_target.min(last_line_seen);
 
-    Ok((lines_buffer, total_lines, start, actual_end))
+    Ok((lines_buffer, last_line_seen, start, actual_end))
 }
 
 /// Full-file read for context (small files).

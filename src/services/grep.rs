@@ -99,7 +99,7 @@ impl GrepService {
         let num_threads = if config.max_threads > 0 {
             config.max_threads.min(8)
         } else {
-            num_cpus::get().min(8)
+            std::thread::available_parallelism().map_or(4, |n| n.get()).min(8)
         };
 
         Ok(Self {

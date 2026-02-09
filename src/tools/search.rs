@@ -80,7 +80,7 @@ pub struct SearchInput {
     pub mode: SearchMode,
 }
 
-fn default_limit() -> usize {
+const fn default_limit() -> usize {
     20
 }
 
@@ -99,7 +99,7 @@ pub struct MatchSnippetOutput {
     pub highlight_end: usize,
 }
 
-fn is_zero(v: &usize) -> bool {
+const fn is_zero(v: &usize) -> bool {
     *v == 0
 }
 
@@ -135,14 +135,12 @@ pub fn execute_search(
     service: &Arc<SearchService>,
     input: SearchInput,
 ) -> Result<SearchOutput, String> {
-    // Check for empty index before searching
-    if let Ok(count) = service.db().file_count() {
-        if count == 0 {
-            return Err(
-                "Index is empty. Run the 'index' tool first to build the search index, then retry your search."
-                    .to_string(),
-            );
-        }
+    // Check for empty index before searching (uses cached AtomicU64, no DB round-trip)
+    if service.cached_total_files() == 0 {
+        return Err(
+            "Index is empty. Run the 'index' tool first to build the search index, then retry your search."
+                .to_string(),
+        );
     }
 
     // Overcollect by 1 to detect if more results exist
@@ -169,7 +167,7 @@ pub fn execute_search(
         .map(|r| SearchResultItem {
             path: relativize_path(&r.path, root),
             score: r.score.as_f64(),
-            sources: r.sources.to_labels(),
+            sources: r.sources.to_labels().into_iter().map(String::from).collect(),
             snippets: map_snippets(&r.snippets),
         })
         .collect();
@@ -190,7 +188,7 @@ pub struct RelevantInput {
     pub limit: usize,
 }
 
-fn default_relevant_limit() -> usize {
+const fn default_relevant_limit() -> usize {
     10
 }
 
