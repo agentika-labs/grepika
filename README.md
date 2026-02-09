@@ -1,4 +1,4 @@
-[![npm](https://img.shields.io/npm/v/grepika)](https://www.npmjs.com/package/grepika)
+[![npm](https://img.shields.io/npm/v/@agentika/grepika)](https://www.npmjs.com/package/@agentika/grepika)
 [![CI](https://github.com/agentika-labs/grepika/actions/workflows/ci.yml/badge.svg)](https://github.com/agentika-labs/grepika/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -50,13 +50,7 @@ Benchmarked on the same codebase, same queries ([criterion](https://github.com/b
 ### npm (recommended for MCP users)
 
 ```bash
-npx -y grepika --mcp
-```
-
-Or install globally:
-
-```bash
-npm install -g grepika
+npx -y @agentika/grepika --mcp
 ```
 
 ### Shell script (macOS Apple Silicon)
@@ -76,7 +70,7 @@ In global mode, the server starts without `--root`. The LLM reads its working di
 **Claude Code:**
 
 ```bash
-claude mcp add grepika -- npx -y grepika --mcp
+claude mcp add grepika -- npx -y @agentika/grepika --mcp
 ```
 
 Or add to your project's `.mcp.json` (or global `~/.claude.json`):
@@ -86,7 +80,7 @@ Or add to your project's `.mcp.json` (or global `~/.claude.json`):
   "mcpServers": {
     "grepika": {
       "command": "npx",
-      "args": ["-y", "grepika", "--mcp"]
+      "args": ["-y", "@agentika/grepika", "--mcp"]
     }
   }
 }
@@ -101,7 +95,7 @@ Add to `~/.cursor/mcp.json` or project `.cursor/mcp.json`:
   "mcpServers": {
     "grepika": {
       "command": "npx",
-      "args": ["-y", "grepika", "--mcp"]
+      "args": ["-y", "@agentika/grepika", "--mcp"]
     }
   }
 }
@@ -116,7 +110,7 @@ Add to `opencode.config.json`:
   "mcp": {
     "grepika": {
       "type": "local",
-      "command": ["npx", "-y", "grepika", "--mcp"]
+      "command": ["npx", "-y", "@agentika/grepika", "--mcp"]
     }
   }
 }
@@ -129,7 +123,7 @@ Use `--root` to pre-load a specific workspace at startup. The LLM does not need 
 **Claude Code:**
 
 ```bash
-claude mcp add grepika -- npx -y grepika --mcp --root /path/to/project
+claude mcp add grepika -- npx -y @agentika/grepika --mcp --root /path/to/project
 ```
 
 ```json
@@ -137,7 +131,7 @@ claude mcp add grepika -- npx -y grepika --mcp --root /path/to/project
   "mcpServers": {
     "grepika": {
       "command": "npx",
-      "args": ["-y", "grepika", "--mcp", "--root", "/path/to/project"]
+      "args": ["-y", "@agentika/grepika", "--mcp", "--root", "/path/to/project"]
     }
   }
 }
@@ -150,7 +144,7 @@ claude mcp add grepika -- npx -y grepika --mcp --root /path/to/project
   "mcpServers": {
     "grepika": {
       "command": "npx",
-      "args": ["-y", "grepika", "--mcp", "--root", "/path/to/project"]
+      "args": ["-y", "@agentika/grepika", "--mcp", "--root", "/path/to/project"]
     }
   }
 }
@@ -163,7 +157,7 @@ claude mcp add grepika -- npx -y grepika --mcp --root /path/to/project
   "mcp": {
     "grepika": {
       "type": "local",
-      "command": ["npx", "-y", "grepika", "--mcp", "--root", "/path/to/project"]
+      "command": ["npx", "-y", "@agentika/grepika", "--mcp", "--root", "/path/to/project"]
     }
   }
 }

@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "description": "grepika binary for macOS ARM64 (Apple Silicon)",
   "license": "MIT",
+  "keywords": ["mcp", "code-search", "grep", "trigram", "fts5", "claude", "cursor", "opencode", "ai", "llm", "search", "codebase", "darwin", "arm64", "apple-silicon"],
   "repository": {
     "type": "git",
     "url": "https://github.com/agentika-labs/grepika.git"

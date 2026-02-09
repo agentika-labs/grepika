@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "description": "grepika binary for Linux x64",
   "license": "MIT",
+  "keywords": ["mcp", "code-search", "grep", "trigram", "fts5", "claude", "cursor", "opencode", "ai", "llm", "search", "codebase", "linux", "x64"],
   "repository": {
     "type": "git",
     "url": "https://github.com/agentika-labs/grepika.git"
