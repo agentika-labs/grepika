@@ -219,31 +219,6 @@ These provide ranked results with FTS5+trigram indexing for better search qualit
 
 See [docs/claude-code-snippet.md](docs/claude-code-snippet.md) for a more detailed version.
 
-**Option B: Enforcement via Hooks**
-
-For deterministic enforcement, add PreToolUse hooks to `.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Grep",
-        "hooks": [{ "type": "command", "command": "echo '⚠️  Consider mcp__agentika-grep__search'" }]
-      },
-      {
-        "matcher": "Glob",
-        "hooks": [{ "type": "command", "command": "echo '⚠️  Consider mcp__agentika-grep__toc or relevant'" }]
-      }
-    ]
-  }
-}
-```
-
-See [docs/hooks-example.json](docs/hooks-example.json) for the full example.
-
-CLAUDE.md instructions are *advisory* — Claude may still use built-in tools in some cases. Hooks are *deterministic* — they fire before every matching tool call.
-
 ### Pre-authorizing Permissions
 
 To avoid permission prompts, add to `.claude/settings.local.json` (project) or `~/.claude/settings.json` (global):

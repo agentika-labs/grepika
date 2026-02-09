@@ -1,3 +1,6 @@
+# macOS metadata
+**/.DS_Store
+
 # Rust build artifacts
 /target/
 
@@ -6,5 +9,3 @@
 
 # Claude Code local settings (but track plugins/skills)
 .claude/settings.local.json
-.claude/.DS_Store
-.claude/*/.DS_Store
