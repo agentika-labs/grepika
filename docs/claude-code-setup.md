@@ -1,4 +1,20 @@
-# Claude Code CLAUDE.md Snippet
+# Claude Code Setup
+
+## MCP Server Setup
+
+```bash
+# For all your projects (user-level — recommended)
+claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
+
+# For this project only (shared with team via .mcp.json)
+claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
+```
+
+> **Scope reference:** `-s user` writes to `~/.claude.json` (all projects), `-s project` writes to `.mcp.json` (committed, shared with team), `-s local` (default) writes to `.claude/settings.local.json` (gitignored, personal).
+
+For Cursor and OpenCode setup, see the [README](../README.md#mcp-server-setup).
+
+## CLAUDE.md Snippet
 
 Copy this section into your project's `CLAUDE.md` file to instruct Claude Code to prefer grepika for code search operations.
 

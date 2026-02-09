@@ -70,10 +70,14 @@ In global mode, the server starts without `--root`. The LLM reads its working di
 **Claude Code:**
 
 ```bash
-claude mcp add grepika -- npx -y @agentika/grepika --mcp
+# For all your projects (user-level — recommended)
+claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
+
+# For this project only (shared with team via .mcp.json)
+claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 ```
 
-Or add to your project's `.mcp.json` (or global `~/.claude.json`):
+Or manually add to `~/.claude.json` (user-level) or `.mcp.json` (project-level):
 
 ```json
 {
@@ -123,8 +127,14 @@ Use `--root` to pre-load a specific workspace at startup. The LLM does not need 
 **Claude Code:**
 
 ```bash
-claude mcp add grepika -- npx -y @agentika/grepika --mcp --root /path/to/project
+# For all your projects (user-level)
+claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp --root /path/to/project
+
+# For this project only (shared with team)
+claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp --root /path/to/project
 ```
+
+Or manually add to `~/.claude.json` (user-level) or `.mcp.json` (project-level):
 
 ```json
 {

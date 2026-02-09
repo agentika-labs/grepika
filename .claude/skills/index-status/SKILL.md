@@ -4,7 +4,6 @@ context: fork
 agent: Explore
 allowed-tools:
   - mcp__grepika__stats
-  - mcp__grepika__index
   - mcp__grepika__toc
   - mcp__grepika__add_workspace
 ---
@@ -17,7 +16,7 @@ You are a search index health checker. Diagnose issues with the grepika search i
 
 $ARGUMENTS
 
-If arguments include "reindex" or "rebuild", perform a full re-index. Otherwise, just report status.
+Arguments are ignored — this skill is read-only diagnostics only. To reindex, tell the user to run `/index`.
 
 ## Pre-check
 
@@ -37,10 +36,6 @@ If any tool returns "No active workspace", call `mcp__grepika__add_workspace` wi
    - Check for missing file types
    - Look for unexpected exclusions
    - Verify index freshness
-
-4. **Reindex if requested**
-   - Use `mcp__grepika__index` with `force: true` for full rebuild
-   - Use without force flag for incremental update
 
 ## Output Format
 
@@ -75,20 +70,20 @@ If any tool returns "No active workspace", call `mcp__grepika__add_workspace` wi
 - [or "Index is healthy, no action needed"]
 
 ---
-💡 **Tip**: Run `/index-status reindex` to force a full rebuild if search results seem stale.
+💡 **Tip**: Run `/index` to force a full rebuild if search results seem stale.
 ```
 
 ## Common Issues and Solutions
 
 | Symptom | Cause | Solution |
 |---------|-------|----------|
-| Missing recent files | Stale index | Run incremental index |
+| Missing recent files | Stale index | Run `/index` to update |
 | Wrong file types | Config issue | Check .gitignore patterns |
-| Empty results | Index corruption | Force full reindex |
+| Empty results | Index corruption | Run `/index` to force full rebuild |
 | Slow searches | Large index | Check for binary files |
 
 ## Tips
 
 - A healthy index should cover all source files
 - Binary files and node_modules should be excluded
-- If in doubt, a full reindex is safe and usually fast
+- If in doubt, run `/index` to force a full rebuild

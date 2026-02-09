@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt --all && cargo clippy --all-targets --message-format=short 2>&1 | head -20 || true",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
