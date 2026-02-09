@@ -1,4 +1,4 @@
-//! Type-safe newtypes for agentika-grep.
+//! Type-safe newtypes for grepika.
 //!
 //! These newtypes provide compile-time safety and semantic clarity
 //! for core domain concepts.

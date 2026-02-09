@@ -1,0 +1,15 @@
+{
+  "name": "@agentika/grepika-darwin-arm64",
+  "version": "0.0.0",
+  "description": "grepika binary for macOS ARM64 (Apple Silicon)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "TODO: Update when repo is renamed"
+  },
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "files": [
+    "bin/"
+  ]
+}

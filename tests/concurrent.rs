@@ -5,9 +5,9 @@
 
 mod common;
 
-use agentika_grep::db::Database;
-use agentika_grep::services::{Indexer, SearchService, TrigramIndex};
-use agentika_grep::types::FileId;
+use grepika::db::Database;
+use grepika::services::{Indexer, SearchService, TrigramIndex};
+use grepika::types::FileId;
 use std::fs;
 use std::sync::{Arc, RwLock};
 use std::thread;
@@ -437,7 +437,7 @@ fn test_database_connection_pool_under_load() {
 
 #[test]
 fn test_concurrent_tool_execution() {
-    use agentika_grep::tools::*;
+    use grepika::tools::*;
 
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Database::in_memory().unwrap());

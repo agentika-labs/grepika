@@ -63,20 +63,20 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../agentika-grep-${{ matrix.target }}.tar.gz agentika-grep
+          tar czf ../../../grepika-${{ matrix.target }}.tar.gz grepika
         shell: bash
 
       - name: Package (windows)
         if: runner.os == 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../agentika-grep-${{ matrix.target }}.zip agentika-grep.exe
+          7z a ../../../grepika-${{ matrix.target }}.zip grepika.exe
         shell: bash
 
       - uses: actions/upload-artifact@v4
         with:
-          name: agentika-grep-${{ matrix.target }}
-          path: agentika-grep-${{ matrix.target }}.*
+          name: grepika-${{ matrix.target }}
+          path: grepika-${{ matrix.target }}.*
 
   release:
     name: GitHub Release
@@ -128,11 +128,11 @@ jobs:
         run: |
           # Map: rust-target -> npm-package-dir, archive-extension
           declare -A TARGETS=(
-            ["x86_64-unknown-linux-gnu"]="agentika-grep-linux-x64:tar.gz"
-            ["aarch64-unknown-linux-gnu"]="agentika-grep-linux-arm64:tar.gz"
-            ["x86_64-apple-darwin"]="agentika-grep-darwin-x64:tar.gz"
-            ["aarch64-apple-darwin"]="agentika-grep-darwin-arm64:tar.gz"
-            ["x86_64-pc-windows-msvc"]="agentika-grep-win32-x64:zip"
+            ["x86_64-unknown-linux-gnu"]="grepika-linux-x64:tar.gz"
+            ["aarch64-unknown-linux-gnu"]="grepika-linux-arm64:tar.gz"
+            ["x86_64-apple-darwin"]="grepika-darwin-x64:tar.gz"
+            ["aarch64-apple-darwin"]="grepika-darwin-arm64:tar.gz"
+            ["x86_64-pc-windows-msvc"]="grepika-win32-x64:zip"
           )
 
           VERSION="${{ steps.version.outputs.version }}"
@@ -147,9 +147,9 @@ jobs:
             # Create bin directory and extract binary
             mkdir -p "${pkg_dir}/bin"
             if [ "$ext" = "tar.gz" ]; then
-              tar xzf "artifacts/agentika-grep-${target}/agentika-grep-${target}.tar.gz" -C "${pkg_dir}/bin/"
+              tar xzf "artifacts/grepika-${target}/grepika-${target}.tar.gz" -C "${pkg_dir}/bin/"
             else
-              unzip -o "artifacts/agentika-grep-${target}/agentika-grep-${target}.zip" -d "${pkg_dir}/bin/"
+              unzip -o "artifacts/grepika-${target}/grepika-${target}.zip" -d "${pkg_dir}/bin/"
             fi
 
             chmod +x "${pkg_dir}/bin/"* 2>/dev/null || true
@@ -159,13 +159,13 @@ jobs:
           jq --arg v "$VERSION" '
             .version = $v |
             .optionalDependencies = (.optionalDependencies | to_entries | map(.value = $v) | from_entries)
-          ' npm/agentika-grep/package.json > tmp.json && mv tmp.json npm/agentika-grep/package.json
+          ' npm/grepika/package.json > tmp.json && mv tmp.json npm/grepika/package.json
 
       - name: Publish platform packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          for dir in npm/agentika-grep-*/; do
+          for dir in npm/grepika-*/; do
             echo "Publishing ${dir}..."
             cd "$dir"
             npm publish --access public || true
@@ -176,5 +176,5 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          cd npm/agentika-grep
+          cd npm/grepika
           npm publish --access public

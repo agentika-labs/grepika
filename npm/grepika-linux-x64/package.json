@@ -1,0 +1,15 @@
+{
+  "name": "@agentika/grepika-linux-x64",
+  "version": "0.0.0",
+  "description": "grepika binary for Linux x64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "TODO: Update when repo is renamed"
+  },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": [
+    "bin/"
+  ]
+}

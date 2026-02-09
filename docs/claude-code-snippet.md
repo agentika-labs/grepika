@@ -1,32 +1,32 @@
 # Claude Code CLAUDE.md Snippet
 
-Copy this section into your project's `CLAUDE.md` file to instruct Claude Code to prefer agentika-grep for code search operations.
+Copy this section into your project's `CLAUDE.md` file to instruct Claude Code to prefer grepika for code search operations.
 
 ---
 
 ## Code Search
 
-Use the agentika-grep MCP server for all code search operations instead of built-in Grep/Glob tools:
+Use the grepika MCP server for all code search operations instead of built-in Grep/Glob tools:
 
 | Task | Use This Tool | Instead Of |
 |------|---------------|------------|
-| **Index codebase** | `mcp__agentika-grep__index` | N/A (run first!) |
-| Pattern search | `mcp__agentika-grep__search` | `Grep` |
-| Find relevant files | `mcp__agentika-grep__relevant` | `Glob`, `Grep` |
-| Get file content | `mcp__agentika-grep__get` | `Read` (for search results) |
-| File structure | `mcp__agentika-grep__outline` | Manual parsing |
-| Directory tree | `mcp__agentika-grep__toc` | `Glob` with patterns |
-| Context around line | `mcp__agentika-grep__context` | `Read` with offset |
-| Find references | `mcp__agentika-grep__refs` | `Grep` for symbol |
-| Related files | `mcp__agentika-grep__related` | Multiple `Grep` calls |
-| Index statistics | `mcp__agentika-grep__stats` | N/A |
-| **Set workspace** | `mcp__agentika-grep__add_workspace` | N/A (global mode only) |
+| **Index codebase** | `mcp__grepika__index` | N/A (run first!) |
+| Pattern search | `mcp__grepika__search` | `Grep` |
+| Find relevant files | `mcp__grepika__relevant` | `Glob`, `Grep` |
+| Get file content | `mcp__grepika__get` | `Read` (for search results) |
+| File structure | `mcp__grepika__outline` | Manual parsing |
+| Directory tree | `mcp__grepika__toc` | `Glob` with patterns |
+| Context around line | `mcp__grepika__context` | `Read` with offset |
+| Find references | `mcp__grepika__refs` | `Grep` for symbol |
+| Related files | `mcp__grepika__related` | Multiple `Grep` calls |
+| Index statistics | `mcp__grepika__stats` | N/A |
+| **Set workspace** | `mcp__grepika__add_workspace` | N/A (global mode only) |
 
-**First time setup:** Run `mcp__agentika-grep__index` to build the search index before using other tools. The index updates incrementally on subsequent runs.
+**First time setup:** Run `mcp__grepika__index` to build the search index before using other tools. The index updates incrementally on subsequent runs.
 
-**Global Mode:** When the server is started with `--mcp` (without `--root`), it runs in global mode. The LLM must call `mcp__agentika-grep__add_workspace` with the project root path before using any other tools. The server's `get_info()` response will guide this. This is the recommended setup — the LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
+**Global Mode:** When the server is started with `--mcp` (without `--root`), it runs in global mode. The LLM must call `mcp__grepika__add_workspace` with the project root path before using any other tools. The server's `get_info()` response will guide this. This is the recommended setup — the LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
 
-**Why prefer agentika-grep:**
+**Why prefer grepika:**
 - Combines FTS5 + ripgrep + trigram indexing for superior search quality
 - Returns ranked results with relevance scores
 - More token-efficient than multiple Grep/Glob calls
@@ -35,7 +35,7 @@ Use the agentika-grep MCP server for all code search operations instead of built
 **When to still use Claude Code's built-in tools:**
 - `Read` for viewing specific files you already know the path to
 - `Bash` for git operations, builds, and running commands
-- `Edit`/`Write` for modifying files (agentika-grep is read-only)
+- `Edit`/`Write` for modifying files (grepika is read-only)
 
 ---
 
@@ -46,13 +46,13 @@ If you prefer a shorter snippet:
 ```markdown
 ## Code Search
 
-Prefer agentika-grep MCP tools over built-in Grep/Glob for code search:
-- `mcp__agentika-grep__index` - Build/update search index (run first!)
-- `mcp__agentika-grep__search` - Pattern/regex search (replaces Grep)
-- `mcp__agentika-grep__relevant` - Find files by topic (replaces Glob exploration)
-- `mcp__agentika-grep__toc` - Directory tree (replaces Glob patterns)
-- `mcp__agentika-grep__outline` - File structure extraction
-- `mcp__agentika-grep__refs` - Symbol references
+Prefer grepika MCP tools over built-in Grep/Glob for code search:
+- `mcp__grepika__index` - Build/update search index (run first!)
+- `mcp__grepika__search` - Pattern/regex search (replaces Grep)
+- `mcp__grepika__relevant` - Find files by topic (replaces Glob exploration)
+- `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
+- `mcp__grepika__outline` - File structure extraction
+- `mcp__grepika__refs` - Symbol references
 
 These provide ranked results with FTS5+trigram indexing for better search quality.
 ```
@@ -61,7 +61,7 @@ These provide ranked results with FTS5+trigram indexing for better search qualit
 
 ## Pre-authorizing Permissions
 
-To avoid permission prompts for agentika-grep tools:
+To avoid permission prompts for grepika tools:
 
 **Project-Level (Recommended)** - Add to `.claude/settings.local.json`:
 
@@ -69,7 +69,7 @@ To avoid permission prompts for agentika-grep tools:
 {
   "permissions": {
     "allow": [
-      "mcp__agentika-grep__*"
+      "mcp__grepika__*"
     ]
   }
 }
@@ -81,7 +81,7 @@ To avoid permission prompts for agentika-grep tools:
 {
   "permissions": {
     "allow": [
-      "mcp__agentika-grep__*"
+      "mcp__grepika__*"
     ]
   }
 }
@@ -93,18 +93,18 @@ To avoid permission prompts for agentika-grep tools:
 {
   "permissions": {
     "allow": [
-      "mcp__agentika-grep__search",
-      "mcp__agentika-grep__relevant",
-      "mcp__agentika-grep__refs",
-      "mcp__agentika-grep__related",
-      "mcp__agentika-grep__outline",
-      "mcp__agentika-grep__context",
-      "mcp__agentika-grep__get",
-      "mcp__agentika-grep__toc",
-      "mcp__agentika-grep__stats",
-      "mcp__agentika-grep__index",
-      "mcp__agentika-grep__diff",
-      "mcp__agentika-grep__add_workspace"
+      "mcp__grepika__search",
+      "mcp__grepika__relevant",
+      "mcp__grepika__refs",
+      "mcp__grepika__related",
+      "mcp__grepika__outline",
+      "mcp__grepika__context",
+      "mcp__grepika__get",
+      "mcp__grepika__toc",
+      "mcp__grepika__stats",
+      "mcp__grepika__index",
+      "mcp__grepika__diff",
+      "mcp__grepika__add_workspace"
     ]
   }
 }

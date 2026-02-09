@@ -1,4 +1,4 @@
-//! agentika-grep: Token-efficient MCP server for code search.
+//! grepika: Token-efficient MCP server for code search.
 //!
 //! This library provides a high-performance code search server using:
 //! - Trigram indexing for fast substring search
@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 
 /// Computes the default database path for a given root directory.
 ///
-/// The path is `~/.cache/agentika-grep/<hash>.db` where `<hash>` is the first
+/// The path is `~/.cache/grepika/<hash>.db` where `<hash>` is the first
 /// 16 hex characters of the SHA256 hash of the canonical root path.
 ///
 /// This decouples index storage from the indexed directory, preventing:
@@ -74,7 +74,7 @@ pub fn default_db_path(root: &Path) -> PathBuf {
 
     let cache_dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
-        .join("agentika-grep");
+        .join("grepika");
 
     cache_dir.join(format!("{hash}.db"))
 }

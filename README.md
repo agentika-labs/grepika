@@ -1,4 +1,4 @@
-# agentika-grep
+# grepika
 
 Token-efficient MCP server for code search. Combines three search backends for high-quality results:
 
@@ -6,13 +6,13 @@ Token-efficient MCP server for code search. Combines three search backends for h
 - **Grep** - Parallel regex search using ripgrep internals
 - **Trigram** - Fast substring search via 3-byte sequence indexing
 
-## Why agentika-grep?
+## Why grepika?
 
-Every built-in grep call burns **6x more context** than it needs to. agentika-grep breaks even after just **2 searches** — then every query after that is pure savings.
+Every built-in grep call burns **6x more context** than it needs to. grepika breaks even after just **2 searches** — then every query after that is pure savings.
 
 **Not faster grep — a codebase understanding engine.**
 
-| You want to... | Built-in Grep | agentika-grep |
+| You want to... | Built-in Grep | grepika |
 |----------------|---------------|---------------|
 | Find a pattern | Unranked file list | **Ranked results** with relevance scores |
 | Understand a symbol | Multiple grep calls, manual assembly | `refs` classifies definitions, imports, usages |
@@ -24,7 +24,7 @@ Every built-in grep call burns **6x more context** than it needs to. agentika-gr
 
 Benchmarked on the same codebase, same queries ([criterion](https://github.com/bheisler/criterion.rs)):
 
-| Metric | agentika-grep | Built-in Grep (ripgrep) |
+| Metric | grepika | Built-in Grep (ripgrep) |
 |--------|--------------|------------------------|
 | Search latency | **2.5 ms** | 5.3 ms |
 | Response size | **364 bytes avg** | 2,693 bytes avg |
@@ -46,47 +46,47 @@ Benchmarked on the same codebase, same queries ([criterion](https://github.com/b
 ### npm (recommended for MCP users)
 
 ```bash
-npx -y agentika-grep --mcp
+npx -y grepika --mcp
 ```
 
 Or install globally:
 
 ```bash
-npm install -g agentika-grep
+npm install -g grepika
 ```
 
 ### cargo-binstall (pre-built binary)
 
 ```bash
-cargo binstall agentika-grep
+cargo binstall grepika
 ```
 
 ### cargo install (compile from source)
 
-Requires Rust 1.75+:
+Requires Rust 1.91+:
 
 ```bash
-cargo install agentika-grep
+cargo install grepika
 ```
 
 ### GitHub Releases (manual download)
 
 Download the binary for your platform from
-[GitHub Releases](https://github.com/agentika/agentika-grep/releases).
+[GitHub Releases](https://github.com/agentika/grepika/releases). <!-- TODO: Update when repo is renamed -->
 
 ```bash
 # Extract the archive
-tar -xzf agentika-grep-macos-arm64.tar.gz
+tar -xzf grepika-macos-arm64.tar.gz
 
 # Remove macOS quarantine flag (required for unsigned binaries)
-xattr -d com.apple.quarantine agentika-grep
+xattr -d com.apple.quarantine grepika
 
 # Make executable and install to user-local bin
-chmod +x agentika-grep
-mv agentika-grep ~/.local/bin/
+chmod +x grepika
+mv grepika ~/.local/bin/
 
 # Verify
-agentika-grep --help
+grepika --help
 ```
 
 ## MCP Server Setup
@@ -98,7 +98,7 @@ In global mode, the server starts without `--root`. The LLM reads its working di
 **Claude Code:**
 
 ```bash
-claude mcp add agentika-grep -- npx -y agentika-grep --mcp
+claude mcp add grepika -- npx -y grepika --mcp
 ```
 
 Or add to your project's `.mcp.json` (or global `~/.claude.json`):
@@ -106,9 +106,9 @@ Or add to your project's `.mcp.json` (or global `~/.claude.json`):
 ```json
 {
   "mcpServers": {
-    "agentika-grep": {
+    "grepika": {
       "command": "npx",
-      "args": ["-y", "agentika-grep", "--mcp"]
+      "args": ["-y", "grepika", "--mcp"]
     }
   }
 }
@@ -121,9 +121,9 @@ Add to `~/.cursor/mcp.json` or project `.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "agentika-grep": {
+    "grepika": {
       "command": "npx",
-      "args": ["-y", "agentika-grep", "--mcp"]
+      "args": ["-y", "grepika", "--mcp"]
     }
   }
 }
@@ -136,9 +136,9 @@ Add to `opencode.config.json`:
 ```json
 {
   "mcp": {
-    "agentika-grep": {
+    "grepika": {
       "type": "local",
-      "command": ["npx", "-y", "agentika-grep", "--mcp"]
+      "command": ["npx", "-y", "grepika", "--mcp"]
     }
   }
 }
@@ -151,15 +151,15 @@ Use `--root` to pre-load a specific workspace at startup. The LLM does not need 
 **Claude Code:**
 
 ```bash
-claude mcp add agentika-grep -- npx -y agentika-grep --mcp --root /path/to/project
+claude mcp add grepika -- npx -y grepika --mcp --root /path/to/project
 ```
 
 ```json
 {
   "mcpServers": {
-    "agentika-grep": {
+    "grepika": {
       "command": "npx",
-      "args": ["-y", "agentika-grep", "--mcp", "--root", "/path/to/project"]
+      "args": ["-y", "grepika", "--mcp", "--root", "/path/to/project"]
     }
   }
 }
@@ -170,9 +170,9 @@ claude mcp add agentika-grep -- npx -y agentika-grep --mcp --root /path/to/proje
 ```json
 {
   "mcpServers": {
-    "agentika-grep": {
+    "grepika": {
       "command": "npx",
-      "args": ["-y", "agentika-grep", "--mcp", "--root", "/path/to/project"]
+      "args": ["-y", "grepika", "--mcp", "--root", "/path/to/project"]
     }
   }
 }
@@ -183,9 +183,9 @@ claude mcp add agentika-grep -- npx -y agentika-grep --mcp --root /path/to/proje
 ```json
 {
   "mcp": {
-    "agentika-grep": {
+    "grepika": {
       "type": "local",
-      "command": ["npx", "-y", "agentika-grep", "--mcp", "--root", "/path/to/project"]
+      "command": ["npx", "-y", "grepika", "--mcp", "--root", "/path/to/project"]
     }
   }
 }
@@ -197,7 +197,7 @@ claude mcp add agentika-grep -- npx -y agentika-grep --mcp --root /path/to/proje
 
 ### Tool Preference
 
-Claude Code has built-in Grep and Glob tools. To make Claude prefer agentika-grep's superior search capabilities:
+Claude Code has built-in Grep and Glob tools. To make Claude prefer grepika's superior search capabilities:
 
 **Option A: Advisory Instructions (CLAUDE.md)**
 
@@ -206,13 +206,13 @@ Add to your project's `CLAUDE.md`:
 ```markdown
 ## Code Search
 
-Prefer agentika-grep MCP tools over built-in Grep/Glob for code search:
-- `mcp__agentika-grep__index` - Build/update search index (run first!)
-- `mcp__agentika-grep__search` - Pattern/regex search (replaces Grep)
-- `mcp__agentika-grep__relevant` - Find files by topic (replaces Glob exploration)
-- `mcp__agentika-grep__toc` - Directory tree (replaces Glob patterns)
-- `mcp__agentika-grep__outline` - File structure extraction
-- `mcp__agentika-grep__refs` - Symbol references
+Prefer grepika MCP tools over built-in Grep/Glob for code search:
+- `mcp__grepika__index` - Build/update search index (run first!)
+- `mcp__grepika__search` - Pattern/regex search (replaces Grep)
+- `mcp__grepika__relevant` - Find files by topic (replaces Glob exploration)
+- `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
+- `mcp__grepika__outline` - File structure extraction
+- `mcp__grepika__refs` - Symbol references
 
 These provide ranked results with FTS5+trigram indexing for better search quality.
 ```
@@ -227,7 +227,7 @@ To avoid permission prompts, add to `.claude/settings.local.json` (project) or `
 {
   "permissions": {
     "allow": [
-      "mcp__agentika-grep__*"
+      "mcp__grepika__*"
     ]
   }
 }
@@ -237,22 +237,22 @@ To avoid permission prompts, add to `.claude/settings.local.json` (project) or `
 
 ```bash
 # Index a codebase
-agentika-grep index --root /path/to/project
+grepika index --root /path/to/project
 
 # Search (modes: combined, fts, grep)
-agentika-grep search "authentication" --root /path/to/project -l 20 -m combined
+grepika search "authentication" --root /path/to/project -l 20 -m combined
 
 # Get file content with line range
-agentika-grep get <path> -s 1 -e 100
+grepika get <path> -s 1 -e 100
 
 # View index statistics
-agentika-grep stats
+grepika stats
 
 # Run as MCP server (global mode — LLM calls add_workspace)
-agentika-grep --mcp
+grepika --mcp
 
 # Run as MCP server (single workspace mode)
-agentika-grep --mcp --root /path/to/project
+grepika --mcp --root /path/to/project
 ```
 
 ## Available Tools
@@ -274,10 +274,10 @@ agentika-grep --mcp --root /path/to/project
 
 ## Token Efficiency
 
-agentika-grep's indexed search returns **83.8% fewer tokens** on average compared to Claude's built-in Grep tool (which uses ripgrep). This dramatically reduces context consumption when exploring codebases.
+grepika's indexed search returns **83.8% fewer tokens** on average compared to Claude's built-in Grep tool (which uses ripgrep). This dramatically reduces context consumption when exploring codebases.
 
 ```
-Query      │ agentika │  ripgrep │ Savings
+Query      │  grepika │  ripgrep │ Savings
 ───────────┼──────────┼──────────┼────────
 auth       │    326 B │   2109 B │  84.5%
 config     │    502 B │   3749 B │  86.6%
@@ -298,16 +298,16 @@ By default, the index is stored in a **global cache directory**, not in the proj
 
 | Platform | Default Location |
 |----------|------------------|
-| macOS    | `~/Library/Caches/agentika-grep/<hash>.db` |
-| Linux    | `~/.cache/agentika-grep/<hash>.db` |
-| Windows  | `%LOCALAPPDATA%\agentika-grep\<hash>.db` |
+| macOS    | `~/Library/Caches/grepika/<hash>.db` |
+| Linux    | `~/.cache/grepika/<hash>.db` |
+| Windows  | `%LOCALAPPDATA%\grepika\<hash>.db` |
 
 The `<hash>` is derived from the absolute path to `--root`, ensuring each project gets its own index without polluting the project directory.
 
 Use `--db` to specify a custom location:
 
 ```bash
-agentika-grep --mcp --root /path/to/project --db /custom/path/index.db
+grepika --mcp --root /path/to/project --db /custom/path/index.db
 ```
 
 ### Other Settings
@@ -361,15 +361,15 @@ When enabled, each tool invocation logs performance metrics to stderr:
 ```json
 {
   "mcpServers": {
-    "agentika-grep": {
-      "command": "agentika-grep",
-      "args": ["--mcp", "--root", "/path/to/project", "--log-file", "/tmp/agentika-grep.log"]
+    "grepika": {
+      "command": "grepika",
+      "args": ["--mcp", "--root", "/path/to/project", "--log-file", "/tmp/grepika.log"]
     }
   }
 }
 ```
 
-Then: `tail -f /tmp/agentika-grep.log`
+Then: `tail -f /tmp/grepika.log`
 
 ## License
 

@@ -5,7 +5,7 @@
 /target/
 
 # Project-specific index database (users generate their own)
-.agentika-grep/
+.grepika/
 
 # Claude Code local settings (but track plugins/skills)
 .claude/settings.local.json

@@ -7,9 +7,9 @@
 
 mod common;
 
-use agentika_grep::db::Database;
-use agentika_grep::services::{Indexer, SearchService, TrigramIndex};
-use agentika_grep::tools::*;
+use grepika::db::Database;
+use grepika::services::{Indexer, SearchService, TrigramIndex};
+use grepika::tools::*;
 use std::fs;
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
@@ -592,7 +592,7 @@ fn test_edge_cases() {
 
 #[test]
 fn test_workspace_validation_blocks_system_paths() {
-    use agentika_grep::security::validate_workspace_root;
+    use grepika::security::validate_workspace_root;
     use std::path::Path;
 
     assert!(
@@ -611,7 +611,7 @@ fn test_workspace_validation_blocks_system_paths() {
 
 #[test]
 fn test_workspace_validation_accepts_project_dirs() {
-    use agentika_grep::security::validate_workspace_root;
+    use grepika::security::validate_workspace_root;
 
     let dir = TempDir::new().unwrap();
     let result = validate_workspace_root(dir.path());
@@ -624,7 +624,7 @@ fn test_workspace_validation_accepts_project_dirs() {
 
 #[test]
 fn test_workspace_new_creates_services() {
-    use agentika_grep::server::Workspace;
+    use grepika::server::Workspace;
 
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
@@ -639,10 +639,10 @@ fn test_workspace_new_creates_services() {
 
 #[test]
 fn test_empty_server_tools_return_error() {
-    use agentika_grep::server::AgentikaGrepServer;
+    use grepika::server::GrepikaServer;
 
     // Verify new_empty creates a server with no workspace
-    let server = AgentikaGrepServer::new_empty(None);
+    let server = GrepikaServer::new_empty(None);
     // We can't directly call MCP tools without an async runtime + rmcp,
     // but we can verify the server was created
     // The real integration test happens in the MCP protocol layer
@@ -650,7 +650,7 @@ fn test_empty_server_tools_return_error() {
     // Verify Workspace::new works for the backward-compat path
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
-    let result = AgentikaGrepServer::new(dir.path().to_path_buf(), None);
+    let result = GrepikaServer::new(dir.path().to_path_buf(), None);
     assert!(result.is_ok(), "Server::new should succeed");
 
     // Ensure new_empty doesn't panic

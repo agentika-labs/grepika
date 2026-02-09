@@ -1,4 +1,4 @@
-//! Performance benchmarks for agentika-grep hot paths.
+//! Performance benchmarks for grepika hot paths.
 //!
 //! Measures the core operations that dominate runtime:
 //! - Trigram index search and addition
@@ -9,9 +9,9 @@
 //! Run with: `cargo bench`
 //! View reports: `open target/criterion/report/index.html`
 
-use agentika_grep::db::Database;
-use agentika_grep::services::{Indexer, SearchService, TrigramIndex};
-use agentika_grep::types::{FileId, Score};
+use grepika::db::Database;
+use grepika::services::{Indexer, SearchService, TrigramIndex};
+use grepika::types::{FileId, Score};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::fs;
 use std::path::PathBuf;
@@ -536,7 +536,7 @@ fn bench_db_read(c: &mut Criterion) {
 
 /// Benchmarks search against a real git repository.
 ///
-/// By default, indexes and searches this repo (agentika-grep).
+/// By default, indexes and searches this repo (grepika).
 /// Set `BENCH_REPO_PATH` to benchmark a different/larger repo.
 fn bench_real_repo(c: &mut Criterion) {
     let mut group = c.benchmark_group("real_repo");

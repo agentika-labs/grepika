@@ -1,12 +1,14 @@
 [package]
-name = "agentika-grep"
+name = "grepika"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.91"
 description = "Token-efficient MCP server for code search with trigram indexing"
 authors = ["Agentika"]
 license = "MIT"
+# TODO: Update when repo is renamed
 repository = "https://github.com/agentika/agentika-grep"
+# TODO: Update when repo is renamed
 homepage = "https://github.com/agentika/agentika-grep"
 readme = "README.md"
 keywords = ["mcp", "code-search", "trigram", "grep", "fts5"]
@@ -83,12 +85,12 @@ name = "token_efficiency"
 harness = false
 
 [package.metadata.binstall]
-pkg-url = "{ repo }/releases/download/v{ version }/agentika-grep-{ target }.tar.gz"
+pkg-url = "{ repo }/releases/download/v{ version }/grepika-{ target }.tar.gz"
 pkg-fmt = "tgz"
-bin-dir = "agentika-grep{ binary-ext }"
+bin-dir = "grepika{ binary-ext }"
 
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
-pkg-url = "{ repo }/releases/download/v{ version }/agentika-grep-{ target }.zip"
+pkg-url = "{ repo }/releases/download/v{ version }/grepika-{ target }.zip"
 pkg-fmt = "zip"
 
 [profile.release]
@@ -97,5 +99,5 @@ codegen-units = 1
 strip = true
 
 [[bin]]
-name = "agentika-grep"
+name = "grepika"
 path = "src/main.rs"

@@ -4,10 +4,10 @@
 
 mod common;
 
-use agentika_grep::db::Database;
-use agentika_grep::services::{GrepService, Indexer, SearchService, TrigramIndex};
-use agentika_grep::tools::*;
-use agentika_grep::types::{FileId, Score, Trigram};
+use grepika::db::Database;
+use grepika::services::{GrepService, Indexer, SearchService, TrigramIndex};
+use grepika::tools::*;
+use grepika::types::{FileId, Score, Trigram};
 use std::fs;
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;

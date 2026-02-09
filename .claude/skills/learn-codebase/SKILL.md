@@ -3,13 +3,13 @@ disable-model-invocation: true
 context: fork
 agent: Explore
 allowed-tools:
-  - mcp__agentika-grep__search
-  - mcp__agentika-grep__relevant
-  - mcp__agentika-grep__toc
-  - mcp__agentika-grep__stats
-  - mcp__agentika-grep__outline
-  - mcp__agentika-grep__get
-  - mcp__agentika-grep__add_workspace
+  - mcp__grepika__search
+  - mcp__grepika__relevant
+  - mcp__grepika__toc
+  - mcp__grepika__stats
+  - mcp__grepika__outline
+  - mcp__grepika__get
+  - mcp__grepika__add_workspace
 ---
 
 # Learn Codebase Skill
@@ -24,29 +24,29 @@ If no area specified, provide a general codebase overview. If an area is specifi
 
 ## Pre-check
 
-If any tool returns "No active workspace", call `mcp__agentika-grep__add_workspace` with the project root first, then retry the tool.
+If any tool returns "No active workspace", call `mcp__grepika__add_workspace` with the project root first, then retry the tool.
 
 ## Learning Workflow
 
 1. **Get codebase statistics**
-   - Use `mcp__agentika-grep__stats` with `detailed: true`
+   - Use `mcp__grepika__stats` with `detailed: true`
    - Understand languages, file count, and codebase size
 
 2. **Show directory structure**
-   - Use `mcp__agentika-grep__toc` to display the tree
+   - Use `mcp__grepika__toc` to display the tree
    - Identify main directories and their purposes
 
 3. **Find key files for the area**
-   - Use `mcp__agentika-grep__relevant` to find important files
+   - Use `mcp__grepika__relevant` to find important files
    - For general overview, search for: "main entry point", "configuration", "core logic"
    - For specific areas, search for that topic
 
 4. **Extract structure of main files**
-   - Use `mcp__agentika-grep__outline` on the most important files
+   - Use `mcp__grepika__outline` on the most important files
    - Show exports, functions, classes, and types
 
 5. **Read key sections**
-   - Use `mcp__agentika-grep__get` to show important code snippets
+   - Use `mcp__grepika__get` to show important code snippets
    - Focus on entry points, configuration, and core abstractions
 
 ## Output Format

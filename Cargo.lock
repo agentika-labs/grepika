@@ -3,39 +3,6 @@
 version = 4
 
 [[package]]
-name = "agentika-grep"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "anyhow",
- "clap",
- "criterion",
- "dirs",
- "dunce",
- "grep-matcher",
- "grep-regex",
- "grep-searcher",
- "ignore",
- "r2d2",
- "r2d2_sqlite",
- "rayon",
- "regex",
- "rmcp",
- "roaring",
- "rusqlite",
- "schemars",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "xxhash-rust",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,6 +685,39 @@ dependencies = [
  "log",
  "memchr",
  "memmap2",
+]
+
+[[package]]
+name = "grepika"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "clap",
+ "criterion",
+ "dirs",
+ "dunce",
+ "grep-matcher",
+ "grep-regex",
+ "grep-searcher",
+ "ignore",
+ "r2d2",
+ "r2d2_sqlite",
+ "rayon",
+ "regex",
+ "rmcp",
+ "roaring",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "xxhash-rust",
 ]
 
 [[package]]

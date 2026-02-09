@@ -1,4 +1,4 @@
-//! Token efficiency benchmark comparing agentika-grep vs Claude's built-in Grep.
+//! Token efficiency benchmark comparing grepika vs Claude's built-in Grep.
 //!
 //! This benchmark measures output token cost, not execution time.
 //! The goal is to quantify the break-even point where MCP schema overhead
@@ -7,10 +7,10 @@
 //! Run with: `cargo bench token_efficiency`
 //! View reports: `open target/criterion/report/index.html`
 
-use agentika_grep::bench_utils::{BenchmarkStats, BreakEvenAnalysis, ComparisonResult, TokenMetrics};
-use agentika_grep::db::Database;
-use agentika_grep::services::SearchService;
-use agentika_grep::tools::{SearchOutput, SearchResultItem};
+use grepika::bench_utils::{BenchmarkStats, BreakEvenAnalysis, ComparisonResult, TokenMetrics};
+use grepika::db::Database;
+use grepika::services::SearchService;
+use grepika::tools::{SearchOutput, SearchResultItem};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -290,11 +290,11 @@ fn test_validate_token_expired() {
 }
 
 // ============================================================================
-// Agentika Output Measurement
+// Grepika Output Measurement
 // ============================================================================
 
-/// Measures agentika-grep search output size.
-fn measure_agentika_search(service: &SearchService, query: &str, limit: usize) -> TokenMetrics {
+/// Measures grepika search output size.
+fn measure_grepika_search(service: &SearchService, query: &str, limit: usize) -> TokenMetrics {
     let results = service.search(query, limit).unwrap_or_default();
     let root = service.root();
 
@@ -432,10 +432,10 @@ fn measure_ripgrep_search(dir: &TempDir, query: &str, limit: usize) -> TokenMetr
 /// Simulates ripgrep output when rg is not available.
 ///
 /// Based on typical Claude Grep output characteristics:
-/// - ~4x more verbose than agentika-grep due to context lines
+/// - ~4x more verbose than grepika due to context lines
 fn simulate_ripgrep_output(query: &str, limit: usize) -> TokenMetrics {
     // Simulate finding matches with context
-    // Typical ripgrep output with 3 lines context is ~4x agentika-grep
+    // Typical ripgrep output with 3 lines context is ~4x grepika
     let simulated_bytes = (query.len() + 50) * limit * 4; // ~4x multiplier for context
     TokenMetrics {
         output_bytes: simulated_bytes,
@@ -613,9 +613,9 @@ fn bench_token_output_size(c: &mut Criterion) {
     ];
 
     for (name, pattern) in queries {
-        // Measure agentika-grep output size
-        group.bench_with_input(BenchmarkId::new("agentika", name), &pattern, |b, p| {
-            b.iter(|| black_box(measure_agentika_search(&service, p, 20)))
+        // Measure grepika output size
+        group.bench_with_input(BenchmarkId::new("grepika", name), &pattern, |b, p| {
+            b.iter(|| black_box(measure_grepika_search(&service, p, 20)))
         });
 
         // Measure ripgrep output size (Claude Grep proxy)
@@ -643,23 +643,23 @@ fn bench_token_comparison(c: &mut Criterion) {
     ];
 
     let mut comparisons = Vec::new();
-    let mut agentika_bytes_samples = Vec::new();
+    let mut grepika_bytes_samples = Vec::new();
     let mut ripgrep_bytes_samples = Vec::new();
 
     for (name, pattern) in queries {
         // Collect samples
-        let agentika_metrics = measure_agentika_search(&service, pattern, 20);
+        let grepika_metrics = measure_grepika_search(&service, pattern, 20);
         let ripgrep_metrics = measure_ripgrep_search(&dir, pattern, 20);
 
-        agentika_bytes_samples.push(agentika_metrics.output_bytes as f64);
+        grepika_bytes_samples.push(grepika_metrics.output_bytes as f64);
         ripgrep_bytes_samples.push(ripgrep_metrics.output_bytes as f64);
 
-        comparisons.push(ComparisonResult::new(name, agentika_metrics, ripgrep_metrics));
+        comparisons.push(ComparisonResult::new(name, grepika_metrics, ripgrep_metrics));
 
         // Benchmark the measurements themselves
         group.bench_function(BenchmarkId::new("measure", name), |b| {
             b.iter(|| {
-                let a = measure_agentika_search(&service, pattern, 20);
+                let a = measure_grepika_search(&service, pattern, 20);
                 let r = measure_ripgrep_search(&dir, pattern, 20);
                 black_box((a, r))
             })
@@ -669,18 +669,18 @@ fn bench_token_comparison(c: &mut Criterion) {
     group.finish();
 
     // Print comparison summary
-    print_comparison_summary(&comparisons, &agentika_bytes_samples, &ripgrep_bytes_samples);
+    print_comparison_summary(&comparisons, &grepika_bytes_samples, &ripgrep_bytes_samples);
 }
 
 /// Prints a formatted comparison summary after benchmarks complete.
 fn print_comparison_summary(
     comparisons: &[ComparisonResult],
-    agentika_samples: &[f64],
+    grepika_samples: &[f64],
     ripgrep_samples: &[f64],
 ) {
     let schema_bytes = measure_mcp_schema_size();
     let analysis = BreakEvenAnalysis::calculate(schema_bytes, comparisons);
-    let agentika_stats = BenchmarkStats::from_samples(agentika_samples);
+    let grepika_stats = BenchmarkStats::from_samples(grepika_samples);
     let ripgrep_stats = BenchmarkStats::from_samples(ripgrep_samples);
 
     eprintln!("\n");
@@ -690,14 +690,14 @@ fn print_comparison_summary(
     eprintln!();
     eprintln!(
         "{:<20} │ {:>12} │ {:>12} │ {:>10}",
-        "Query", "agentika", "ripgrep", "Savings"
+        "Query", "grepika", "ripgrep", "Savings"
     );
     eprintln!("─────────────────────┼──────────────┼──────────────┼────────────");
 
     for c in comparisons {
         eprintln!(
             "{:<20} │ {:>10} B │ {:>10} B │ {:>8.1}%",
-            c.query, c.agentika.output_bytes, c.ripgrep.output_bytes, c.savings_percent
+            c.query, c.grepika.output_bytes, c.ripgrep.output_bytes, c.savings_percent
         );
     }
 
@@ -707,15 +707,15 @@ fn print_comparison_summary(
         / comparisons.len() as f64;
     eprintln!(
         "{:<20} │ {:>10.0} B │ {:>10.0} B │ {:>8.1}%",
-        "AVERAGE", agentika_stats.mean, ripgrep_stats.mean, avg_savings
+        "AVERAGE", grepika_stats.mean, ripgrep_stats.mean, avg_savings
     );
 
     eprintln!();
     eprintln!("Statistical Reliability (CV% < 50% is good):");
     eprintln!(
-        "  agentika CV%: {:.1}% {}",
-        agentika_stats.cv_percent,
-        if agentika_stats.is_reliable(50.0) { "✓" } else { "⚠" }
+        "  grepika CV%: {:.1}% {}",
+        grepika_stats.cv_percent,
+        if grepika_stats.is_reliable(50.0) { "✓" } else { "⚠" }
     );
     eprintln!(
         "  ripgrep CV%:  {:.1}% {}",
@@ -734,7 +734,7 @@ fn print_comparison_summary(
     eprintln!();
 
     if analysis.break_even_queries < 20 {
-        eprintln!("✓ Sessions with {}+ searches → agentika-grep is more efficient", analysis.break_even_queries);
+        eprintln!("✓ Sessions with {}+ searches → grepika is more efficient", analysis.break_even_queries);
         eprintln!("  Sessions with <{} searches → Built-in Grep wins", analysis.break_even_queries);
     } else if analysis.break_even_queries < usize::MAX {
         eprintln!("⚠ High break-even point ({} queries) - consider for long sessions only", analysis.break_even_queries);
@@ -780,9 +780,9 @@ fn bench_result_density(c: &mut Criterion) {
     let limits = [5, 10, 20, 50];
 
     for limit in limits {
-        group.bench_with_input(BenchmarkId::new("agentika", limit), &limit, |b, &l| {
+        group.bench_with_input(BenchmarkId::new("grepika", limit), &limit, |b, &l| {
             b.iter(|| {
-                let metrics = measure_agentika_search(&service, "fn", l);
+                let metrics = measure_grepika_search(&service, "fn", l);
                 black_box(metrics.result_density())
             })
         });

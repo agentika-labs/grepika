@@ -3,14 +3,14 @@ disable-model-invocation: true
 context: fork
 agent: Explore
 allowed-tools:
-  - mcp__agentika-grep__search
-  - mcp__agentika-grep__relevant
-  - mcp__agentika-grep__refs
-  - mcp__agentika-grep__related
-  - mcp__agentika-grep__outline
-  - mcp__agentika-grep__context
-  - mcp__agentika-grep__get
-  - mcp__agentika-grep__add_workspace
+  - mcp__grepika__search
+  - mcp__grepika__relevant
+  - mcp__grepika__refs
+  - mcp__grepika__related
+  - mcp__grepika__outline
+  - mcp__grepika__context
+  - mcp__grepika__get
+  - mcp__grepika__add_workspace
 ---
 
 # Change Impact Analysis Skill
@@ -25,20 +25,20 @@ If no target provided, ask the user what symbol, function, file, or pattern they
 
 ## Pre-check
 
-If any tool returns "No active workspace", call `mcp__agentika-grep__add_workspace` with the project root first, then retry the tool.
+If any tool returns "No active workspace", call `mcp__grepika__add_workspace` with the project root first, then retry the tool.
 
 ## Impact Analysis Workflow
 
 1. **Find all direct references**
-   - Use `mcp__agentika-grep__refs` to find every usage of the symbol
+   - Use `mcp__grepika__refs` to find every usage of the symbol
    - Categorize by type: imports, calls, type references, extensions
 
 2. **Discover dependent files**
-   - Use `mcp__agentika-grep__related` to find connected modules
+   - Use `mcp__grepika__related` to find connected modules
    - Map the dependency graph outward from the target
 
 3. **Search for similar patterns**
-   - Use `mcp__agentika-grep__search` for similar naming conventions
+   - Use `mcp__grepika__search` for similar naming conventions
    - Look for duck typing or interface implementations
 
 4. **Identify test coverage**
@@ -46,7 +46,7 @@ If any tool returns "No active workspace", call `mcp__agentika-grep__add_workspa
    - Note which behaviors are tested vs untested
 
 5. **Extract file structures**
-   - Use `mcp__agentika-grep__outline` on heavily impacted files
+   - Use `mcp__grepika__outline` on heavily impacted files
    - Understand what else might be affected in those files
 
 ## Output Format

@@ -1,4 +1,4 @@
-//! Error types for agentika-grep.
+//! Error types for grepika.
 //!
 //! Uses thiserror for ergonomic error handling with proper
 //! error chain propagation.

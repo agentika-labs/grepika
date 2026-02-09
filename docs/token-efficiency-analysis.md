@@ -1,12 +1,12 @@
-# Token Efficiency Analysis: agentika-grep vs Traditional Search
+# Token Efficiency Analysis: grepika vs Traditional Search
 
-This document analyzes the token efficiency gains when using agentika-grep compared to traditional grep-based code search in LLM-assisted development workflows.
+This document analyzes the token efficiency gains when using grepika compared to traditional grep-based code search in LLM-assisted development workflows.
 
 ## Summary
 
 **83.8% token reduction** compared to traditional search approaches.
 
-| Metric | Traditional Search | agentika-grep | Improvement |
+| Metric | Traditional Search | grepika | Improvement |
 |--------|-------------------|---------------|-------------|
 | Average tokens/query | 12,847 | 2,082 | 83.8% reduction |
 | Context efficiency | ~1x | ~5x | 5x more exploration per context window |
@@ -20,7 +20,7 @@ When using grep or ripgrep directly, results include:
 - Redundant matches across similar files
 - No deduplication of common patterns
 
-### agentika-grep Returns Indexed Metadata
+### grepika Returns Indexed Metadata
 The MCP server approach provides:
 - **Pre-ranked results** - BM25 scoring eliminates irrelevant matches before they reach the LLM
 - **Deduplicated content** - Trigram indexing identifies and merges similar results
@@ -63,7 +63,7 @@ Pre-filtered, ranked results mean:
 ### Session Productivity Gains
 Typical code exploration session comparison:
 
-| Scenario | Traditional | agentika-grep |
+| Scenario | Traditional | grepika |
 |----------|-------------|---------------|
 | Searches before context limit | 8-10 | 40-50 |
 | Files explorable per session | 15-20 | 75-100 |
@@ -96,6 +96,6 @@ Search scenarios tested:
 
 ## Conclusion
 
-agentika-grep's indexed approach transforms code search from a token-expensive operation into an efficient, scalable tool for LLM-assisted development. The combination of FTS5, ripgrep, and trigram indexing delivers search quality comparable to or better than raw grep while consuming a fraction of the tokens.
+grepika's indexed approach transforms code search from a token-expensive operation into an efficient, scalable tool for LLM-assisted development. The combination of FTS5, ripgrep, and trigram indexing delivers search quality comparable to or better than raw grep while consuming a fraction of the tokens.
 
 For teams using Claude Code or similar LLM development tools, the ROI is immediate and compounds with usage intensity.

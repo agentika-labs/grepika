@@ -1,19 +1,19 @@
-//! agentika-grep: Token-efficient MCP server for code search.
+//! grepika: Token-efficient MCP server for code search.
 //!
 //! Usage:
-//!   agentika-grep --mcp --root <path>   # Start MCP server (single workspace)
-//!   agentika-grep --mcp                 # Start MCP server (global mode, LLM calls add_workspace)
-//!   agentika-grep search <query>        # CLI search mode
-//!   agentika-grep index                 # Index the codebase
+//!   grepika --mcp --root <path>   # Start MCP server (single workspace)
+//!   grepika --mcp                 # Start MCP server (global mode, LLM calls add_workspace)
+//!   grepika search <query>        # CLI search mode
+//!   grepika index                 # Index the codebase
 
-use agentika_grep::server::AgentikaGrepServer;
+use grepika::server::GrepikaServer;
 use clap::{Parser, Subcommand};
 use rmcp::ServiceExt;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "agentika-grep")]
+#[command(name = "grepika")]
 #[command(about = "Token-efficient MCP server for code search")]
 #[command(version)]
 struct Cli {
@@ -25,7 +25,7 @@ struct Cli {
     #[arg(long)]
     root: Option<PathBuf>,
 
-    /// Database path (default: ~/.cache/agentika-grep/<hash>.db)
+    /// Database path (default: ~/.cache/grepika/<hash>.db)
     #[arg(long)]
     db: Option<PathBuf>,
 
@@ -88,13 +88,13 @@ async fn main() -> anyhow::Result<()> {
 
     // CRITICAL: Log to stderr only (stdout is JSON-RPC for MCP)
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("agentika_grep=info".parse()?))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("grepika=info".parse()?))
         .with_writer(std::io::stderr)
         .init();
 
     // Initialize profiling log file (if profiling feature enabled)
     #[cfg(feature = "profiling")]
-    agentika_grep::server::init_profiling(cli.log_file.as_deref());
+    grepika::server::init_profiling(cli.log_file.as_deref());
 
     #[cfg(not(feature = "profiling"))]
     if cli.log_file.is_some() {
@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
 async fn run_mcp_server(root: PathBuf, db: Option<PathBuf>) -> anyhow::Result<()> {
     tracing::info!("Starting MCP server for root: {}", root.display());
 
-    let server = AgentikaGrepServer::new(root, db)?;
+    let server = GrepikaServer::new(root, db)?;
 
     // Run the MCP server on stdin/stdout
     let service = server.serve(rmcp::transport::io::stdio()).await?;
@@ -142,7 +142,7 @@ async fn run_mcp_server(root: PathBuf, db: Option<PathBuf>) -> anyhow::Result<()
 async fn run_mcp_server_global(db: Option<PathBuf>) -> anyhow::Result<()> {
     tracing::info!("Starting MCP server in global mode (no workspace pre-loaded)");
 
-    let server = AgentikaGrepServer::new_empty(db);
+    let server = GrepikaServer::new_empty(db);
 
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
@@ -151,13 +151,13 @@ async fn run_mcp_server_global(db: Option<PathBuf>) -> anyhow::Result<()> {
 }
 
 async fn run_cli(root: PathBuf, db: Option<PathBuf>, cmd: Commands) -> anyhow::Result<()> {
-    use agentika_grep::db::Database;
-    use agentika_grep::services::{Indexer, SearchService, TrigramIndex};
+    use grepika::db::Database;
+    use grepika::services::{Indexer, SearchService, TrigramIndex};
     use std::sync::Arc;
     use std::sync::RwLock;
 
     // Initialize database - use global cache location by default
-    let db_path = db.unwrap_or_else(|| agentika_grep::default_db_path(&root));
+    let db_path = db.unwrap_or_else(|| grepika::default_db_path(&root));
     std::fs::create_dir_all(db_path.parent().unwrap())?;
     let database = Arc::new(Database::open(&db_path)?);
 
@@ -177,36 +177,36 @@ async fn run_cli(root: PathBuf, db: Option<PathBuf>, cmd: Commands) -> anyhow::R
 
     match cmd {
         Commands::Search { query, limit, mode } => {
-            let mode: agentika_grep::tools::SearchMode = mode
+            let mode: grepika::tools::SearchMode = mode
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!(e))?;
-            let input = agentika_grep::tools::SearchInput { query, limit, mode };
-            let result = agentika_grep::tools::execute_search(&search, input)
+            let input = grepika::tools::SearchInput { query, limit, mode };
+            let result = grepika::tools::execute_search(&search, input)
                 .map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
         Commands::Index { force } => {
-            let input = agentika_grep::tools::IndexInput { force };
-            let result = agentika_grep::tools::execute_index(&indexer, input)
+            let input = grepika::tools::IndexInput { force };
+            let result = grepika::tools::execute_index(&indexer, input)
                 .map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
         Commands::Get { path, start, end } => {
-            let input = agentika_grep::tools::GetInput {
+            let input = grepika::tools::GetInput {
                 path,
                 start_line: start,
                 end_line: end,
             };
-            let result = agentika_grep::tools::execute_get(&search, input)
+            let result = grepika::tools::execute_get(&search, input)
                 .map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", result.content);
         }
 
         Commands::Stats { detailed } => {
-            let input = agentika_grep::tools::StatsInput { detailed };
-            let result = agentika_grep::tools::execute_stats(&search, &indexer, input)
+            let input = grepika::tools::StatsInput { detailed };
+            let result = grepika::tools::execute_stats(&search, &indexer, input)
                 .map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }

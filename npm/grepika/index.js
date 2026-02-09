@@ -4,11 +4,11 @@ const { execFileSync } = require("child_process");
 const path = require("path");
 
 const PLATFORMS = {
-  "darwin-arm64": "@agentika/agentika-grep-darwin-arm64",
-  "darwin-x64": "@agentika/agentika-grep-darwin-x64",
-  "linux-x64": "@agentika/agentika-grep-linux-x64",
-  "linux-arm64": "@agentika/agentika-grep-linux-arm64",
-  "win32-x64": "@agentika/agentika-grep-win32-x64",
+  "darwin-arm64": "@agentika/grepika-darwin-arm64",
+  "darwin-x64": "@agentika/grepika-darwin-x64",
+  "linux-x64": "@agentika/grepika-linux-x64",
+  "linux-arm64": "@agentika/grepika-linux-arm64",
+  "win32-x64": "@agentika/grepika-win32-x64",
 };
 
 const platformKey = `${process.platform}-${process.arch}`;
@@ -27,7 +27,7 @@ try {
     require.resolve(`${pkg}/package.json`),
     "..",
     "bin",
-    `agentika-grep${process.platform === "win32" ? ".exe" : ""}`
+    `grepika${process.platform === "win32" ? ".exe" : ""}`
   );
 } catch {
   console.error(

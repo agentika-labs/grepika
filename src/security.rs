@@ -1,4 +1,4 @@
-//! Security module for agentika-grep MCP server.
+//! Security module for grepika MCP server.
 //!
 //! Provides protection against:
 //! - Path traversal attacks (escaping root directory)
@@ -58,7 +58,7 @@ impl SecurityError {
 /// # Example
 ///
 /// ```
-/// use agentika_grep::security::validate_path;
+/// use grepika::security::validate_path;
 /// use std::path::Path;
 ///
 /// let root = Path::new("/project");
@@ -368,7 +368,7 @@ impl SensitivePattern {
 /// # Example
 ///
 /// ```
-/// use agentika_grep::security::is_sensitive_file;
+/// use grepika::security::is_sensitive_file;
 /// use std::path::Path;
 ///
 /// assert!(is_sensitive_file(Path::new(".env")).is_some());
@@ -603,7 +603,7 @@ pub const MAX_NESTING_DEPTH: usize = 5;
 /// # Example
 ///
 /// ```
-/// use agentika_grep::security::validate_regex_pattern;
+/// use grepika::security::validate_regex_pattern;
 ///
 /// // Safe patterns
 /// assert!(validate_regex_pattern("fn\\s+\\w+").is_ok());

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**agentika-grep** is a token-efficient MCP (Model Context Protocol) server for code search. It combines three search backends for high-quality results:
+**grepika** is a token-efficient MCP (Model Context Protocol) server for code search. It combines three search backends for high-quality results:
 - **FTS5** - SQLite full-text search with BM25 ranking
 - **Grep** - Parallel regex search using ripgrep internals
 - **Trigram** - Fast substring search via 3-byte sequence indexing
@@ -18,15 +18,15 @@ The server communicates via JSON-RPC over stdin/stdout when running as an MCP se
 cargo build --release
 
 # Run MCP server — global mode (recommended, LLM calls add_workspace)
-./target/release/agentika-grep --mcp
+./target/release/grepika --mcp
 
 # Run MCP server — single workspace mode
-./target/release/agentika-grep --mcp --root <path>
+./target/release/grepika --mcp --root <path>
 
 # CLI commands
-agentika-grep index                           # Index the codebase
-agentika-grep search <query> -l 20 -m combined  # Search (modes: combined, fts, grep)
-agentika-grep get <path> -s 1 -e 100          # Get file content with line range
+grepika index                           # Index the codebase
+grepika search <query> -l 20 -m combined  # Search (modes: combined, fts, grep)
+grepika get <path> -s 1 -e 100          # Get file content with line range
 
 # Run tests
 cargo test
@@ -52,7 +52,7 @@ SearchService              ← spawn_blocking for async bridge
 ┌──────┼──────┐
 FTS5   Grep   Trigram      ← Three search backends with weighted score merging
        │
-SQLite + r2d2 pool         ← .agentika-grep/index.db
+SQLite + r2d2 pool         ← .grepika/index.db
 ```
 
 ### Key Design Decisions
@@ -110,7 +110,7 @@ SQLite + r2d2 pool         ← .agentika-grep/index.db
 ## Critical Notes
 
 - **Logging must go to stderr**: stdout is reserved for JSON-RPC in MCP mode
-- Index stored at `~/.cache/agentika-grep/<hash>.db` by default (not in the project directory)
+- Index stored at `~/.cache/grepika/<hash>.db` by default (not in the project directory)
 - The `--db` flag can override the default index location
 - Gitignore patterns are respected during indexing
 - Max file size for indexing: 1MB (configurable in `IndexConfig`)

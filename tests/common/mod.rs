@@ -1,12 +1,12 @@
-//! Common test utilities for agentika-grep integration tests.
+//! Common test utilities for grepika integration tests.
 //!
 //! Provides `TestEnv` for setting up isolated test environments with
 //! database, search service, and indexer all wired together.
 
 #![allow(dead_code)] // Test utilities may not all be used in every test file
 
-use agentika_grep::db::Database;
-use agentika_grep::services::{Indexer, SearchService, TrigramIndex};
+use grepika::db::Database;
+use grepika::services::{Indexer, SearchService, TrigramIndex};
 use std::fs;
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
@@ -254,7 +254,7 @@ pub fn minimal_codebase() -> TestEnv {
 
 /// Asserts that search results contain a file with the given name.
 pub fn assert_results_contain(
-    results: &[agentika_grep::services::SearchHit],
+    results: &[grepika::services::SearchHit],
     filename: &str,
 ) {
     let found = results
@@ -270,7 +270,7 @@ pub fn assert_results_contain(
 
 /// Asserts that search results do NOT contain a file with the given name.
 pub fn assert_results_not_contain(
-    results: &[agentika_grep::services::SearchHit],
+    results: &[grepika::services::SearchHit],
     filename: &str,
 ) {
     let found = results

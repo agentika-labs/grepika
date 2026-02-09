@@ -4,9 +4,9 @@
 
 mod common;
 
-use agentika_grep::db::Database;
-use agentika_grep::services::{Indexer, SearchService, TrigramIndex};
-use agentika_grep::tools::*;
+use grepika::db::Database;
+use grepika::services::{Indexer, SearchService, TrigramIndex};
+use grepika::tools::*;
 use std::fs;
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;

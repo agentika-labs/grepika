@@ -1,6 +1,6 @@
 //! Token efficiency measurement utilities for benchmarks.
 //!
-//! Provides metrics for comparing agentika-grep output against
+//! Provides metrics for comparing grepika output against
 //! ripgrep/Claude Grep output to quantify token savings.
 
 use serde::Serialize;
@@ -85,17 +85,17 @@ impl TokenMetrics {
 #[derive(Debug, Clone)]
 pub struct ComparisonResult {
     pub query: String,
-    pub agentika: TokenMetrics,
+    pub grepika: TokenMetrics,
     pub ripgrep: TokenMetrics,
     pub savings_percent: f64,
 }
 
 impl ComparisonResult {
-    pub fn new(query: impl Into<String>, agentika: TokenMetrics, ripgrep: TokenMetrics) -> Self {
-        let savings_percent = agentika.savings_vs(&ripgrep);
+    pub fn new(query: impl Into<String>, grepika: TokenMetrics, ripgrep: TokenMetrics) -> Self {
+        let savings_percent = grepika.savings_vs(&ripgrep);
         Self {
             query: query.into(),
-            agentika,
+            grepika,
             ripgrep,
             savings_percent,
         }
@@ -134,7 +134,7 @@ impl BreakEvenAnalysis {
         // Calculate average savings per query
         let total_savings: f64 = comparisons
             .iter()
-            .map(|c| c.ripgrep.output_bytes as f64 - c.agentika.output_bytes as f64)
+            .map(|c| c.ripgrep.output_bytes as f64 - c.grepika.output_bytes as f64)
             .sum();
 
         let avg_savings_bytes = total_savings / comparisons.len() as f64;
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn test_savings_calculation() {
-        let agentika = TokenMetrics {
+        let grepika = TokenMetrics {
             output_bytes: 100,
             estimated_tokens: 25,
             result_count: 5,
@@ -255,7 +255,7 @@ mod tests {
             files_found: 5,
         };
 
-        let savings = agentika.savings_vs(&ripgrep);
+        let savings = grepika.savings_vs(&ripgrep);
         assert!((savings - 75.0).abs() < 0.01); // 75% savings
     }
 

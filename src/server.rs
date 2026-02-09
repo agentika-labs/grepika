@@ -278,14 +278,14 @@ impl Workspace {
 
 /// MCP Server for code search.
 #[derive(Clone)]
-pub struct AgentikaGrepServer {
+pub struct GrepikaServer {
     /// Currently active workspace (None until add_workspace is called in global mode).
     workspace: Arc<RwLock<Option<Arc<Workspace>>>>,
     /// Explicit DB path override (from --db flag).
     db_override: Option<PathBuf>,
 }
 
-impl AgentikaGrepServer {
+impl GrepikaServer {
     /// Creates a new server with a pre-loaded workspace (backward compatible).
     ///
     /// Used when `--root` is provided on the command line.
@@ -320,7 +320,7 @@ impl AgentikaGrepServer {
 
 // Tool implementations using rmcp macros
 #[tool(tool_box)]
-impl AgentikaGrepServer {
+impl GrepikaServer {
     /// Load a project directory as the active workspace.
     #[tool(description = "Load a project directory as the active workspace for code search.\n\n\
         Call this FIRST with your project's root path before using search tools.\n\
@@ -674,7 +674,7 @@ impl AgentikaGrepServer {
 
 // Implement ServerHandler trait
 #[tool(tool_box)]
-impl ServerHandler for AgentikaGrepServer {
+impl ServerHandler for GrepikaServer {
     fn get_info(&self) -> ServerInfo {
         let has_workspace = self.workspace.read().unwrap().is_some();
 
@@ -688,7 +688,7 @@ impl ServerHandler for AgentikaGrepServer {
         };
 
         let instructions = format!(
-            "agentika-grep: Token-efficient code search with trigram indexing.\n\n\
+            "grepika: Token-efficient code search with trigram indexing.\n\n\
              {setup}\n\n\
              WORKFLOW:\n\
              1. search/relevant -> find files\n\
