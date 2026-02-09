@@ -105,9 +105,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-
-      - name: Configure npm registry
-        run: npm config set registry https://registry.npmjs.org/
+          registry-url: "https://registry.npmjs.org"
 
       - uses: actions/download-artifact@v4
         with:
@@ -168,8 +166,12 @@ jobs:
             }
             cd ../..
           done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish base package
         run: |
           cd npm/grepika
           npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
