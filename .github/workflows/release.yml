@@ -96,13 +96,18 @@ jobs:
     name: Publish npm packages
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
+          node-version: "22"
+
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
 
       - uses: actions/download-artifact@v4
         with:
@@ -149,13 +154,11 @@ jobs:
           ' npm/grepika/package.json > tmp.json && mv tmp.json npm/grepika/package.json
 
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in npm/grepika-*/; do
             echo "Publishing ${dir}..."
             cd "$dir"
-            npm publish --access public 2>&1 | tee /tmp/npm-out.txt || {
+            npm publish --access public --provenance 2>&1 | tee /tmp/npm-out.txt || {
               if grep -q "You cannot publish over the previously published versions" /tmp/npm-out.txt; then
                 echo "Already published, skipping..."
               else
@@ -167,8 +170,6 @@ jobs:
           done
 
       - name: Publish base package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           cd npm/grepika
-          npm publish --access public
+          npm publish --access public --provenance
