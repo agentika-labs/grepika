@@ -104,10 +104,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-
-      - name: Configure npm registry
-        run: npm config set registry https://registry.npmjs.org/
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
 
       - uses: actions/download-artifact@v4
         with:
@@ -158,7 +156,7 @@ jobs:
           for dir in npm/grepika-*/; do
             echo "Publishing ${dir}..."
             cd "$dir"
-            npm publish --access public --provenance 2>&1 | tee /tmp/npm-out.txt || {
+            npm publish --access public 2>&1 | tee /tmp/npm-out.txt || {
               if grep -q "You cannot publish over the previously published versions" /tmp/npm-out.txt; then
                 echo "Already published, skipping..."
               else
@@ -172,4 +170,4 @@ jobs:
       - name: Publish base package
         run: |
           cd npm/grepika
-          npm publish --access public --provenance
+          npm publish --access public
