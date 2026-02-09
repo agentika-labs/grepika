@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# TODO: Update when repo is renamed
-REPO="adamthewilliam/agentika-grep"
+REPO="agentika-labs/grepika"
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="grepika"
 

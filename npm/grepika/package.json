@@ -5,8 +5,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "TODO: Update when repo is renamed"
+    "url": "https://github.com/agentika-labs/grepika.git"
   },
+  "keywords": ["mcp", "code-search", "grep", "trigram", "fts5", "claude", "cursor", "opencode", "ai", "llm", "search", "codebase"],
+  "engines": { "node": ">=16" },
   "bin": {
     "grepika": "index.js"
   },
@@ -15,7 +17,6 @@
   ],
   "optionalDependencies": {
     "@agentika/grepika-darwin-arm64": "0.0.0",
-    "@agentika/grepika-darwin-x64": "0.0.0",
     "@agentika/grepika-linux-x64": "0.0.0",
     "@agentika/grepika-linux-arm64": "0.0.0",
     "@agentika/grepika-win32-x64": "0.0.0"

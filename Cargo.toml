@@ -6,10 +6,9 @@ rust-version = "1.91"
 description = "Token-efficient MCP server for code search with trigram indexing"
 authors = ["Agentika"]
 license = "MIT"
-# TODO: Update when repo is renamed
-repository = "https://github.com/agentika/agentika-grep"
-# TODO: Update when repo is renamed
-homepage = "https://github.com/agentika/agentika-grep"
+publish = false
+repository = "https://github.com/agentika-labs/grepika"
+homepage = "https://github.com/agentika-labs/grepika"
 readme = "README.md"
 keywords = ["mcp", "code-search", "trigram", "grep", "fts5"]
 categories = ["command-line-utilities", "development-tools", "text-processing"]

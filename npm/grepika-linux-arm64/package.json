@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "TODO: Update when repo is renamed"
+    "url": "https://github.com/agentika-labs/grepika.git"
   },
   "os": ["linux"],
   "cpu": ["arm64"],

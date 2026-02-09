@@ -5,7 +5,6 @@ const path = require("path");
 
 const PLATFORMS = {
   "darwin-arm64": "@agentika/grepika-darwin-arm64",
-  "darwin-x64": "@agentika/grepika-darwin-x64",
   "linux-x64": "@agentika/grepika-linux-x64",
   "linux-arm64": "@agentika/grepika-linux-arm64",
   "win32-x64": "@agentika/grepika-win32-x64",

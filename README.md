@@ -1,3 +1,7 @@
+[![npm](https://img.shields.io/npm/v/grepika)](https://www.npmjs.com/package/grepika)
+[![CI](https://github.com/agentika-labs/grepika/actions/workflows/ci.yml/badge.svg)](https://github.com/agentika-labs/grepika/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 # grepika
 
 Token-efficient MCP server for code search. Combines three search backends for high-quality results:
@@ -55,39 +59,13 @@ Or install globally:
 npm install -g grepika
 ```
 
-### cargo-binstall (pre-built binary)
+### Shell script (macOS Apple Silicon)
 
 ```bash
-cargo binstall grepika
+curl -fsSL https://raw.githubusercontent.com/agentika-labs/grepika/main/install.sh | bash
 ```
 
-### cargo install (compile from source)
-
-Requires Rust 1.91+:
-
-```bash
-cargo install grepika
-```
-
-### GitHub Releases (manual download)
-
-Download the binary for your platform from
-[GitHub Releases](https://github.com/agentika/grepika/releases). <!-- TODO: Update when repo is renamed -->
-
-```bash
-# Extract the archive
-tar -xzf grepika-macos-arm64.tar.gz
-
-# Remove macOS quarantine flag (required for unsigned binaries)
-xattr -d com.apple.quarantine grepika
-
-# Make executable and install to user-local bin
-chmod +x grepika
-mv grepika ~/.local/bin/
-
-# Verify
-grepika --help
-```
+For other platforms, download the binary from [GitHub Releases](https://github.com/agentika-labs/grepika/releases).
 
 ## MCP Server Setup
 
@@ -217,7 +195,7 @@ Prefer grepika MCP tools over built-in Grep/Glob for code search:
 These provide ranked results with FTS5+trigram indexing for better search quality.
 ```
 
-See [docs/claude-code-snippet.md](docs/claude-code-snippet.md) for a more detailed version.
+See [docs/claude-code-setup.md](docs/claude-code-setup.md) for a more detailed version.
 
 ### Pre-authorizing Permissions
 

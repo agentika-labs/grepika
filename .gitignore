@@ -7,5 +7,9 @@
 # Project-specific index database (users generate their own)
 .grepika/
 
+# Archive artifacts
+*.zip
+*.tar.gz
+
 # Claude Code local settings (but track plugins/skills)
 .claude/settings.local.json
