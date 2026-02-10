@@ -34,8 +34,8 @@ cargo test
 # Run single test
 cargo test test_name
 
-# Build with profiling (adds timing/memory logs to stderr)
-cargo build --release --features profiling
+# Enable profiling logs
+grepika --mcp --log-file /tmp/grepika.log
 ```
 
 ## Architecture

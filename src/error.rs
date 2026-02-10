@@ -104,7 +104,9 @@ pub enum IndexError {
     #[error("Index is stale. Run 'index' with force=true to rebuild.")]
     Stale,
 
-    #[error("Index corruption: {0}. Delete the index file and run 'index' to rebuild from scratch.")]
+    #[error(
+        "Index corruption: {0}. Delete the index file and run 'index' to rebuild from scratch."
+    )]
     Corruption(String),
 }
 

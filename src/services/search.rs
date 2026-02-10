@@ -39,7 +39,8 @@ fn classify_query(query: &str) -> QueryIntent {
     let regex_chars = ['\\', '+', '?', '{', '}', '|', '^', '$', '[', ']'];
     let has_regex = trimmed.chars().any(|c| regex_chars.contains(&c));
     // Standalone . and * are common in natural language, but combined patterns are regex
-    let has_regex_combo = trimmed.contains(".*") || trimmed.contains(".+") || trimmed.contains("\\s");
+    let has_regex_combo =
+        trimmed.contains(".*") || trimmed.contains(".+") || trimmed.contains("\\s");
 
     if has_regex || has_regex_combo {
         return QueryIntent::Regex;
@@ -339,7 +340,11 @@ impl SearchService {
     ///
     /// Returns `SearchError` if result merging or database access fails.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
-        let limit = if limit > 0 { limit } else { DEFAULT_SEARCH_LIMIT };
+        let limit = if limit > 0 {
+            limit
+        } else {
+            DEFAULT_SEARCH_LIMIT
+        };
         let intent = classify_query(query);
 
         // Run searches based on intent
@@ -391,7 +396,14 @@ impl SearchService {
             QueryIntent::ExactSymbol | QueryIntent::ShortToken => &self.config,
         };
 
-        self.merge_results(fts_results, grep_results, grep_matches, trigram_results, limit, config_ref)
+        self.merge_results(
+            fts_results,
+            grep_results,
+            grep_matches,
+            trigram_results,
+            limit,
+            config_ref,
+        )
     }
 
     /// Performs FTS-only search.
@@ -429,10 +441,7 @@ impl SearchService {
             .into_iter()
             .map(|(path, score)| {
                 let path_str = path.to_string_lossy().to_string();
-                let file_id = id_map
-                    .get(&path_str)
-                    .copied()
-                    .unwrap_or(FileId::new(0));
+                let file_id = id_map.get(&path_str).copied().unwrap_or(FileId::new(0));
 
                 SearchResult {
                     file_id,
@@ -510,8 +519,7 @@ impl SearchService {
         let file_ids: Vec<FileId> = bitmap.iter().map(FileId::new).collect();
         let path_map = self.get_paths_cached(&file_ids);
 
-        let filter: HashSet<PathBuf> =
-            path_map.into_values().map(|s| PathBuf::from(&*s)).collect();
+        let filter: HashSet<PathBuf> = path_map.into_values().map(|s| PathBuf::from(&*s)).collect();
 
         if filter.is_empty() {
             None

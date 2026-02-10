@@ -35,7 +35,11 @@ fn setup_test_services() -> (TempDir, Arc<SearchService>, Indexer) {
         "DATABASE_URL=postgres://...\n",
     )
     .unwrap();
-    fs::write(dir.path().join("credentials.json"), "{\"key\": \"secret\"}\n").unwrap();
+    fs::write(
+        dir.path().join("credentials.json"),
+        "{\"key\": \"secret\"}\n",
+    )
+    .unwrap();
 
     // Index files for FTS
     for (i, filename) in ["main.rs", "lib.rs", "src/app.rs"].iter().enumerate() {
@@ -45,9 +49,7 @@ fn setup_test_services() -> (TempDir, Arc<SearchService>, Indexer) {
             .unwrap();
     }
 
-    let service = Arc::new(
-        SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap(),
-    );
+    let service = Arc::new(SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap());
 
     let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
 
@@ -364,7 +366,10 @@ fn test_sensitive_files_excluded_from_index() {
     let progress = indexer.index(None, false).unwrap();
 
     // Only normal files should be indexed
-    assert_eq!(progress.files_indexed, 2, "Should only index non-sensitive files");
+    assert_eq!(
+        progress.files_indexed, 2,
+        "Should only index non-sensitive files"
+    );
     assert_eq!(
         db.file_count().unwrap(),
         2,

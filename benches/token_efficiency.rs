@@ -7,11 +7,11 @@
 //! Run with: `cargo bench token_efficiency`
 //! View reports: `open target/criterion/report/index.html`
 
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use grepika::bench_utils::{BenchmarkStats, BreakEvenAnalysis, ComparisonResult, TokenMetrics};
 use grepika::db::Database;
 use grepika::services::SearchService;
 use grepika::tools::{SearchOutput, SearchResultItem};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -283,8 +283,8 @@ fn test_validate_token_expired() {
         .expect("Failed to insert file");
     }
 
-    let service =
-        SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).expect("Failed to create search service");
+    let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf())
+        .expect("Failed to create search service");
 
     (dir, db, service)
 }
@@ -350,9 +350,9 @@ fn measure_ripgrep_search(dir: &TempDir, query: &str, limit: usize) -> TokenMetr
     // Try to run ripgrep
     let output = Command::new("rg")
         .args([
-            "--json",        // JSON output
+            "--json", // JSON output
             "-C",
-            "3",             // 3 lines of context (Claude default)
+            "3", // 3 lines of context (Claude default)
             "--max-count",
             &limit.to_string(), // Limit matches per file
             query,
@@ -387,17 +387,29 @@ fn measure_ripgrep_search(dir: &TempDir, query: &str, limit: usize) -> TokenMetr
             match json.get("type").and_then(|t| t.as_str()) {
                 Some("match") => {
                     if let Some(data) = json.get("data") {
-                        if let Some(path) = data.get("path").and_then(|p| p.get("text")).and_then(|t| t.as_str()) {
+                        if let Some(path) = data
+                            .get("path")
+                            .and_then(|p| p.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
                             files_found.insert(path.to_string());
                         }
                         // Add the match line to output (simulating Claude's format)
-                        if let Some(lines) = data.get("lines").and_then(|l| l.get("text")).and_then(|t| t.as_str()) {
+                        if let Some(lines) = data
+                            .get("lines")
+                            .and_then(|l| l.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
                             let line_num = data
                                 .get("line_number")
                                 .and_then(|n| n.as_u64())
                                 .unwrap_or(0);
-                            claude_output.push_str(&format!("{}:{}: {}\n",
-                                data.get("path").and_then(|p| p.get("text")).and_then(|t| t.as_str()).unwrap_or(""),
+                            claude_output.push_str(&format!(
+                                "{}:{}: {}\n",
+                                data.get("path")
+                                    .and_then(|p| p.get("text"))
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or(""),
                                 line_num,
                                 lines.trim()
                             ));
@@ -408,13 +420,21 @@ fn measure_ripgrep_search(dir: &TempDir, query: &str, limit: usize) -> TokenMetr
                 Some("context") => {
                     // Add context lines
                     if let Some(data) = json.get("data") {
-                        if let Some(lines) = data.get("lines").and_then(|l| l.get("text")).and_then(|t| t.as_str()) {
+                        if let Some(lines) = data
+                            .get("lines")
+                            .and_then(|l| l.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
                             let line_num = data
                                 .get("line_number")
                                 .and_then(|n| n.as_u64())
                                 .unwrap_or(0);
-                            claude_output.push_str(&format!("{}:{}- {}\n",
-                                data.get("path").and_then(|p| p.get("text")).and_then(|t| t.as_str()).unwrap_or(""),
+                            claude_output.push_str(&format!(
+                                "{}:{}- {}\n",
+                                data.get("path")
+                                    .and_then(|p| p.get("text"))
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or(""),
                                 line_num,
                                 lines.trim()
                             ));
@@ -654,7 +674,11 @@ fn bench_token_comparison(c: &mut Criterion) {
         grepika_bytes_samples.push(grepika_metrics.output_bytes as f64);
         ripgrep_bytes_samples.push(ripgrep_metrics.output_bytes as f64);
 
-        comparisons.push(ComparisonResult::new(name, grepika_metrics, ripgrep_metrics));
+        comparisons.push(ComparisonResult::new(
+            name,
+            grepika_metrics,
+            ripgrep_metrics,
+        ));
 
         // Benchmark the measurements themselves
         group.bench_function(BenchmarkId::new("measure", name), |b| {
@@ -703,8 +727,8 @@ fn print_comparison_summary(
 
     eprintln!("─────────────────────┼──────────────┼──────────────┼────────────");
 
-    let avg_savings: f64 = comparisons.iter().map(|c| c.savings_percent).sum::<f64>()
-        / comparisons.len() as f64;
+    let avg_savings: f64 =
+        comparisons.iter().map(|c| c.savings_percent).sum::<f64>() / comparisons.len() as f64;
     eprintln!(
         "{:<20} │ {:>10.0} B │ {:>10.0} B │ {:>8.1}%",
         "AVERAGE", grepika_stats.mean, ripgrep_stats.mean, avg_savings
@@ -715,12 +739,20 @@ fn print_comparison_summary(
     eprintln!(
         "  grepika CV%: {:.1}% {}",
         grepika_stats.cv_percent,
-        if grepika_stats.is_reliable(50.0) { "✓" } else { "⚠" }
+        if grepika_stats.is_reliable(50.0) {
+            "✓"
+        } else {
+            "⚠"
+        }
     );
     eprintln!(
         "  ripgrep CV%:  {:.1}% {}",
         ripgrep_stats.cv_percent,
-        if ripgrep_stats.is_reliable(50.0) { "✓" } else { "⚠" }
+        if ripgrep_stats.is_reliable(50.0) {
+            "✓"
+        } else {
+            "⚠"
+        }
     );
 
     eprintln!();
@@ -728,16 +760,34 @@ fn print_comparison_summary(
     eprintln!("                      BREAK-EVEN ANALYSIS                              ");
     eprintln!("═══════════════════════════════════════════════════════════════════════");
     eprintln!();
-    eprintln!("MCP Schema overhead:     {:>6} bytes ({} tokens)", schema_bytes, analysis.schema_tokens);
-    eprintln!("Per-query savings:       {:>6.0} bytes ({:.0} tokens avg)", analysis.avg_savings_bytes, analysis.avg_savings_tokens);
-    eprintln!("Break-even point:        {:>6} queries", analysis.break_even_queries);
+    eprintln!(
+        "MCP Schema overhead:     {:>6} bytes ({} tokens)",
+        schema_bytes, analysis.schema_tokens
+    );
+    eprintln!(
+        "Per-query savings:       {:>6.0} bytes ({:.0} tokens avg)",
+        analysis.avg_savings_bytes, analysis.avg_savings_tokens
+    );
+    eprintln!(
+        "Break-even point:        {:>6} queries",
+        analysis.break_even_queries
+    );
     eprintln!();
 
     if analysis.break_even_queries < 20 {
-        eprintln!("✓ Sessions with {}+ searches → grepika is more efficient", analysis.break_even_queries);
-        eprintln!("  Sessions with <{} searches → Built-in Grep wins", analysis.break_even_queries);
+        eprintln!(
+            "✓ Sessions with {}+ searches → grepika is more efficient",
+            analysis.break_even_queries
+        );
+        eprintln!(
+            "  Sessions with <{} searches → Built-in Grep wins",
+            analysis.break_even_queries
+        );
     } else if analysis.break_even_queries < usize::MAX {
-        eprintln!("⚠ High break-even point ({} queries) - consider for long sessions only", analysis.break_even_queries);
+        eprintln!(
+            "⚠ High break-even point ({} queries) - consider for long sessions only",
+            analysis.break_even_queries
+        );
     } else {
         eprintln!("⚠ No token savings detected - ripgrep may be more efficient");
     }
@@ -763,7 +813,11 @@ fn bench_schema_size(c: &mut Criterion) {
 
     // Report schema size
     let schema_bytes = measure_mcp_schema_size();
-    eprintln!("\nMCP Schema Size: {} bytes (~{} tokens)", schema_bytes, schema_bytes / 4);
+    eprintln!(
+        "\nMCP Schema Size: {} bytes (~{} tokens)",
+        schema_bytes,
+        schema_bytes / 4
+    );
 }
 
 // ============================================================================

@@ -20,9 +20,7 @@ use std::sync::Arc;
 /// Wraps file content in boundary markers to help LLM consumers distinguish
 /// tool metadata from untrusted file content (prompt injection defense).
 fn mark_content_boundary(content: &str, path: &str) -> String {
-    format!(
-        "--- BEGIN FILE CONTENT: {path} ---\n{content}\n--- END FILE CONTENT: {path} ---"
-    )
+    format!("--- BEGIN FILE CONTENT: {path} ---\n{content}\n--- END FILE CONTENT: {path} ---")
 }
 
 /// Files larger than this threshold use streaming reads.
@@ -77,8 +75,8 @@ pub struct GetOutput {
 /// - File cannot be read
 pub fn execute_get(service: &Arc<SearchService>, input: GetInput) -> Result<GetOutput, String> {
     // Security: validate path and check for sensitive files
-    let full_path = security::validate_read_access(service.root(), &input.path)
-        .map_err(|e| e.to_string())?;
+    let full_path =
+        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
 
     // Use streaming for large files to avoid loading entire file into memory
     let (content, total_lines, start_line, end_line) =
@@ -145,8 +143,8 @@ pub fn execute_outline(
     input: OutlineInput,
 ) -> Result<OutlineOutput, String> {
     // Security: validate path and check for sensitive files
-    let full_path = security::validate_read_access(service.root(), &input.path)
-        .map_err(|e| e.to_string())?;
+    let full_path =
+        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
 
     let content =
         fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;
@@ -204,14 +202,21 @@ pub struct TocOutput {
 /// - Directory cannot be read
 pub fn execute_toc(service: &Arc<SearchService>, input: TocInput) -> Result<TocOutput, String> {
     // Security: validate path (toc reads directories, so we use validate_path not validate_read_access)
-    let full_path = security::validate_path(service.root(), &input.path)
-        .map_err(|e| e.to_string())?;
+    let full_path =
+        security::validate_path(service.root(), &input.path).map_err(|e| e.to_string())?;
 
     let mut tree = String::with_capacity(4096); // Pre-allocate, ~40 bytes per entry
     let mut total_files = 0;
     let mut total_dirs = 0;
 
-    build_toc_text(&full_path, input.depth, 0, &mut tree, &mut total_files, &mut total_dirs)?;
+    build_toc_text(
+        &full_path,
+        input.depth,
+        0,
+        &mut tree,
+        &mut total_files,
+        &mut total_dirs,
+    )?;
 
     Ok(TocOutput {
         tree,
@@ -269,8 +274,8 @@ pub fn execute_context(
     input: ContextInput,
 ) -> Result<ContextOutput, String> {
     // Security: validate path and check for sensitive files
-    let full_path = security::validate_read_access(service.root(), &input.path)
-        .map_err(|e| e.to_string())?;
+    let full_path =
+        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
 
     // Use streaming for large files to avoid loading entire file into memory
     let (lines, _total, start, end) =
@@ -869,7 +874,14 @@ fn build_toc_text(
             output.push_str(&indent);
             output.push_str(&name);
             output.push_str("/\n");
-            build_toc_text(&item_path, max_depth, current_depth + 1, output, total_files, total_dirs)?;
+            build_toc_text(
+                &item_path,
+                max_depth,
+                current_depth + 1,
+                output,
+                total_files,
+                total_dirs,
+            )?;
         } else {
             *total_files += 1;
             output.push_str(&indent);

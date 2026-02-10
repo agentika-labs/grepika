@@ -24,7 +24,10 @@ pub enum SecurityError {
     SensitiveFile { path: String, reason: &'static str },
 
     #[error("Regex pattern rejected: {reason}")]
-    DangerousPattern { pattern: String, reason: &'static str },
+    DangerousPattern {
+        pattern: String,
+        reason: &'static str,
+    },
 
     #[error("Absolute path not allowed: '{path}'")]
     AbsolutePath { path: String },
@@ -143,7 +146,10 @@ fn normalize_path(path: &Path) -> PathBuf {
             }
             Component::ParentDir => {
                 // Pop the last component if possible, otherwise keep ".."
-                if components.last().is_some_and(|c| !matches!(c, Component::ParentDir)) {
+                if components
+                    .last()
+                    .is_some_and(|c| !matches!(c, Component::ParentDir))
+                {
                     components.pop();
                 } else {
                     components.push(component);
@@ -173,7 +179,6 @@ pub const SENSITIVE_PATTERNS: &[SensitivePattern] = &[
     SensitivePattern::prefix(".env.", "environment variables"),
     SensitivePattern::suffix(".env", "environment variables"),
     SensitivePattern::exact(".envrc", "direnv config"),
-
     // === Credentials & Config ===
     SensitivePattern::exact("credentials.json", "credentials file"),
     SensitivePattern::exact("credentials.yaml", "credentials file"),
@@ -182,7 +187,6 @@ pub const SENSITIVE_PATTERNS: &[SensitivePattern] = &[
     SensitivePattern::exact("secrets.yaml", "secrets file"),
     SensitivePattern::exact("secrets.yml", "secrets file"),
     SensitivePattern::contains(".secret.", "secrets file"),
-
     // === Private Keys & Certificates ===
     SensitivePattern::suffix(".pem", "private key/certificate"),
     SensitivePattern::suffix(".key", "private key"),
@@ -200,7 +204,6 @@ pub const SENSITIVE_PATTERNS: &[SensitivePattern] = &[
     SensitivePattern::exact("id_dsa", "SSH private key"),
     SensitivePattern::prefix("id_dsa.", "SSH private key"),
     SensitivePattern::suffix(".kdbx", "KeePass database"),
-
     // === Cloud Provider Credentials ===
     SensitivePattern::path_contains(".aws/credentials", "AWS credentials"),
     SensitivePattern::path_contains(".aws/config", "AWS config"),
@@ -209,7 +212,6 @@ pub const SENSITIVE_PATTERNS: &[SensitivePattern] = &[
     SensitivePattern::prefix("service-account", "service account key"),
     SensitivePattern::exact("application_default_credentials.json", "GCloud ADC"),
     SensitivePattern::path_contains(".digitalocean/config.yaml", "DigitalOcean config"),
-
     // === Infrastructure as Code ===
     SensitivePattern::exact("terraform.tfstate", "Terraform state"),
     SensitivePattern::prefix("terraform.tfstate.", "Terraform state backup"),
@@ -219,7 +221,6 @@ pub const SENSITIVE_PATTERNS: &[SensitivePattern] = &[
     SensitivePattern::suffix(".kubeconfig", "Kubernetes config"),
     SensitivePattern::path_contains(".kube/config", "Kubernetes config"),
     SensitivePattern::exact(".vault-token", "Vault token"),
-
     // === Package Manager Auth ===
     SensitivePattern::exact(".npmrc", "npm config (may contain tokens)"),
     SensitivePattern::exact(".yarnrc", "yarn config"),
@@ -230,31 +231,25 @@ pub const SENSITIVE_PATTERNS: &[SensitivePattern] = &[
     SensitivePattern::path_contains(".bundle/config", "Bundler config"),
     SensitivePattern::path_contains(".docker/config.json", "Docker credentials"),
     SensitivePattern::path_contains(".nuget/NuGet.Config", "NuGet config"),
-
     // === Git & CI/CD ===
     SensitivePattern::exact(".git-credentials", "Git credentials"),
     SensitivePattern::exact(".netrc", "network credentials"),
     SensitivePattern::exact("_netrc", "network credentials (Windows)"),
-
     // === Application Secrets ===
     SensitivePattern::exact("master.key", "Rails master key"),
     SensitivePattern::suffix(".master.key", "master key"),
     SensitivePattern::exact("encryption.key", "encryption key"),
     SensitivePattern::exact("signing.key", "signing key"),
-
     // === Web Server & Auth ===
     SensitivePattern::exact(".htpasswd", "htpasswd file"),
     SensitivePattern::suffix(".htpasswd", "htpasswd file"),
     SensitivePattern::exact("shadow", "shadow password file"),
-
     // === SSH Config ===
     SensitivePattern::path_contains(".ssh/config", "SSH config"),
     SensitivePattern::exact("authorized_keys", "SSH authorized keys"),
-
     // === IDE Secrets ===
     SensitivePattern::path_contains(".idea/dataSources.xml", "JetBrains DB connections"),
     SensitivePattern::path_contains(".idea/webServers.xml", "JetBrains server creds"),
-
     // === History files (may contain secrets) ===
     SensitivePattern::exact(".bash_history", "shell history"),
     SensitivePattern::exact(".zsh_history", "shell history"),
@@ -333,10 +328,7 @@ impl SensitivePattern {
     /// Checks if the given path matches this sensitive pattern.
     #[must_use]
     pub fn matches(&self, path: &Path) -> bool {
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let path_str = path.to_string_lossy();
 
         match self.match_type {
@@ -506,9 +498,7 @@ fn is_blocked_system_path(canonical: &Path) -> bool {
 }
 
 /// Sensitive user directories that must never be used as workspace roots.
-const BLOCKED_USER_DIRS: &[&str] = &[
-    ".ssh", ".aws", ".gnupg", ".gpg", ".config", ".local/share",
-];
+const BLOCKED_USER_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".config", ".local/share"];
 
 /// Validates that a path is safe to use as a workspace root.
 ///
@@ -1078,7 +1068,9 @@ mod tests {
         // System directories
         assert!(is_blocked_system_path(&PathBuf::from("C:\\Windows")));
         assert!(is_blocked_system_path(&PathBuf::from("C:\\Program Files")));
-        assert!(is_blocked_system_path(&PathBuf::from("C:\\Program Files (x86)")));
+        assert!(is_blocked_system_path(&PathBuf::from(
+            "C:\\Program Files (x86)"
+        )));
         assert!(is_blocked_system_path(&PathBuf::from("C:\\ProgramData")));
 
         // C:\Users itself should be blocked (contains all user home dirs)
@@ -1088,9 +1080,7 @@ mod tests {
         assert!(!is_blocked_system_path(&PathBuf::from(
             "C:\\Users\\adam\\project"
         )));
-        assert!(!is_blocked_system_path(&PathBuf::from(
-            "D:\\code\\my-app"
-        )));
+        assert!(!is_blocked_system_path(&PathBuf::from("D:\\code\\my-app")));
 
         // Subdirectories of system dirs should not be blocked
         // (only the top-level system dir itself is blocked)

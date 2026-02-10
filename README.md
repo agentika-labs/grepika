@@ -307,9 +307,6 @@ cargo build
 # Release build
 cargo build --release
 
-# Release with profiling
-cargo build --release --features profiling
-
 # Run tests
 cargo test
 
@@ -325,33 +322,27 @@ BENCH_REPO_PATH=/path/to/repo cargo bench --bench hot_paths -- real_repo
 
 ### Profiling
 
-Build with the `profiling` feature to enable timing and memory logging:
-
-```bash
-cargo build --release --features profiling
-```
-
-When enabled, each tool invocation logs performance metrics to stderr:
-
-```
-[search] 42ms | mem: 128.5MB (+2.1MB)
-[index] 1.2s | mem: 256.0MB (+127.5MB)
-```
-
-**MCP mode** — use `--log-file` to capture logs:
+Pass `--log-file` to enable timing and memory logging for each tool invocation:
 
 ```json
 {
   "mcpServers": {
     "grepika": {
       "command": "grepika",
-      "args": ["--mcp", "--root", "/path/to/project", "--log-file", "/tmp/grepika.log"]
+      "args": ["--mcp", "--log-file", "/tmp/grepika.log"]
     }
   }
 }
 ```
 
 Then: `tail -f /tmp/grepika.log`
+
+```
+[search] 42ms | mem: 128.5MB (+2.1MB) | ~91 tokens (0.4KB)
+[index] 1.2s | mem: 256.0MB (+127.5MB) | ~150 tokens (0.6KB)
+```
+
+When `--log-file` is not provided, profiling is disabled with negligible overhead (~20ns per tool call).
 
 ## License
 

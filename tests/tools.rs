@@ -149,9 +149,7 @@ impl std::error::Error for AuthError {}
             .unwrap();
     }
 
-    let search = Arc::new(
-        SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap(),
-    );
+    let search = Arc::new(SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap());
     let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
 
     (dir, search, indexer)
@@ -173,7 +171,10 @@ fn test_search_tool_happy_path() {
 
     let result = execute_search(&search, input).unwrap();
 
-    assert!(!result.results.is_empty(), "Should find results for 'authenticate'");
+    assert!(
+        !result.results.is_empty(),
+        "Should find results for 'authenticate'"
+    );
     assert!(
         result.results.iter().any(|r| r.path.contains("auth")),
         "Should include auth.rs in results"
@@ -337,7 +338,10 @@ fn test_get_tool_with_line_range() {
 
     // Should only return first 5 lines (+ 2 boundary marker lines)
     let line_count = result.content.lines().count();
-    assert!(line_count <= 7, "Expected at most 5 content lines + 2 markers, got {line_count}");
+    assert!(
+        line_count <= 7,
+        "Expected at most 5 content lines + 2 markers, got {line_count}"
+    );
     assert_eq!(result.start_line, 1);
     assert!(result.end_line <= 5);
 }
@@ -393,7 +397,10 @@ fn test_outline_tool_rust_file() {
     let result = execute_outline(&search, input).unwrap();
 
     assert_eq!(result.file_type, "rs");
-    assert!(!result.symbols.is_empty(), "Should extract symbols from Rust file");
+    assert!(
+        !result.symbols.is_empty(),
+        "Should extract symbols from Rust file"
+    );
 
     // Should find the authenticate function
     let has_authenticate = result
@@ -497,7 +504,10 @@ fn test_toc_tool_nested_directory() {
 
     assert!(!result.tree.is_empty());
     // Should find utils subdirectory (listed with trailing slash)
-    assert!(result.tree.contains("utils/"), "Should find utils subdirectory");
+    assert!(
+        result.tree.contains("utils/"),
+        "Should find utils subdirectory"
+    );
 }
 
 // ============================================================================
@@ -546,7 +556,10 @@ fn test_context_tool_respects_context_size() {
 
     // Should return ~5 lines (2 before + center + 2 after) + 2 boundary marker lines
     let line_count = result.content.lines().count();
-    assert!(line_count <= 7, "Should respect context_lines parameter, got {line_count}");
+    assert!(
+        line_count <= 7,
+        "Should respect context_lines parameter, got {line_count}"
+    );
 }
 
 #[test]
@@ -594,10 +607,7 @@ fn test_stats_tool_detailed() {
     let by_type = result.by_type.unwrap();
 
     // Should have "rs" as a file type
-    assert!(
-        by_type.contains_key("rs"),
-        "Should count Rust files"
-    );
+    assert!(by_type.contains_key("rs"), "Should count Rust files");
 }
 
 // ============================================================================
@@ -693,11 +703,15 @@ fn test_get_output_has_content_boundaries() {
     let result = execute_get(&search, input).unwrap();
 
     assert!(
-        result.content.starts_with("--- BEGIN FILE CONTENT: auth.rs ---\n"),
+        result
+            .content
+            .starts_with("--- BEGIN FILE CONTENT: auth.rs ---\n"),
         "Content should start with BEGIN marker"
     );
     assert!(
-        result.content.ends_with("\n--- END FILE CONTENT: auth.rs ---"),
+        result
+            .content
+            .ends_with("\n--- END FILE CONTENT: auth.rs ---"),
         "Content should end with END marker"
     );
 }
@@ -715,11 +729,15 @@ fn test_context_output_has_content_boundaries() {
     let result = execute_context(&search, input).unwrap();
 
     assert!(
-        result.content.starts_with("--- BEGIN FILE CONTENT: auth.rs ---\n"),
+        result
+            .content
+            .starts_with("--- BEGIN FILE CONTENT: auth.rs ---\n"),
         "Context content should start with BEGIN marker"
     );
     assert!(
-        result.content.ends_with("\n--- END FILE CONTENT: auth.rs ---"),
+        result
+            .content
+            .ends_with("\n--- END FILE CONTENT: auth.rs ---"),
         "Context content should end with END marker"
     );
 }
@@ -740,7 +758,10 @@ fn test_context_tool_caps_context_lines() {
     };
 
     let result = execute_context(&search, input);
-    assert!(result.is_ok(), "Should handle large context_lines gracefully");
+    assert!(
+        result.is_ok(),
+        "Should handle large context_lines gracefully"
+    );
 }
 
 #[test]

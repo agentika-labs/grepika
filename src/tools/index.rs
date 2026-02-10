@@ -149,10 +149,7 @@ pub fn execute_diff(service: &Arc<SearchService>, input: DiffInput) -> Result<Di
     // Simple line-by-line diff
     let (hunks, stats) = compute_diff(&lines1, &lines2, input.context);
 
-    Ok(DiffOutput {
-        hunks,
-        stats,
-    })
+    Ok(DiffOutput { hunks, stats })
 }
 
 /// Maximum LCS table cells before falling back to a synthetic error.
@@ -177,7 +174,13 @@ fn compute_diff(
                  Use the 'get' tool to compare specific line ranges instead."
             ),
         };
-        return (vec![hunk], DiffStats { additions: 0, deletions: 0 });
+        return (
+            vec![hunk],
+            DiffStats {
+                additions: 0,
+                deletions: 0,
+            },
+        );
     }
 
     let mut hunks = Vec::new();
@@ -240,7 +243,10 @@ fn compute_diff(
                 // End hunk and start fresh
                 let old_count = old_idx - hunk_old_start + 2;
                 let new_count = new_idx - hunk_new_start + 2;
-                let header = format!("@@ -{},{} +{},{} @@", hunk_old_start, old_count, hunk_new_start, new_count);
+                let header = format!(
+                    "@@ -{},{} +{},{} @@",
+                    hunk_old_start, old_count, hunk_new_start, new_count
+                );
                 hunks.push(DiffHunk {
                     content: format!("{}\n{}", header, hunk_lines.join("\n")),
                 });
@@ -282,7 +288,10 @@ fn compute_diff(
     if in_hunk && !hunk_lines.is_empty() {
         let old_count = old_lines.len() - hunk_old_start + 1;
         let new_count = new_lines.len() - hunk_new_start + 1;
-        let header = format!("@@ -{},{} +{},{} @@", hunk_old_start, old_count, hunk_new_start, new_count);
+        let header = format!(
+            "@@ -{},{} +{},{} @@",
+            hunk_old_start, old_count, hunk_new_start, new_count
+        );
         hunks.push(DiffHunk {
             content: format!("{}\n{}", header, hunk_lines.join("\n")),
         });

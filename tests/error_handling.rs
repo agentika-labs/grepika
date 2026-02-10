@@ -210,11 +210,15 @@ fn test_get_empty_file() {
     let result = execute_get(&search, input).unwrap();
     // Content has boundary markers even for empty files
     assert!(
-        result.content.contains("--- BEGIN FILE CONTENT: empty.txt ---"),
+        result
+            .content
+            .contains("--- BEGIN FILE CONTENT: empty.txt ---"),
         "Should have begin marker"
     );
     assert!(
-        result.content.contains("--- END FILE CONTENT: empty.txt ---"),
+        result
+            .content
+            .contains("--- END FILE CONTENT: empty.txt ---"),
         "Should have end marker"
     );
     assert_eq!(result.total_lines, 0);
@@ -346,7 +350,10 @@ fn test_indexer_skips_large_files() {
     let progress = indexer.index(None, false).unwrap();
 
     // Large file should be skipped
-    assert_eq!(progress.files_indexed, 1, "Should only index the normal file");
+    assert_eq!(
+        progress.files_indexed, 1,
+        "Should only index the normal file"
+    );
 }
 
 // ============================================================================
@@ -503,11 +510,7 @@ fn test_indexer_symlink_handling() {
     fs::write(dir.path().join("real.rs"), "fn main() {}").unwrap();
 
     // Create a symlink to it
-    symlink(
-        dir.path().join("real.rs"),
-        dir.path().join("link.rs"),
-    )
-    .unwrap();
+    symlink(dir.path().join("real.rs"), dir.path().join("link.rs")).unwrap();
 
     let db = Arc::new(Database::in_memory().unwrap());
     let trigram = Arc::new(RwLock::new(TrigramIndex::new()));

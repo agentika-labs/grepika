@@ -99,7 +99,9 @@ impl GrepService {
         let num_threads = if config.max_threads > 0 {
             config.max_threads.min(8)
         } else {
-            std::thread::available_parallelism().map_or(4, |n| n.get()).min(8)
+            std::thread::available_parallelism()
+                .map_or(4, |n| n.get())
+                .min(8)
         };
 
         Ok(Self {
@@ -354,8 +356,7 @@ impl GrepService {
 
         // Trim file_matches to only paths in the truncated results (1F)
         if file_matches.len() > results.len() {
-            let kept_paths: HashSet<&Path> =
-                results.iter().map(|(p, _)| p.as_path()).collect();
+            let kept_paths: HashSet<&Path> = results.iter().map(|(p, _)| p.as_path()).collect();
             file_matches.retain(|k, _| kept_paths.contains(k.as_ref()));
         }
 

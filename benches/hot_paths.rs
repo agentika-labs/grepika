@@ -9,10 +9,10 @@
 //! Run with: `cargo bench`
 //! View reports: `open target/criterion/report/index.html`
 
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use grepika::db::Database;
 use grepika::services::{Indexer, SearchService, TrigramIndex};
 use grepika::types::{FileId, Score};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -91,9 +91,11 @@ fn bench_trigram_query_length(c: &mut Criterion) {
     ];
 
     for (name, query) in queries {
-        group.bench_with_input(BenchmarkId::new("query", name), &(query, &index), |b, (q, idx)| {
-            b.iter(|| black_box(idx.search(q)))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("query", name),
+            &(query, &index),
+            |b, (q, idx)| b.iter(|| black_box(idx.search(q))),
+        );
     }
 
     group.finish();
@@ -168,9 +170,7 @@ fn bench_score_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("score_operations");
 
     // Benchmark score creation
-    group.bench_function("new", |b| {
-        b.iter(|| Score::new(black_box(0.75)))
-    });
+    group.bench_function("new", |b| b.iter(|| Score::new(black_box(0.75))));
 
     // Benchmark score merging
     group.bench_function("merge", |b| {
@@ -219,9 +219,7 @@ fn bench_result_merging(c: &mut Criterion) {
             .collect();
 
         // Simulate trigram file IDs (bitmap intersection result)
-        let trigram_ids: Vec<u32> = (result_count / 4..result_count)
-            .map(|i| i as u32)
-            .collect();
+        let trigram_ids: Vec<u32> = (result_count / 4..result_count).map(|i| i as u32).collect();
 
         group.throughput(Throughput::Elements(result_count as u64));
         group.bench_with_input(
@@ -296,16 +294,12 @@ fn bench_fts_search(c: &mut Criterion) {
         }
 
         group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(file_count),
-            &db,
-            |b, db| {
-                b.iter(|| {
-                    // Search for common pattern
-                    black_box(db.fts_search("authenticate*", 20))
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(file_count), &db, |b, db| {
+            b.iter(|| {
+                // Search for common pattern
+                black_box(db.fts_search("authenticate*", 20))
+            })
+        });
     }
 
     group.finish();
@@ -339,9 +333,11 @@ fn bench_fts_query_complexity(c: &mut Criterion) {
     ];
 
     for (name, query) in queries {
-        group.bench_with_input(BenchmarkId::new("query", name), &(query, &db), |b, (q, db)| {
-            b.iter(|| black_box(db.fts_search(q, 20)))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("query", name),
+            &(query, &db),
+            |b, (q, db)| b.iter(|| black_box(db.fts_search(q, 20))),
+        );
     }
 
     group.finish();
@@ -484,9 +480,7 @@ fn bench_db_upsert(c: &mut Criterion) {
             .expect("Failed to insert");
 
         let updated_content = format!("{}\n// Updated", content);
-        b.iter(|| {
-            black_box(db.upsert_file("test.rs", &updated_content, 0x2))
-        })
+        b.iter(|| black_box(db.upsert_file("test.rs", &updated_content, 0x2)))
     });
 
     group.finish();
@@ -519,9 +513,7 @@ fn bench_db_read(c: &mut Criterion) {
         b.iter(|| black_box(db.get_file_by_path("file_50.rs")))
     });
 
-    group.bench_function("file_count", |b| {
-        b.iter(|| black_box(db.file_count()))
-    });
+    group.bench_function("file_count", |b| b.iter(|| black_box(db.file_count())));
 
     group.bench_function("get_indexed_files", |b| {
         b.iter(|| black_box(db.get_indexed_files()))
@@ -583,17 +575,9 @@ criterion_group!(
     bench_trigram_add_file,
 );
 
-criterion_group!(
-    score_benches,
-    bench_score_operations,
-    bench_result_merging,
-);
+criterion_group!(score_benches, bench_score_operations, bench_result_merging,);
 
-criterion_group!(
-    fts_benches,
-    bench_fts_search,
-    bench_fts_query_complexity,
-);
+criterion_group!(fts_benches, bench_fts_search, bench_fts_query_complexity,);
 
 criterion_group!(
     search_benches,
@@ -601,16 +585,9 @@ criterion_group!(
     bench_combined_search_2k,
 );
 
-criterion_group!(
-    db_benches,
-    bench_db_upsert,
-    bench_db_read,
-);
+criterion_group!(db_benches, bench_db_upsert, bench_db_read,);
 
-criterion_group!(
-    real_repo_benches,
-    bench_real_repo,
-);
+criterion_group!(real_repo_benches, bench_real_repo,);
 
 criterion_main!(
     trigram_benches,

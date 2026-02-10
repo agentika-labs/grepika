@@ -328,10 +328,7 @@ impl Indexer {
             // Check extension using pre-built HashSet (P7: O(1) vs O(n))
             // Uses stack-buffer ASCII lowercase to avoid heap allocation per file
             if !self.extension_set.is_empty() {
-                let ext_str = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
+                let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
                 let ext_matched = match ascii_lower_check(ext_str, &self.extension_set) {
                     Some(matched) => matched,
@@ -343,15 +340,13 @@ impl Indexer {
 
                 if !ext_matched {
                     // Check for extensionless files like Makefile, Dockerfile
-                    let filename_str = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let filename_str = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-                    let filename_matched = match ascii_lower_check(filename_str, &self.extension_set) {
-                        Some(matched) => matched,
-                        None => self.extension_set.contains(&filename_str.to_lowercase()),
-                    };
+                    let filename_matched =
+                        match ascii_lower_check(filename_str, &self.extension_set) {
+                            Some(matched) => matched,
+                            None => self.extension_set.contains(&filename_str.to_lowercase()),
+                        };
 
                     if !filename_matched {
                         continue;

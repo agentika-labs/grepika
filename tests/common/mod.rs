@@ -216,10 +216,7 @@ fn quux() { println!("foo"); }
     env.write_file("single_match.rs", "fn main() { println!(\"foo\"); }\n");
 
     // File with no matches
-    env.write_file(
-        "no_match.rs",
-        "fn main() { println!(\"bar\"); }\n",
-    );
+    env.write_file("no_match.rs", "fn main() { println!(\"bar\"); }\n");
 
     // File with unicode content
     env.write_file(
@@ -253,10 +250,7 @@ pub fn minimal_codebase() -> TestEnv {
 }
 
 /// Asserts that search results contain a file with the given name.
-pub fn assert_results_contain(
-    results: &[grepika::services::SearchHit],
-    filename: &str,
-) {
+pub fn assert_results_contain(results: &[grepika::services::SearchHit], filename: &str) {
     let found = results
         .iter()
         .any(|r| r.path.file_name().map(|n| n.to_string_lossy()) == Some(filename.into()));
@@ -269,10 +263,7 @@ pub fn assert_results_contain(
 }
 
 /// Asserts that search results do NOT contain a file with the given name.
-pub fn assert_results_not_contain(
-    results: &[grepika::services::SearchHit],
-    filename: &str,
-) {
+pub fn assert_results_not_contain(results: &[grepika::services::SearchHit], filename: &str) {
     let found = results
         .iter()
         .any(|r| r.path.file_name().map(|n| n.to_string_lossy()) == Some(filename.into()));

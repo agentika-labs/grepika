@@ -144,8 +144,8 @@ pub fn execute_related(
     input: RelatedInput,
 ) -> Result<RelatedOutput, String> {
     // Security: validate path and check for sensitive files
-    let full_path = security::validate_read_access(service.root(), &input.path)
-        .map_err(|e| e.to_string())?;
+    let full_path =
+        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
 
     // Read source file
     let content =
@@ -415,11 +415,7 @@ fn trim_around_match(line: &str, symbol: &str) -> String {
 ///
 /// `contains_pats` are pre-built " symbol", " symbol(", " symbol<" strings
 /// to avoid per-call `format!` allocations.
-fn classify_reference(
-    line: &str,
-    symbol: &str,
-    contains_pats: (&str, &str, &str),
-) -> &'static str {
+fn classify_reference(line: &str, symbol: &str, contains_pats: (&str, &str, &str)) -> &'static str {
     let trimmed = line.trim();
 
     // Check for definitions

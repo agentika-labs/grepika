@@ -6,8 +6,8 @@
 //!   grepika search <query>        # CLI search mode
 //!   grepika index                 # Index the codebase
 
-use grepika::server::GrepikaServer;
 use clap::{Parser, Subcommand};
+use grepika::server::GrepikaServer;
 use rmcp::ServiceExt;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -29,7 +29,7 @@ struct Cli {
     #[arg(long)]
     db: Option<PathBuf>,
 
-    /// File to write profiler logs (requires --features profiling)
+    /// Write profiling logs (timing, memory) to this file
     #[arg(long)]
     log_file: Option<PathBuf>,
 
@@ -92,14 +92,8 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Initialize profiling log file (if profiling feature enabled)
-    #[cfg(feature = "profiling")]
+    // Initialize profiling (active only when --log-file is provided)
     grepika::server::init_profiling(cli.log_file.as_deref());
-
-    #[cfg(not(feature = "profiling"))]
-    if cli.log_file.is_some() {
-        eprintln!("warning: --log-file has no effect without --features profiling");
-    }
 
     if cli.mcp {
         // MCP server mode
@@ -177,19 +171,18 @@ async fn run_cli(root: PathBuf, db: Option<PathBuf>, cmd: Commands) -> anyhow::R
 
     match cmd {
         Commands::Search { query, limit, mode } => {
-            let mode: grepika::tools::SearchMode = mode
-                .parse()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
+            let mode: grepika::tools::SearchMode =
+                mode.parse().map_err(|e: String| anyhow::anyhow!(e))?;
             let input = grepika::tools::SearchInput { query, limit, mode };
-            let result = grepika::tools::execute_search(&search, input)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let result =
+                grepika::tools::execute_search(&search, input).map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
         Commands::Index { force } => {
             let input = grepika::tools::IndexInput { force };
-            let result = grepika::tools::execute_index(&indexer, input)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let result =
+                grepika::tools::execute_index(&indexer, input).map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 
@@ -199,8 +192,8 @@ async fn run_cli(root: PathBuf, db: Option<PathBuf>, cmd: Commands) -> anyhow::R
                 start_line: start,
                 end_line: end,
             };
-            let result = grepika::tools::execute_get(&search, input)
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let result =
+                grepika::tools::execute_get(&search, input).map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", result.content);
         }
 

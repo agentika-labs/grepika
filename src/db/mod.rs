@@ -297,9 +297,8 @@ impl Database {
 
         // Insert all new trigrams
         {
-            let mut stmt = conn.prepare_cached(
-                "INSERT INTO trigrams (trigram, file_ids) VALUES (?1, ?2)",
-            )?;
+            let mut stmt =
+                conn.prepare_cached("INSERT INTO trigrams (trigram, file_ids) VALUES (?1, ?2)")?;
 
             for (trigram, file_ids) in entries {
                 stmt.execute(rusqlite::params![trigram, file_ids])?;
@@ -318,8 +317,7 @@ impl Database {
     /// Returns `DbError::Sqlite` if the query fails.
     pub fn trigram_count(&self) -> DbResult<u64> {
         let conn = self.conn()?;
-        let count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM trigrams", [], |row| row.get(0))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM trigrams", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -494,7 +492,10 @@ impl Database {
     ///
     /// Returns `DbError::Pool` if no connection is available.
     /// Returns `DbError::Sqlite` if the query fails.
-    pub fn get_paths_batch(&self, file_ids: &[FileId]) -> DbResult<std::collections::HashMap<FileId, String>> {
+    pub fn get_paths_batch(
+        &self,
+        file_ids: &[FileId],
+    ) -> DbResult<std::collections::HashMap<FileId, String>> {
         if file_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -513,7 +514,8 @@ impl Database {
             .iter()
             .map(|id| Box::new(id.as_u32()) as Box<dyn rusqlite::types::ToSql>)
             .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
 
         let results = stmt
             .query_map(param_refs.as_slice(), |row| {
@@ -533,7 +535,10 @@ impl Database {
     ///
     /// Returns `DbError::Pool` if no connection is available.
     /// Returns `DbError::Sqlite` if the query fails.
-    pub fn get_file_ids_batch(&self, paths: &[String]) -> DbResult<std::collections::HashMap<String, FileId>> {
+    pub fn get_file_ids_batch(
+        &self,
+        paths: &[String],
+    ) -> DbResult<std::collections::HashMap<String, FileId>> {
         if paths.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
@@ -552,7 +557,8 @@ impl Database {
             .iter()
             .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::types::ToSql>)
             .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
 
         let results = stmt
             .query_map(param_refs.as_slice(), |row| {
@@ -639,9 +645,7 @@ mod tests {
         let db = Database::in_memory().unwrap();
 
         // Insert initial content
-        let file_id1 = db
-            .upsert_file("src/main.rs", "fn main() {}", 0x1)
-            .unwrap();
+        let file_id1 = db.upsert_file("src/main.rs", "fn main() {}", 0x1).unwrap();
 
         // Update with new content
         let file_id2 = db

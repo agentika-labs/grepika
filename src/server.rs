@@ -41,17 +41,21 @@ fn truncate_response(mut json: String) -> String {
     json
 }
 
-// ============ PROFILING ENABLED ============
-#[cfg(feature = "profiling")]
 mod profiling {
     use std::fs::{File, OpenOptions};
     use std::io::Write;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
     use std::sync::OnceLock;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    static PROFILING_ACTIVE: AtomicBool = AtomicBool::new(false);
     static LOG_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
+
+    pub fn is_active() -> bool {
+        PROFILING_ACTIVE.load(Ordering::Relaxed)
+    }
 
     /// Returns an ISO 8601 UTC timestamp string, e.g. "2026-02-07T15:04:05Z".
     fn timestamp() -> String {
@@ -80,8 +84,8 @@ mod profiling {
     }
 
     /// Initialize profiling with optional log file path.
-    /// If path is None, logs go to stderr (default).
-    /// If path is Some, logs are appended to the specified file.
+    /// When path is Some, profiling is activated and logs are appended to the file.
+    /// When path is None, profiling remains inactive (no overhead).
     pub fn init(path: Option<&Path>) {
         LOG_FILE.get_or_init(|| {
             path.and_then(|p| {
@@ -89,22 +93,25 @@ mod profiling {
                 if let Some(parent) = p.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(p)
-                    .ok()
-                    .map(Mutex::new)
+                match OpenOptions::new().create(true).append(true).open(p) {
+                    Ok(f) => Some(Mutex::new(f)),
+                    Err(e) => {
+                        eprintln!("warning: cannot open profiling log {}: {}", p.display(), e);
+                        None
+                    }
+                }
             })
         });
-        // Confirm profiling is active
-        match path {
-            Some(p) => log(&format!("profiling started → {}", p.display())),
-            None => log("profiling started → stderr"),
+        // Only activate profiling if the log file was successfully opened
+        if path.is_some() {
+            if let Some(Some(_)) = LOG_FILE.get() {
+                PROFILING_ACTIVE.store(true, Ordering::Relaxed);
+                log("profiling started");
+            }
         }
     }
 
-    /// Log a profiling message to file or stderr.
+    /// Log a profiling message to the log file.
     pub fn log(msg: &str) {
         let ts = timestamp();
         if let Some(Some(file)) = LOG_FILE.get() {
@@ -112,8 +119,6 @@ mod profiling {
                 let _ = writeln!(f, "{ts} {msg}");
                 let _ = f.flush();
             }
-        } else {
-            eprintln!("{ts} {msg}");
         }
     }
 
@@ -139,7 +144,8 @@ mod profiling {
 }
 
 /// Initialize profiling log file (public API).
-#[cfg(feature = "profiling")]
+/// When a path is provided, profiling is activated and logs are written to the file.
+/// When no path is provided, profiling remains inactive with negligible overhead.
 pub fn init_profiling(path: Option<&std::path::Path>) {
     profiling::init(path);
 }
@@ -151,72 +157,60 @@ pub fn init_profiling(path: Option<&std::path::Path>) {
 /// - `CallToolResult::error()` with error details for tool errors
 /// - `rmcp::Error::internal_error()` for panics/JoinErrors
 ///
-/// When the `profiling` feature is enabled, logs timing, memory usage, and
-/// estimated token count to stderr.
-#[cfg(feature = "profiling")]
+/// When profiling is active, logs timing, memory usage, and estimated token count.
 async fn run_tool<T, E, F>(name: &'static str, f: F) -> Result<CallToolResult, rmcp::Error>
 where
     T: Serialize + Send + 'static,
     E: std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<T, E> + Send + 'static,
 {
+    let active = profiling::is_active();
     let start = std::time::Instant::now();
-    let mem_before = profiling::get_memory_mb();
+    let mem_before = if active {
+        profiling::get_memory_mb()
+    } else {
+        0.0
+    };
 
     let result = tokio::task::spawn_blocking(f).await;
-
-    let elapsed = start.elapsed();
-    let mem_after = profiling::get_memory_mb();
-    let mem_delta = mem_after - mem_before;
 
     match result {
         Ok(Ok(output)) => {
             let json = serde_json::to_string(&output)
                 .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-
             let json = truncate_response(json);
 
-            // Token estimation (~4 bytes per token for code/text)
-            let bytes = json.len();
-            let tokens = (bytes + 2) / 4; // Rounded division
-
-            profiling::log(&format!(
-                "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ~{} tokens ({:.1}KB)",
-                name, elapsed, mem_after, mem_delta, tokens, bytes as f64 / 1024.0
-            ));
+            if active {
+                let elapsed = start.elapsed();
+                let mem_after = profiling::get_memory_mb();
+                let mem_delta = mem_after - mem_before;
+                let bytes = json.len();
+                let tokens = (bytes + 2) / 4;
+                profiling::log(&format!(
+                    "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ~{} tokens ({:.1}KB)",
+                    name,
+                    elapsed,
+                    mem_after,
+                    mem_delta,
+                    tokens,
+                    bytes as f64 / 1024.0
+                ));
+            }
 
             Ok(CallToolResult::success(vec![Content::text(json)]))
         }
         Ok(Err(e)) => {
-            profiling::log(&format!(
-                "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
-                name, elapsed, mem_after, mem_delta
-            ));
+            if active {
+                let elapsed = start.elapsed();
+                let mem_after = profiling::get_memory_mb();
+                let mem_delta = mem_after - mem_before;
+                profiling::log(&format!(
+                    "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
+                    name, elapsed, mem_after, mem_delta
+                ));
+            }
             Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
         }
-        Err(e) => Err(rmcp::Error::internal_error(e.to_string(), None)),
-    }
-}
-
-// ============ PROFILING DISABLED (production) ============
-#[cfg(not(feature = "profiling"))]
-async fn run_tool<T, E, F>(name: &'static str, f: F) -> Result<CallToolResult, rmcp::Error>
-where
-    T: Serialize + Send + 'static,
-    E: std::fmt::Display + Send + 'static,
-    F: FnOnce() -> Result<T, E> + Send + 'static,
-{
-    let _ = name; // Suppress unused warning
-    let result = tokio::task::spawn_blocking(f).await;
-
-    match result {
-        Ok(Ok(output)) => {
-            let json = serde_json::to_string(&output)
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            let json = truncate_response(json);
-            Ok(CallToolResult::success(vec![Content::text(json)]))
-        }
-        Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(e.to_string())])),
         Err(e) => Err(rmcp::Error::internal_error(e.to_string(), None)),
     }
 }
@@ -251,7 +245,10 @@ impl Workspace {
                 Arc::new(RwLock::new(TrigramIndex::new()))
             }
             Err(e) => {
-                tracing::warn!("Failed to load trigrams from database: {}, starting fresh", e);
+                tracing::warn!(
+                    "Failed to load trigrams from database: {}, starting fresh",
+                    e
+                );
                 Arc::new(RwLock::new(TrigramIndex::new()))
             }
         };
@@ -322,10 +319,12 @@ impl GrepikaServer {
 #[tool(tool_box)]
 impl GrepikaServer {
     /// Load a project directory as the active workspace.
-    #[tool(description = "Load a project directory as the active workspace for code search.\n\n\
+    #[tool(
+        description = "Load a project directory as the active workspace for code search.\n\n\
         Call this FIRST with your project's root path before using search tools.\n\
         The workspace persists for this session. Index data is cached across sessions.\n\
-        Example: add_workspace(path='/Users/adam/projects/my-app')")]
+        Example: add_workspace(path='/Users/adam/projects/my-app')"
+    )]
     async fn add_workspace(
         &self,
         #[tool(param)]
@@ -342,21 +341,18 @@ impl GrepikaServer {
         let db_override = self.db_override.clone();
         let workspace_lock = Arc::clone(&self.workspace);
 
-        #[cfg(feature = "profiling")]
+        let active = profiling::is_active();
         let start = std::time::Instant::now();
-        #[cfg(feature = "profiling")]
-        let mem_before = profiling::get_memory_mb();
+        let mem_before = if active {
+            profiling::get_memory_mb()
+        } else {
+            0.0
+        };
 
         // Workspace::new() is blocking (DB open, trigram load) — use spawn_blocking
-        let result = tokio::task::spawn_blocking(move || {
-            Workspace::new(validated.clone(), db_override)
-        })
-        .await;
-
-        #[cfg(feature = "profiling")]
-        let elapsed = start.elapsed();
-        #[cfg(feature = "profiling")]
-        let mem_after = profiling::get_memory_mb();
+        let result =
+            tokio::task::spawn_blocking(move || Workspace::new(validated.clone(), db_override))
+                .await;
 
         match result {
             Ok(Ok(ws)) => {
@@ -367,14 +363,17 @@ impl GrepikaServer {
                 // Store the new workspace
                 *workspace_lock.write().unwrap() = Some(Arc::new(ws));
 
-                #[cfg(feature = "profiling")]
-                profiling::log(&format!(
-                    "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | loaded {} files",
-                    elapsed,
-                    mem_after,
-                    mem_after - mem_before,
-                    file_count
-                ));
+                if active {
+                    let elapsed = start.elapsed();
+                    let mem_after = profiling::get_memory_mb();
+                    profiling::log(&format!(
+                        "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | loaded {} files",
+                        elapsed,
+                        mem_after,
+                        mem_after - mem_before,
+                        file_count
+                    ));
+                }
 
                 let msg = format!(
                     "Workspace loaded: {}\nDatabase: {}\nIndexed files: {}{}",
@@ -390,13 +389,16 @@ impl GrepikaServer {
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
             }
             Ok(Err(e)) => {
-                #[cfg(feature = "profiling")]
-                profiling::log(&format!(
-                    "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
-                    elapsed,
-                    mem_after,
-                    mem_after - mem_before,
-                ));
+                if active {
+                    let elapsed = start.elapsed();
+                    let mem_after = profiling::get_memory_mb();
+                    profiling::log(&format!(
+                        "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
+                        elapsed,
+                        mem_after,
+                        mem_after - mem_before,
+                    ));
+                }
 
                 Ok(CallToolResult::error(vec![Content::text(format!(
                     "Failed to load workspace: {}",
@@ -408,7 +410,9 @@ impl GrepikaServer {
     }
 
     /// Search for code patterns across the codebase.
-    #[tool(description = "Search for code patterns. Supports regex and natural language queries.\n\nExamples: 'fn\\\\s+process_', 'authentication flow', 'SearchService'\nModes: combined (default, best quality), fts (natural language), grep (regex)\n\nTip: Use 'refs' for symbol reference analysis, 'get' to read matched files.\nRequires index.")]
+    #[tool(
+        description = "Search for code patterns. Supports regex and natural language queries.\n\nExamples: 'fn\\\\s+process_', 'authentication flow', 'SearchService'\nModes: combined (default, best quality), fts (natural language), grep (regex)\n\nTip: Use 'refs' for symbol reference analysis, 'get' to read matched files.\nRequires index."
+    )]
     async fn search(
         &self,
         #[tool(param)]
@@ -460,7 +464,9 @@ impl GrepikaServer {
     }
 
     /// Get file content with optional line range.
-    #[tool(description = "Get file content. Supports line range selection.\n\nExamples: path='src/main.rs', start_line=10, end_line=50\n\nTip: Use 'outline' first to find symbol locations, then 'get' to read them.\nWorks without index.")]
+    #[tool(
+        description = "Get file content. Supports line range selection.\n\nExamples: path='src/main.rs', start_line=10, end_line=50\n\nTip: Use 'outline' first to find symbol locations, then 'get' to read them.\nWorks without index."
+    )]
     async fn get(
         &self,
         #[tool(param)]
@@ -487,7 +493,9 @@ impl GrepikaServer {
     }
 
     /// Get file outline showing functions, classes, and other symbols.
-    #[tool(description = "Extract file structure (functions, classes, structs, etc.)\n\nSupported languages: Rust, Python, JavaScript/TypeScript, Go\n\nTip: Use 'get' or 'context' to read the code at specific symbol locations.\nWorks without index.")]
+    #[tool(
+        description = "Extract file structure (functions, classes, structs, etc.)\n\nSupported languages: Rust, Python, JavaScript/TypeScript, Go\n\nTip: Use 'get' or 'context' to read the code at specific symbol locations.\nWorks without index."
+    )]
     async fn outline(
         &self,
         #[tool(param)]
@@ -504,7 +512,9 @@ impl GrepikaServer {
     }
 
     /// Get directory table of contents.
-    #[tool(description = "Get directory tree structure.\n\nExamples: path='src', depth=2\n\nTip: Use 'search' or 'relevant' to find specific files by content.\nWorks without index.")]
+    #[tool(
+        description = "Get directory tree structure.\n\nExamples: path='src', depth=2\n\nTip: Use 'search' or 'relevant' to find specific files by content.\nWorks without index."
+    )]
     async fn toc(
         &self,
         #[tool(param)]
@@ -527,7 +537,9 @@ impl GrepikaServer {
     }
 
     /// Get context around a specific line.
-    #[tool(description = "Get surrounding context for a line.\n\nExamples: path='src/lib.rs', line=42, context_lines=15\n\nTip: Use after 'search' or 'refs' to see code around a match.\nWorks without index.")]
+    #[tool(
+        description = "Get surrounding context for a line.\n\nExamples: path='src/lib.rs', line=42, context_lines=15\n\nTip: Use after 'search' or 'refs' to see code around a match.\nWorks without index."
+    )]
     async fn context(
         &self,
         #[tool(param)]
@@ -554,7 +566,9 @@ impl GrepikaServer {
     }
 
     /// Get index statistics.
-    #[tool(description = "Get index statistics and file type breakdown.\n\nUse detailed=true for per-filetype counts. Useful for checking index health.\nRequires index.")]
+    #[tool(
+        description = "Get index statistics and file type breakdown.\n\nUse detailed=true for per-filetype counts. Useful for checking index health.\nRequires index."
+    )]
     async fn stats(
         &self,
         #[tool(param)]
@@ -570,11 +584,16 @@ impl GrepikaServer {
         };
         let search = Arc::clone(&ws.search);
         let indexer = Arc::clone(&ws.indexer);
-        run_tool("stats", move || tools::execute_stats(&search, &indexer, input)).await
+        run_tool("stats", move || {
+            tools::execute_stats(&search, &indexer, input)
+        })
+        .await
     }
 
     /// Find files related to a given file.
-    #[tool(description = "Find files related to a source file by shared symbols.\n\nExamples: path='src/auth.rs'\n\nTip: Use 'refs' to trace a specific symbol's usage across files.\nRequires index.")]
+    #[tool(
+        description = "Find files related to a source file by shared symbols.\n\nExamples: path='src/auth.rs'\n\nTip: Use 'refs' to trace a specific symbol's usage across files.\nRequires index."
+    )]
     async fn related(
         &self,
         #[tool(param)]
@@ -597,7 +616,9 @@ impl GrepikaServer {
     }
 
     /// Find references to a symbol.
-    #[tool(description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.\nWorks without index.")]
+    #[tool(
+        description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.\nWorks without index."
+    )]
     async fn refs(
         &self,
         #[tool(param)]
@@ -620,7 +641,9 @@ impl GrepikaServer {
     }
 
     /// Update the search index.
-    #[tool(description = "Update the search index (incremental by default).\n\nUse force=true to rebuild from scratch if results seem stale.\nSubsequent runs are incremental and fast.")]
+    #[tool(
+        description = "Update the search index (incremental by default).\n\nUse force=true to rebuild from scratch if results seem stale.\nSubsequent runs are incremental and fast."
+    )]
     async fn index(
         &self,
         #[tool(param)]
@@ -641,11 +664,14 @@ impl GrepikaServer {
             // Refresh cached total_files after indexing
             search.refresh_total_files();
             result
-        }).await
+        })
+        .await
     }
 
     /// Compare two files.
-    #[tool(description = "Show differences between two files.\n\nExamples: file1='src/old.rs', file2='src/new.rs', context=5\nReturns unified diff with addition/deletion statistics.\nWorks without index.")]
+    #[tool(
+        description = "Show differences between two files.\n\nExamples: file1='src/old.rs', file2='src/new.rs', context=5\nReturns unified diff with addition/deletion statistics.\nWorks without index."
+    )]
     async fn diff(
         &self,
         #[tool(param)]

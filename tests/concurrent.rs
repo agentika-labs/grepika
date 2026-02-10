@@ -226,7 +226,10 @@ fn test_concurrent_trigram_reads() {
     {
         let mut index = trigram.write().unwrap();
         for i in 0..100 {
-            index.add_file(FileId::new(i), &format!("content_{} authentication authorization", i));
+            index.add_file(
+                FileId::new(i),
+                &format!("content_{} authentication authorization", i),
+            );
         }
     }
 
@@ -291,7 +294,9 @@ fn test_concurrent_trigram_read_write() {
     for handle in reader_handles {
         handle.join().expect("Reader thread should not panic");
     }
-    writer_handle.join().expect("Writer thread should not panic");
+    writer_handle
+        .join()
+        .expect("Writer thread should not panic");
 
     // Verify final state
     let index = trigram.read().unwrap();
@@ -427,7 +432,9 @@ fn test_database_connection_pool_under_load() {
         .collect();
 
     for handle in handles {
-        handle.join().expect("Thread should not fail under pool stress");
+        handle
+            .join()
+            .expect("Thread should not fail under pool stress");
     }
 }
 

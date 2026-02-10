@@ -167,7 +167,12 @@ pub fn execute_search(
         .map(|r| SearchResultItem {
             path: relativize_path(&r.path, root),
             score: r.score.as_f64(),
-            sources: r.sources.to_labels().into_iter().map(String::from).collect(),
+            sources: r
+                .sources
+                .to_labels()
+                .into_iter()
+                .map(String::from)
+                .collect(),
             snippets: map_snippets(&r.snippets),
         })
         .collect();
@@ -255,10 +260,7 @@ pub fn execute_relevant(
         })
         .collect();
 
-    Ok(RelevantOutput {
-        files,
-        has_more,
-    })
+    Ok(RelevantOutput { files, has_more })
 }
 
 /// Generates a human-readable relevance reason based on matched keywords.
