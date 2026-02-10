@@ -38,30 +38,39 @@ pub struct IndexOutput {
 
 /// Executes the index tool.
 ///
+/// Accepts an optional external `progress_cb`. When `None`, falls back to
+/// a default stderr logger so CLI callers get output for free.
+///
 /// # Errors
 ///
-/// Returns an error string if indexing fails.
-pub fn execute_index(indexer: &Indexer, input: IndexInput) -> Result<IndexOutput, String> {
-    // Wire up progress callback for stderr logging
-    let progress_cb: Option<crate::services::indexer::ProgressCallback> =
+/// Returns a `ServerError` if indexing fails.
+pub fn execute_index(
+    indexer: &Indexer,
+    input: IndexInput,
+    progress_cb: Option<crate::services::indexer::ProgressCallback>,
+) -> crate::error::Result<IndexOutput> {
+    // Use provided callback, or fall back to default stderr logger
+    let cb = progress_cb.or_else(|| {
         Some(Box::new(|p: crate::services::indexer::IndexProgress| {
             eprintln!(
                 "[INDEX] {}/{} files processed, {} indexed",
                 p.files_processed, p.files_total, p.files_indexed
             );
-        }));
+        }))
+    });
 
-    let progress = indexer
-        .index(progress_cb, input.force)
-        .map_err(|e| e.to_string())?;
+    let progress = indexer.index(cb, input.force)?;
 
     let message = if progress.files_indexed > 0 || progress.files_deleted > 0 {
         format!(
-            "Index updated: {} new/modified, {} deleted",
-            progress.files_indexed, progress.files_deleted
+            "Index updated: {} new/modified, {} deleted (of {} files)",
+            progress.files_indexed, progress.files_deleted, progress.files_processed
         )
     } else {
-        "Index is up to date".to_string()
+        format!(
+            "Index is up to date ({} files verified, 0 changes)",
+            progress.files_processed
+        )
     };
 
     Ok(IndexOutput {
@@ -123,25 +132,19 @@ pub struct DiffStats {
 ///
 /// # Errors
 ///
-/// Returns an error string if:
-/// - Path traversal is detected
-/// - Either file is sensitive
-/// - Either file cannot be read
-pub fn execute_diff(service: &Arc<SearchService>, input: DiffInput) -> Result<DiffOutput, String> {
+/// Returns a `ServerError` if path traversal is detected, either file is sensitive, or either file cannot be read.
+pub fn execute_diff(
+    service: &Arc<SearchService>,
+    input: DiffInput,
+) -> crate::error::Result<DiffOutput> {
     use std::fs;
 
     // Security: validate both paths and check for sensitive files
-    let path1 = security::validate_read_access(service.root(), &input.file1)
-        .map_err(|e| format!("file1: {e}"))?;
-    let path2 = security::validate_read_access(service.root(), &input.file2)
-        .map_err(|e| format!("file2: {e}"))?;
+    let path1 = security::validate_read_access(service.root(), &input.file1)?;
+    let path2 = security::validate_read_access(service.root(), &input.file2)?;
 
-    let file1 = &input.file1;
-    let content1 =
-        fs::read_to_string(&path1).map_err(|e| format!("Failed to read {file1}: {e}"))?;
-    let file2 = &input.file2;
-    let content2 =
-        fs::read_to_string(&path2).map_err(|e| format!("Failed to read {file2}: {e}"))?;
+    let content1 = fs::read_to_string(&path1)?;
+    let content2 = fs::read_to_string(&path2)?;
 
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();

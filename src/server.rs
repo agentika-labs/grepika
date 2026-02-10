@@ -1,11 +1,21 @@
 //! MCP server implementation using rmcp.
 
 use crate::db::Database;
+use crate::error::ErrorCode;
 use crate::services::{Indexer, SearchService, TrigramIndex};
 use crate::tools;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::{tool, ServerHandler};
-use serde::Serialize;
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::ToolCallContext;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, Content, Implementation, ListToolsResult, LoggingLevel,
+    LoggingMessageNotification, LoggingMessageNotificationParam, Meta, PaginatedRequestParams,
+    ProgressNotificationParam, ProtocolVersion, RawContent, ServerCapabilities, ServerInfo, Tool,
+};
+use rmcp::service::{Peer, RequestContext};
+use rmcp::{tool, tool_router, RoleServer, ServerHandler};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -32,7 +42,7 @@ fn truncate_response(mut json: String) -> String {
         .or_else(|| search_region.rfind('\n'))
         .unwrap_or(MAX_RESPONSE_BYTES);
     let safe_cut = json.floor_char_boundary(cut_point + 1);
-    // Reuse the existing allocation instead of format!()
+    // Reuse the truncated json buffer (avoids reallocating the full response)
     json.truncate(safe_cut);
     json.push_str(&format!(
         "...\n[TRUNCATED: response exceeded {} bytes, showing first {}]",
@@ -41,177 +51,109 @@ fn truncate_response(mut json: String) -> String {
     json
 }
 
-mod profiling {
-    use std::fs::{File, OpenOptions};
-    use std::io::Write;
-    use std::path::Path;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static PROFILING_ACTIVE: AtomicBool = AtomicBool::new(false);
-    static LOG_FILE: OnceLock<Option<Mutex<File>>> = OnceLock::new();
-
-    pub fn is_active() -> bool {
-        PROFILING_ACTIVE.load(Ordering::Relaxed)
-    }
-
-    /// Returns an ISO 8601 UTC timestamp string, e.g. "2026-02-07T15:04:05Z".
-    fn timestamp() -> String {
-        let dur = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = dur.as_secs();
-        // Break epoch seconds into date/time components
-        let days = secs / 86400;
-        let time_of_day = secs % 86400;
-        let h = time_of_day / 3600;
-        let m = (time_of_day % 3600) / 60;
-        let s = time_of_day % 60;
-        // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant)
-        let z = days as i64 + 719468;
-        let era = if z >= 0 { z } else { z - 146096 } / 146097;
-        let doe = (z - era * 146097) as u64;
-        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-        let y = yoe as i64 + era * 400;
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-        let mp = (5 * doy + 2) / 153;
-        let d = doy - (153 * mp + 2) / 5 + 1;
-        let mo = if mp < 10 { mp + 3 } else { mp - 9 };
-        let y = if mo <= 2 { y + 1 } else { y };
-        format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
-    }
-
-    /// Initialize profiling with optional log file path.
-    /// When path is Some, profiling is activated and logs are appended to the file.
-    /// When path is None, profiling remains inactive (no overhead).
-    pub fn init(path: Option<&Path>) {
-        LOG_FILE.get_or_init(|| {
-            path.and_then(|p| {
-                // Create parent directories if needed
-                if let Some(parent) = p.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                match OpenOptions::new().create(true).append(true).open(p) {
-                    Ok(f) => Some(Mutex::new(f)),
-                    Err(e) => {
-                        eprintln!("warning: cannot open profiling log {}: {}", p.display(), e);
-                        None
-                    }
-                }
-            })
-        });
-        // Only activate profiling if the log file was successfully opened
-        if path.is_some() {
-            if let Some(Some(_)) = LOG_FILE.get() {
-                PROFILING_ACTIVE.store(true, Ordering::Relaxed);
-                log("profiling started");
+/// Truncates large text content within a CallToolResult.
+fn truncate_call_tool_result(mut result: CallToolResult) -> CallToolResult {
+    for content in &mut result.content {
+        if let RawContent::Text(ref mut text) = content.raw {
+            if text.text.len() > MAX_RESPONSE_BYTES {
+                text.text = truncate_response(std::mem::take(&mut text.text));
             }
         }
     }
+    result
+}
 
-    /// Log a profiling message to the log file.
-    pub fn log(msg: &str) {
-        let ts = timestamp();
-        if let Some(Some(file)) = LOG_FILE.get() {
-            if let Ok(mut f) = file.lock() {
-                let _ = writeln!(f, "{ts} {msg}");
-                let _ = f.flush();
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_under_limit() {
+        let input = "short string".to_string();
+        let result = truncate_response(input.clone());
+        assert_eq!(result, input);
     }
 
-    /// Gets current memory usage in MB.
-    pub fn get_memory_mb() -> f64 {
-        #[cfg(unix)]
-        {
-            use std::process::Command;
-            Command::new("ps")
-                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-                .output()
-                .ok()
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(|kb| kb as f64 / 1024.0)
-                .unwrap_or(0.0)
-        }
-        #[cfg(not(unix))]
-        {
-            0.0
-        }
+    #[test]
+    fn test_truncate_exactly_at_limit() {
+        let input = "x".repeat(MAX_RESPONSE_BYTES);
+        let result = truncate_response(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_truncate_over_limit_cuts_at_comma() {
+        // Build a string that exceeds MAX_RESPONSE_BYTES with commas in it
+        let segment = "\"file\": \"data\",";
+        let repeats = (MAX_RESPONSE_BYTES / segment.len()) + 10;
+        let input = segment.repeat(repeats);
+        assert!(input.len() > MAX_RESPONSE_BYTES);
+
+        let result = truncate_response(input);
+        assert!(result.len() <= MAX_RESPONSE_BYTES + 200); // allow truncation notice
+        assert!(result.contains("[TRUNCATED:"));
+        // Should not end with a partial JSON record
+    }
+
+    #[test]
+    fn test_truncate_over_limit_no_comma_falls_back() {
+        // String with no commas or newlines — falls back to MAX_RESPONSE_BYTES
+        let input = "x".repeat(MAX_RESPONSE_BYTES + 1000);
+        let result = truncate_response(input);
+        assert!(result.contains("[TRUNCATED:"));
+    }
+
+    #[test]
+    fn test_truncate_multibyte_utf8_boundary() {
+        // Place multi-byte chars near the cut point so floor_char_boundary matters.
+        // U+1F600 = 4-byte emoji
+        let padding = "a".repeat(MAX_RESPONSE_BYTES - 5);
+        let input = format!("{},\u{1F600}\u{1F600}\u{1F600}", padding);
+        assert!(input.len() > MAX_RESPONSE_BYTES);
+
+        let result = truncate_response(input);
+        // Must be valid UTF-8 (String guarantees this, but verify no panic)
+        assert!(result.contains("[TRUNCATED:"));
+        // Verify the string is valid — if floor_char_boundary failed, this would be corrupted
+        assert!(result.is_char_boundary(result.len()));
     }
 }
 
-/// Initialize profiling log file (public API).
-/// When a path is provided, profiling is activated and logs are written to the file.
-/// When no path is provided, profiling remains inactive with negligible overhead.
-pub fn init_profiling(path: Option<&std::path::Path>) {
-    profiling::init(path);
-}
-
-/// Helper to run a blocking tool operation and return structured MCP results.
+/// Helper to run a blocking tool operation and return an MCP result.
 ///
-/// Uses `spawn_blocking()` for CPU-bound work and returns either:
-/// - `CallToolResult::success()` with JSON content for success
-/// - `CallToolResult::error()` with error details for tool errors
-/// - `rmcp::Error::internal_error()` for panics/JoinErrors
-///
-/// When profiling is active, logs timing, memory usage, and estimated token count.
-async fn run_tool<T, E, F>(name: &'static str, f: F) -> Result<CallToolResult, rmcp::Error>
+/// Uses `spawn_blocking()` for CPU-bound work. Classifies errors:
+/// - Client-fixable errors (bad input, not found) → `CallToolResult::error()` (LLM-visible)
+/// - Server faults (DB corruption, I/O) → `Err(ErrorData)` (protocol error channel)
+/// - Panics/JoinErrors → `Err(ErrorData::internal_error())`
+async fn spawn_tool<T, F>(f: F) -> Result<CallToolResult, rmcp::ErrorData>
 where
     T: Serialize + Send + 'static,
-    E: std::fmt::Display + Send + 'static,
-    F: FnOnce() -> Result<T, E> + Send + 'static,
+    F: FnOnce() -> crate::error::Result<T> + Send + 'static,
 {
-    let active = profiling::is_active();
-    let start = std::time::Instant::now();
-    let mem_before = if active {
-        profiling::get_memory_mb()
-    } else {
-        0.0
-    };
-
-    let result = tokio::task::spawn_blocking(f).await;
-
-    match result {
+    match tokio::task::spawn_blocking(f).await {
         Ok(Ok(output)) => {
-            let json = serde_json::to_string(&output)
-                .map_err(|e| rmcp::Error::internal_error(e.to_string(), None))?;
-            let json = truncate_response(json);
-
-            if active {
-                let elapsed = start.elapsed();
-                let mem_after = profiling::get_memory_mb();
-                let mem_delta = mem_after - mem_before;
-                let bytes = json.len();
-                let tokens = (bytes + 2) / 4;
-                profiling::log(&format!(
-                    "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ~{} tokens ({:.1}KB)",
-                    name,
-                    elapsed,
-                    mem_after,
-                    mem_delta,
-                    tokens,
-                    bytes as f64 / 1024.0
-                ));
-            }
-
-            Ok(CallToolResult::success(vec![Content::text(json)]))
+            let value = serde_json::to_value(&output)
+                .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+            Ok(CallToolResult::structured(value))
         }
         Ok(Err(e)) => {
-            if active {
-                let elapsed = start.elapsed();
-                let mem_after = profiling::get_memory_mb();
-                let mem_delta = mem_after - mem_before;
-                profiling::log(&format!(
-                    "[{}] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
-                    name, elapsed, mem_after, mem_delta
-                ));
+            if e.is_client_fixable() {
+                // LLM can see the error and adapt (retry with different input)
+                Ok(CallToolResult {
+                    content: vec![Content::text(e.to_string())],
+                    structured_content: Some(serde_json::json!({
+                        "code": e.code(),
+                        "message": e.to_string(),
+                    })),
+                    is_error: Some(true),
+                    meta: None,
+                })
+            } else {
+                // Server fault → protocol error channel
+                Err(e.into())
             }
-            Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
         }
-        Err(e) => Err(rmcp::Error::internal_error(e.to_string(), None)),
+        Err(e) => Err(rmcp::ErrorData::internal_error(e.to_string(), None)),
     }
 }
 
@@ -273,6 +215,108 @@ impl Workspace {
     }
 }
 
+// ─── MCP Parameter Structs ───────────────────────────────────────────────────
+// Each tool has a corresponding parameter struct. Doc comments on fields become
+// the JSON schema descriptions that LLMs see when calling tools.
+
+#[derive(Deserialize, JsonSchema)]
+pub struct AddWorkspaceParams {
+    /// Absolute path to the project root directory
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SearchParams {
+    /// Search query (regex or natural language)
+    pub query: String,
+    /// Maximum results (default: 20)
+    pub limit: Option<usize>,
+    /// Search mode: combined, fts, or grep (default: combined)
+    pub mode: Option<tools::SearchMode>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RelevantParams {
+    /// Topic or concept to search for
+    pub topic: String,
+    /// Maximum files (default: 10)
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct GetParams {
+    /// File path relative to root
+    pub path: String,
+    /// Starting line (1-indexed, default: 1)
+    pub start_line: Option<usize>,
+    /// Ending line (0 = end of file)
+    pub end_line: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct OutlineParams {
+    /// File path relative to root
+    pub path: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TocParams {
+    /// Directory path (default: root)
+    pub path: Option<String>,
+    /// Maximum depth (default: 3)
+    pub depth: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct ContextParams {
+    /// File path
+    pub path: String,
+    /// Center line number
+    pub line: usize,
+    /// Lines of context before and after (default: 10)
+    pub context_lines: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct StatsParams {
+    /// Include detailed breakdown by file type
+    pub detailed: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RelatedParams {
+    /// Source file path
+    pub path: String,
+    /// Maximum related files (default: 10)
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct RefsParams {
+    /// Symbol/identifier to find
+    pub symbol: String,
+    /// Maximum references (default: 50)
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct IndexParams {
+    /// Force full re-index
+    pub force: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DiffParams {
+    /// First file path
+    pub file1: String,
+    /// Second file path
+    pub file2: String,
+    /// Context lines around changes (default: 3)
+    pub context: Option<usize>,
+}
+
+// ─── MCP Server ──────────────────────────────────────────────────────────────
+
 /// MCP Server for code search.
 #[derive(Clone)]
 pub struct GrepikaServer {
@@ -280,6 +324,8 @@ pub struct GrepikaServer {
     workspace: Arc<RwLock<Option<Arc<Workspace>>>>,
     /// Explicit DB path override (from --db flag).
     db_override: Option<PathBuf>,
+    /// Tool router generated by #[tool_router].
+    tool_router: ToolRouter<GrepikaServer>,
 }
 
 impl GrepikaServer {
@@ -291,6 +337,7 @@ impl GrepikaServer {
         Ok(Self {
             workspace: Arc::new(RwLock::new(Some(Arc::new(ws)))),
             db_override: None,
+            tool_router: Self::tool_router(),
         })
     }
 
@@ -302,6 +349,7 @@ impl GrepikaServer {
         Self {
             workspace: Arc::new(RwLock::new(None)),
             db_override,
+            tool_router: Self::tool_router(),
         }
     }
 
@@ -309,45 +357,55 @@ impl GrepikaServer {
     fn active(&self) -> Result<Arc<Workspace>, CallToolResult> {
         self.workspace
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or_else(|| CallToolResult::error(vec![Content::text(NO_WORKSPACE_MSG)]))
     }
 }
 
-// Tool implementations using rmcp macros
-#[tool(tool_box)]
+// ─── Tool Implementations ────────────────────────────────────────────────────
+// Each tool is registered in the generated ToolRouter via #[tool_router].
+
+/// Extracts the active workspace or returns a tool-level error to the LLM.
+/// Uses `return Ok(e)` to keep "no workspace" on the tool result channel
+/// (LLM-visible) rather than the protocol error channel.
+macro_rules! require_workspace {
+    ($self:expr) => {
+        match $self.active() {
+            Ok(ws) => ws,
+            Err(e) => return Ok(e),
+        }
+    };
+}
+
+#[tool_router]
 impl GrepikaServer {
-    /// Load a project directory as the active workspace.
     #[tool(
         description = "Load a project directory as the active workspace for code search.\n\n\
         Call this FIRST with your project's root path before using search tools.\n\
         The workspace persists for this session. Index data is cached across sessions.\n\
-        Example: add_workspace(path='/Users/adam/projects/my-app')"
+        Example: add_workspace(path='/Users/adam/projects/my-app')",
+        annotations(
+            title = "Load Workspace",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn add_workspace(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Absolute path to the project root directory")]
-        path: String,
-    ) -> Result<CallToolResult, rmcp::Error> {
+        Parameters(params): Parameters<AddWorkspaceParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         // Validate the workspace root (security checks + canonicalize)
-        let validated = match crate::security::validate_workspace_root(std::path::Path::new(&path))
-        {
-            Ok(p) => p,
-            Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
-        };
+        let validated =
+            match crate::security::validate_workspace_root(std::path::Path::new(&params.path)) {
+                Ok(p) => p,
+                Err(msg) => return Ok(CallToolResult::error(vec![Content::text(msg)])),
+            };
 
         let db_override = self.db_override.clone();
         let workspace_lock = Arc::clone(&self.workspace);
-
-        let active = profiling::is_active();
-        let start = std::time::Instant::now();
-        let mem_before = if active {
-            profiling::get_memory_mb()
-        } else {
-            0.0
-        };
 
         // Workspace::new() is blocking (DB open, trigram load) — use spawn_blocking
         let result =
@@ -361,22 +419,10 @@ impl GrepikaServer {
                 let file_count = ws.search.cached_total_files();
 
                 // Store the new workspace
-                *workspace_lock.write().unwrap() = Some(Arc::new(ws));
-
-                if active {
-                    let elapsed = start.elapsed();
-                    let mem_after = profiling::get_memory_mb();
-                    profiling::log(&format!(
-                        "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | loaded {} files",
-                        elapsed,
-                        mem_after,
-                        mem_after - mem_before,
-                        file_count
-                    ));
-                }
+                *workspace_lock.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(ws));
 
                 let msg = format!(
-                    "Workspace loaded: {}\nDatabase: {}\nIndexed files: {}{}",
+                    "Workspace loaded: {}\nDatabase: {}\nCached index: {} files{}",
                     root_display,
                     db_path,
                     file_count,
@@ -388,321 +434,349 @@ impl GrepikaServer {
                 );
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
             }
-            Ok(Err(e)) => {
-                if active {
-                    let elapsed = start.elapsed();
-                    let mem_after = profiling::get_memory_mb();
-                    profiling::log(&format!(
-                        "[add_workspace] {:?} | mem: {:.1}MB ({:+.1}MB) | ERROR",
-                        elapsed,
-                        mem_after,
-                        mem_after - mem_before,
-                    ));
-                }
-
-                Ok(CallToolResult::error(vec![Content::text(format!(
-                    "Failed to load workspace: {}",
-                    e
-                ))]))
-            }
-            Err(e) => Err(rmcp::Error::internal_error(e.to_string(), None)),
+            Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to load workspace: {}",
+                e
+            ))])),
+            Err(e) => Err(rmcp::ErrorData::internal_error(e.to_string(), None)),
         }
     }
 
-    /// Search for code patterns across the codebase.
     #[tool(
-        description = "Search for code patterns. Supports regex and natural language queries.\n\nExamples: 'fn\\\\s+process_', 'authentication flow', 'SearchService'\nModes: combined (default, best quality), fts (natural language), grep (regex)\n\nTip: Use 'refs' for symbol reference analysis, 'get' to read matched files.\nRequires index."
+        description = "Search for code patterns. Supports regex and natural language queries.\n\nExamples: 'fn\\s+process_', 'authentication flow', 'SearchService'\nModes: combined (default, best quality), fts (natural language), grep (regex)\n\nTip: Use 'refs' for symbol reference analysis, 'get' to read matched files.\nRequires index.",
+        annotations(
+            title = "Search Code",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn search(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Search query (regex or natural language)")]
-        query: String,
-        #[tool(param)]
-        #[schemars(description = "Maximum results (default: 20)")]
-        limit: Option<usize>,
-        #[tool(param)]
-        #[schemars(description = "Search mode: combined, fts, or grep (default: combined)")]
-        mode: Option<tools::SearchMode>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::SearchInput {
-            query,
-            limit: limit.unwrap_or(20).min(200),
-            mode: mode.unwrap_or_default(),
+            query: params.query,
+            limit: params.limit.unwrap_or(20).min(200),
+            mode: params.mode.unwrap_or_default(),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("search", move || tools::execute_search(&search, input)).await
+        spawn_tool(move || tools::execute_search(&search, input)).await
     }
 
-    /// Find files most relevant to a topic or concept.
     #[tool(
-        description = "Find files most relevant to a topic. Uses combined search for best results.\n\nExamples: 'authentication flow', 'database connection pooling', 'error handling'\n\nTip: Use 'outline' to understand file structure, 'get' to read specific sections.\nRequires index."
+        description = "Find files most relevant to a topic. Uses combined search for best results.\n\nExamples: 'authentication flow', 'database connection pooling', 'error handling'\n\nTip: Use 'outline' to understand file structure, 'get' to read specific sections.\nRequires index.",
+        annotations(
+            title = "Find Relevant Files",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn relevant(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Topic or concept to search for")]
-        topic: String,
-        #[tool(param)]
-        #[schemars(description = "Maximum files (default: 10)")]
-        limit: Option<usize>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<RelevantParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::RelevantInput {
-            topic,
-            limit: limit.unwrap_or(10).min(100),
+            topic: params.topic,
+            limit: params.limit.unwrap_or(10).min(100),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("relevant", move || tools::execute_relevant(&search, input)).await
+        spawn_tool(move || tools::execute_relevant(&search, input)).await
     }
 
-    /// Get file content with optional line range.
     #[tool(
-        description = "Get file content. Supports line range selection.\n\nExamples: path='src/main.rs', start_line=10, end_line=50\n\nTip: Use 'outline' first to find symbol locations, then 'get' to read them.\nWorks without index."
+        description = "Get file content. Supports line range selection.\n\nExamples: path='src/main.rs', start_line=10, end_line=50\n\nTip: Use 'outline' first to find symbol locations, then 'get' to read them.\nWorks without index.",
+        annotations(
+            title = "Read File",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get(
         &self,
-        #[tool(param)]
-        #[schemars(description = "File path relative to root")]
-        path: String,
-        #[tool(param)]
-        #[schemars(description = "Starting line (1-indexed, default: 1)")]
-        start_line: Option<usize>,
-        #[tool(param)]
-        #[schemars(description = "Ending line (0 = end of file)")]
-        end_line: Option<usize>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<GetParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::GetInput {
-            path,
-            start_line: start_line.unwrap_or(1),
-            end_line: end_line.unwrap_or(0),
+            path: params.path,
+            start_line: params.start_line.unwrap_or(1),
+            end_line: params.end_line.unwrap_or(0),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("get", move || tools::execute_get(&search, input)).await
+        spawn_tool(move || tools::execute_get(&search, input)).await
     }
 
-    /// Get file outline showing functions, classes, and other symbols.
     #[tool(
-        description = "Extract file structure (functions, classes, structs, etc.)\n\nSupported languages: Rust, Python, JavaScript/TypeScript, Go\n\nTip: Use 'get' or 'context' to read the code at specific symbol locations.\nWorks without index."
+        description = "Extract file structure (functions, classes, structs, etc.)\n\nSupported languages: Rust, Python, JavaScript/TypeScript, Go\n\nTip: Use 'get' or 'context' to read the code at specific symbol locations.\nWorks without index.",
+        annotations(
+            title = "File Outline",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn outline(
         &self,
-        #[tool(param)]
-        #[schemars(description = "File path relative to root")]
-        path: String,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
-        let input = tools::OutlineInput { path };
+        Parameters(params): Parameters<OutlineParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
+        let input = tools::OutlineInput { path: params.path };
         let search = Arc::clone(&ws.search);
-        run_tool("outline", move || tools::execute_outline(&search, input)).await
+        spawn_tool(move || tools::execute_outline(&search, input)).await
     }
 
-    /// Get directory table of contents.
     #[tool(
-        description = "Get directory tree structure.\n\nExamples: path='src', depth=2\n\nTip: Use 'search' or 'relevant' to find specific files by content.\nWorks without index."
+        description = "Get directory tree structure.\n\nExamples: path='src', depth=2\n\nTip: Use 'search' or 'relevant' to find specific files by content.\nWorks without index.",
+        annotations(
+            title = "Directory Tree",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn toc(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Directory path (default: root)")]
-        path: Option<String>,
-        #[tool(param)]
-        #[schemars(description = "Maximum depth (default: 3)")]
-        depth: Option<usize>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<TocParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::TocInput {
-            path: path.unwrap_or_else(|| ".".to_string()),
-            depth: depth.unwrap_or(3).min(10),
+            path: params.path.unwrap_or_else(|| ".".to_string()),
+            depth: params.depth.unwrap_or(3).min(10),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("toc", move || tools::execute_toc(&search, input)).await
+        spawn_tool(move || tools::execute_toc(&search, input)).await
     }
 
-    /// Get context around a specific line.
     #[tool(
-        description = "Get surrounding context for a line.\n\nExamples: path='src/lib.rs', line=42, context_lines=15\n\nTip: Use after 'search' or 'refs' to see code around a match.\nWorks without index."
+        description = "Get surrounding context for a line.\n\nExamples: path='src/lib.rs', line=42, context_lines=15\n\nTip: Use after 'search' or 'refs' to see code around a match.\nWorks without index.",
+        annotations(
+            title = "Code Context",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn context(
         &self,
-        #[tool(param)]
-        #[schemars(description = "File path")]
-        path: String,
-        #[tool(param)]
-        #[schemars(description = "Center line number")]
-        line: usize,
-        #[tool(param)]
-        #[schemars(description = "Lines of context before and after (default: 10)")]
-        context_lines: Option<usize>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<ContextParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::ContextInput {
-            path,
-            line,
-            context_lines: context_lines.unwrap_or(10).min(500),
+            path: params.path,
+            line: params.line,
+            context_lines: params.context_lines.unwrap_or(10).min(500),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("context", move || tools::execute_context(&search, input)).await
+        spawn_tool(move || tools::execute_context(&search, input)).await
     }
 
-    /// Get index statistics.
     #[tool(
-        description = "Get index statistics and file type breakdown.\n\nUse detailed=true for per-filetype counts. Useful for checking index health.\nRequires index."
+        description = "Get index statistics and file type breakdown.\n\nUse detailed=true for per-filetype counts. Useful for checking index health.\nRequires index.",
+        annotations(
+            title = "Index Statistics",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn stats(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Include detailed breakdown by file type")]
-        detailed: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<StatsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::StatsInput {
-            detailed: detailed.unwrap_or(false),
+            detailed: params.detailed.unwrap_or(false),
         };
         let search = Arc::clone(&ws.search);
         let indexer = Arc::clone(&ws.indexer);
-        run_tool("stats", move || {
-            tools::execute_stats(&search, &indexer, input)
-        })
-        .await
+        spawn_tool(move || tools::execute_stats(&search, &indexer, input)).await
     }
 
-    /// Find files related to a given file.
     #[tool(
-        description = "Find files related to a source file by shared symbols.\n\nExamples: path='src/auth.rs'\n\nTip: Use 'refs' to trace a specific symbol's usage across files.\nRequires index."
+        description = "Find files related to a source file by shared symbols.\n\nExamples: path='src/auth.rs'\n\nTip: Use 'refs' to trace a specific symbol's usage across files.\nRequires index.",
+        annotations(
+            title = "Related Files",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn related(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Source file path")]
-        path: String,
-        #[tool(param)]
-        #[schemars(description = "Maximum related files (default: 10)")]
-        limit: Option<usize>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<RelatedParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::RelatedInput {
-            path,
-            limit: limit.unwrap_or(10),
+            path: params.path,
+            limit: params.limit.unwrap_or(10),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("related", move || tools::execute_related(&search, input)).await
+        spawn_tool(move || tools::execute_related(&search, input)).await
     }
 
-    /// Find references to a symbol.
     #[tool(
-        description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.\nWorks without index."
+        description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.\nWorks without index.",
+        annotations(
+            title = "Find References",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn refs(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Symbol/identifier to find")]
-        symbol: String,
-        #[tool(param)]
-        #[schemars(description = "Maximum references (default: 50)")]
-        limit: Option<usize>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<RefsParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::RefsInput {
-            symbol,
-            limit: limit.unwrap_or(50).min(500),
+            symbol: params.symbol,
+            limit: params.limit.unwrap_or(50).min(500),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("refs", move || tools::execute_refs(&search, input)).await
+        spawn_tool(move || tools::execute_refs(&search, input)).await
     }
 
-    /// Update the search index.
     #[tool(
-        description = "Update the search index (incremental by default).\n\nUse force=true to rebuild from scratch if results seem stale.\nSubsequent runs are incremental and fast."
+        description = "Update the search index (incremental by default).\n\nUse force=true to rebuild from scratch if results seem stale.\nSubsequent runs are incremental and fast.",
+        annotations(
+            title = "Update Index",
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn index(
         &self,
-        #[tool(param)]
-        #[schemars(description = "Force full re-index")]
-        force: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
-        let input = tools::IndexInput {
-            force: force.unwrap_or(false),
-        };
+        Parameters(params): Parameters<IndexParams>,
+        meta: Meta,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
+        let force = params.force.unwrap_or(false);
         let indexer = Arc::clone(&ws.indexer);
         let search = Arc::clone(&ws.search);
-        run_tool("index", move || {
-            let result = tools::execute_index(&indexer, input);
-            // Refresh cached total_files after indexing
+
+        // Only set up MCP progress forwarding if client provided a token
+        let progress_token = meta.get_progress_token();
+
+        let (tx, forwarder) = if let Some(token) = progress_token {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
+            let fwd = tokio::spawn(async move {
+                while let Some((processed, total)) = rx.recv().await {
+                    let _ = peer
+                        .notify_progress(ProgressNotificationParam {
+                            progress_token: token.clone(),
+                            progress: processed as f64,
+                            total: Some(total as f64),
+                            message: Some(format!("Indexing: {processed}/{total} files")),
+                        })
+                        .await;
+                }
+            });
+            (Some(tx), Some(fwd))
+        } else {
+            (None, None)
+        };
+
+        let result = tokio::task::spawn_blocking(move || {
+            let progress_cb: crate::services::indexer::ProgressCallback =
+                Box::new(move |p: crate::services::indexer::IndexProgress| {
+                    if let Some(ref tx) = tx {
+                        let _ = tx.send((p.files_processed, p.files_total));
+                    }
+                    eprintln!(
+                        "[INDEX] {}/{} files processed, {} indexed",
+                        p.files_processed, p.files_total, p.files_indexed
+                    );
+                });
+
+            let input = tools::IndexInput { force };
+            let result = tools::execute_index(&indexer, input, Some(progress_cb));
             search.refresh_total_files();
             result
         })
-        .await
+        .await;
+
+        // Await the forwarder instead of aborting — once the tx sender is dropped
+        // (closure ends), rx.recv() returns None and the forwarder exits naturally
+        // after draining queued messages. abort() would cancel the final notification.
+        if let Some(fwd) = forwarder {
+            let _ = fwd.await;
+        }
+
+        match result {
+            Ok(Ok(output)) => {
+                let value = serde_json::to_value(&output)
+                    .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
+                Ok(CallToolResult::structured(value))
+            }
+            Ok(Err(e)) => {
+                if e.is_client_fixable() {
+                    Ok(CallToolResult {
+                        content: vec![Content::text(e.to_string())],
+                        structured_content: Some(serde_json::json!({
+                            "code": e.code(),
+                            "message": e.to_string(),
+                        })),
+                        is_error: Some(true),
+                        meta: None,
+                    })
+                } else {
+                    Err(e.into())
+                }
+            }
+            Err(e) => Err(rmcp::ErrorData::internal_error(e.to_string(), None)),
+        }
     }
 
-    /// Compare two files.
     #[tool(
-        description = "Show differences between two files.\n\nExamples: file1='src/old.rs', file2='src/new.rs', context=5\nReturns unified diff with addition/deletion statistics.\nWorks without index."
+        description = "Show differences between two files.\n\nExamples: file1='src/old.rs', file2='src/new.rs', context=5\nReturns unified diff with addition/deletion statistics.\nWorks without index.",
+        annotations(
+            title = "Compare Files",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn diff(
         &self,
-        #[tool(param)]
-        #[schemars(description = "First file path")]
-        file1: String,
-        #[tool(param)]
-        #[schemars(description = "Second file path")]
-        file2: String,
-        #[tool(param)]
-        #[schemars(description = "Context lines around changes (default: 3)")]
-        context: Option<usize>,
-    ) -> Result<CallToolResult, rmcp::Error> {
-        let ws = match self.active() {
-            Ok(ws) => ws,
-            Err(e) => return Ok(e),
-        };
+        Parameters(params): Parameters<DiffParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
         let input = tools::DiffInput {
-            file1,
-            file2,
-            context: context.unwrap_or(3),
+            file1: params.file1,
+            file2: params.file2,
+            context: params.context.unwrap_or(3),
         };
         let search = Arc::clone(&ws.search);
-        run_tool("diff", move || tools::execute_diff(&search, input)).await
+        spawn_tool(move || tools::execute_diff(&search, input)).await
     }
 }
 
-// Implement ServerHandler trait
-#[tool(tool_box)]
+// ─── ServerHandler Implementation ────────────────────────────────────────────
+// Manual impl (no #[tool_handler]) so we can override call_tool with profiling middleware.
 impl ServerHandler for GrepikaServer {
     fn get_info(&self) -> ServerInfo {
-        let has_workspace = self.workspace.read().unwrap().is_some();
+        let has_workspace = self
+            .workspace
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
 
         let setup = if has_workspace {
             "SETUP: Workspace loaded. Run 'index' if you need to pick up file changes."
@@ -732,9 +806,100 @@ impl ServerHandler for GrepikaServer {
         );
 
         ServerInfo {
+            protocol_version: ProtocolVersion::default(),
+            server_info: Implementation {
+                name: "grepika".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                ..Default::default()
+            },
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_logging()
+                .build(),
             instructions: Some(instructions),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            ..Default::default()
         }
+    }
+
+    /// Profiling middleware: wraps every tool call with timing, memory tracking,
+    /// response truncation, and MCP logging on errors.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tool_name = request.name.to_string();
+        let active = crate::profiling::is_active();
+        let start = std::time::Instant::now();
+        let mem_before = if active {
+            crate::profiling::get_memory_mb()
+        } else {
+            0.0
+        };
+
+        // Clone peer before TCC consumes context (needed for post-call logging)
+        let peer = context.peer.clone();
+
+        // Delegate to the generated tool router
+        let tcc = ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).await;
+
+        // Post-call: profiling
+        let bytes = result
+            .as_ref()
+            .map(|r| {
+                r.content
+                    .iter()
+                    .map(|c| match &c.raw {
+                        RawContent::Text(t) => t.text.len(),
+                        _ => 0,
+                    })
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        crate::profiling::log_tool_call(&crate::profiling::ToolMetrics {
+            name: tool_name.clone(),
+            elapsed: start.elapsed(),
+            response_bytes: bytes,
+            mem_before_mb: mem_before,
+            is_error: result.as_ref().is_ok_and(|r| r.is_error == Some(true)) || result.is_err(),
+        });
+
+        // Post-call: MCP logging notification on tool errors
+        if let Ok(ref r) = result {
+            if r.is_error == Some(true) {
+                let _ = peer
+                    .send_notification(
+                        LoggingMessageNotification::new(LoggingMessageNotificationParam {
+                            level: LoggingLevel::Warning,
+                            logger: Some("grepika".to_string()),
+                            data: serde_json::json!({
+                                "tool": tool_name,
+                                "error": true,
+                            }),
+                        })
+                        .into(),
+                    )
+                    .await;
+            }
+        }
+
+        // Post-call: truncate large responses
+        result.map(truncate_call_tool_result)
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        Ok(ListToolsResult {
+            tools: self.tool_router.list_all(),
+            next_cursor: None,
+            meta: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
     }
 }

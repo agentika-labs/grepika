@@ -130,32 +130,26 @@ pub struct SearchResultItem {
 ///
 /// # Errors
 ///
-/// Returns an error string if the search operation fails.
+/// Returns a `ServerError` if the search operation fails.
 pub fn execute_search(
     service: &Arc<SearchService>,
     input: SearchInput,
-) -> Result<SearchOutput, String> {
+) -> crate::error::Result<SearchOutput> {
     // Check for empty index before searching (uses cached AtomicU64, no DB round-trip)
     if service.cached_total_files() == 0 {
-        return Err(
+        return Err(crate::error::ServerError::Tool(
             "Index is empty. Run the 'index' tool first to build the search index, then retry your search."
-                .to_string(),
-        );
+                .into(),
+        ));
     }
 
     // Overcollect by 1 to detect if more results exist
     let request_limit = input.limit + 1;
 
     let results = match input.mode {
-        SearchMode::Fts => service
-            .search_fts(&input.query, request_limit)
-            .map_err(|e| e.to_string())?,
-        SearchMode::Grep => service
-            .search_grep(&input.query, request_limit)
-            .map_err(|e| e.to_string())?,
-        SearchMode::Combined => service
-            .search(&input.query, request_limit)
-            .map_err(|e| e.to_string())?,
+        SearchMode::Fts => service.search_fts(&input.query, request_limit)?,
+        SearchMode::Grep => service.search_grep(&input.query, request_limit)?,
+        SearchMode::Combined => service.search(&input.query, request_limit)?,
     };
 
     let has_more = results.len() > input.limit;
@@ -224,18 +218,16 @@ pub struct RelevantFile {
 ///
 /// # Errors
 ///
-/// Returns an error string if the search operation fails.
+/// Returns a `ServerError` if the search operation fails.
 pub fn execute_relevant(
     service: &Arc<SearchService>,
     input: RelevantInput,
-) -> Result<RelevantOutput, String> {
+) -> crate::error::Result<RelevantOutput> {
     // Overcollect by 1 for has_more detection
     let request_limit = input.limit + 1;
 
     // Use combined search for best relevance
-    let results = service
-        .search(&input.topic, request_limit)
-        .map_err(|e| e.to_string())?;
+    let results = service.search(&input.topic, request_limit)?;
 
     let has_more = results.len() > input.limit;
     let root = service.root();

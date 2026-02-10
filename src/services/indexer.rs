@@ -4,7 +4,8 @@
 //! xxHash is ~30x faster than SHA256 while providing sufficient
 //! collision resistance for content hashing.
 
-use crate::db::{Database, FileData};
+use crate::db::Database;
+use crate::db::FileData;
 use crate::error::{IndexError, ServerError};
 use crate::security;
 use crate::services::TrigramIndex;
@@ -179,25 +180,85 @@ impl Indexer {
         };
         let existing_paths: HashSet<String> = existing_hashes.keys().cloned().collect();
 
-        // Collect files to process
         let files: Vec<PathBuf> = self.collect_files()?;
         let total = files.len();
 
-        // ========================================
-        // PHASE 1: Parallel file reading + hashing
-        // ========================================
-        // This is embarrassingly parallel - no shared mutable state
+        // Phase 1: parallel file reading + hashing
+        let (file_data, seen_paths) = self.phase1_read_and_hash(&files, &existing_hashes);
+        let files_unchanged = total - file_data.len();
+
+        // Phase 2: sequential DB writes + trigrams + deletions
+        let mut state = IndexProgress {
+            files_processed: 0,
+            files_total: total,
+            files_indexed: 0,
+            files_unchanged,
+            files_deleted: 0,
+            current_file: None,
+        };
+
+        // Get a dedicated connection with indexing pragmas applied.
+        let indexing_conn = self.db.enter_indexing_mode()?;
+
+        // Wrap indexing in a closure so exit_indexing_mode() runs even on error.
+        // enter_indexing_mode() sets synchronous=OFF — must not leak to pool.
+        let result = (|| -> Result<IndexProgress, ServerError> {
+            {
+                let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+
+                self.phase2_batch_write(
+                    &file_data,
+                    &indexing_conn,
+                    &mut trigram_guard,
+                    &progress,
+                    &mut state,
+                )?;
+
+                self.handle_deletions(
+                    &indexing_conn,
+                    &existing_paths,
+                    &seen_paths,
+                    &mut trigram_guard,
+                    &mut state,
+                )?;
+            } // Drop write guard before save_trigrams (which takes a read lock)
+
+            self.persist_trigrams(&indexing_conn, &state, force)?;
+            Ok(state)
+        })();
+
+        // Always restore normal pragmas, even on error
+        if let Err(e) = self.db.exit_indexing_mode(&indexing_conn) {
+            tracing::error!("Failed to restore normal pragmas after indexing: {e}");
+        }
+
+        let mut state = result?;
+        state.current_file = None;
+        state.files_processed = total;
+
+        if let Some(ref cb) = progress {
+            cb(state.clone());
+        }
+
+        Ok(state)
+    }
+
+    /// Phase 1: Parallel file reading and hash computation.
+    ///
+    /// Returns changed files (needing indexing) and the set of all seen paths.
+    fn phase1_read_and_hash(
+        &self,
+        files: &[PathBuf],
+        existing_hashes: &HashMap<String, u64>,
+    ) -> (Vec<FileData>, HashSet<String>) {
+        // Embarrassingly parallel — no shared mutable state
         let file_data: Vec<FileData> = files
             .par_iter()
             .filter_map(|path| {
-                // Read file content
                 let content = fs::read_to_string(path).ok()?;
-
-                // Compute hash
                 let hash = compute_hash(&content);
                 let path_str = path.to_string_lossy().to_string();
 
-                // Check if file needs indexing (O(1) HashMap lookup)
                 if existing_hashes.get(&path_str) == Some(&hash) {
                     return None; // Skip unchanged files
                 }
@@ -210,79 +271,90 @@ impl Indexer {
             })
             .collect();
 
-        // Collect all seen paths (including unchanged ones)
+        // Collect all seen paths (including unchanged ones).
+        // Uses iter() not par_iter(): to_string_lossy() is pure allocation,
+        // not CPU-bound work — rayon overhead exceeds benefit here.
         let seen_paths: HashSet<String> = files
-            .par_iter()
+            .iter()
             .map(|p| p.to_string_lossy().to_string())
             .collect();
 
-        // Calculate unchanged count
-        let files_unchanged = total - file_data.len();
+        (file_data, seen_paths)
+    }
 
-        // ========================================
-        // PHASE 2: Sequential DB writes + trigrams
-        // ========================================
-        // Batching is more efficient than parallel writes due to
-        // transaction overhead and lock contention
-
-        let mut state = IndexProgress {
-            files_processed: 0,
-            files_total: total,
-            files_indexed: 0,
-            files_unchanged,
-            files_deleted: 0,
-            current_file: None,
-        };
-
-        // Acquire trigram write lock once for the entire Phase 2 batch loop.
-        // Avoids per-file lock acquire/release overhead (atomic CAS + potential syscall).
-        {
-            let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
-
-            for batch in file_data.chunks(BATCH_SIZE) {
-                // Report progress at batch level
-                if let Some(ref cb) = progress {
-                    state.current_file = batch.first().map(|f| PathBuf::from(&f.path));
-                    cb(state.clone());
-                }
-
-                // Batch upsert returns FileIds in same order as input
-                let file_ids = self.db.upsert_files_batch(batch)?;
-
-                // Update trigram index for each file (guard held, no per-file lock)
-                for (data, file_id) in batch.iter().zip(file_ids) {
-                    trigram_guard.add_file(file_id, &data.content);
-                }
-
-                state.files_indexed += batch.len();
-                state.files_processed += batch.len();
+    /// Phase 2: Sequential batch upserts and trigram updates.
+    fn phase2_batch_write(
+        &self,
+        file_data: &[FileData],
+        conn: &rusqlite::Connection,
+        trigram_guard: &mut TrigramIndex,
+        progress: &Option<ProgressCallback>,
+        state: &mut IndexProgress,
+    ) -> Result<(), ServerError> {
+        for batch in file_data.chunks(BATCH_SIZE) {
+            if let Some(ref cb) = progress {
+                state.current_file = batch.first().map(|f| PathBuf::from(&f.path));
+                cb(state.clone());
             }
-        } // Drop write guard before save_trigrams (which takes a read lock)
 
-        // Remove deleted files
-        for path in existing_paths.difference(&seen_paths) {
-            if self.db.delete_file(path)? {
+            let file_ids = Database::upsert_files_batch_on(conn, batch)?;
+
+            for (data, file_id) in batch.iter().zip(file_ids) {
+                trigram_guard.add_file(file_id, &data.content);
+            }
+
+            state.files_indexed += batch.len();
+            state.files_processed += batch.len();
+        }
+        Ok(())
+    }
+
+    /// Removes files that were previously indexed but no longer exist on disk.
+    fn handle_deletions(
+        &self,
+        conn: &rusqlite::Connection,
+        existing_paths: &HashSet<String>,
+        seen_paths: &HashSet<String>,
+        trigram_guard: &mut TrigramIndex,
+        state: &mut IndexProgress,
+    ) -> Result<(), ServerError> {
+        for path in existing_paths.difference(seen_paths) {
+            if let Ok(Some(file_id)) = Database::get_file_id_on(conn, path) {
+                trigram_guard.remove_file(file_id);
+            }
+            if Database::delete_file_on(conn, path)? {
                 state.files_deleted += 1;
             }
         }
+        Ok(())
+    }
 
-        // Persist trigram index to database if any files were indexed
-        if state.files_indexed > 0 || state.files_deleted > 0 {
+    /// Persists the trigram index to the database if changes were made.
+    fn persist_trigrams(
+        &self,
+        conn: &rusqlite::Connection,
+        state: &IndexProgress,
+        force: bool,
+    ) -> Result<(), ServerError> {
+        if state.files_indexed == 0 && state.files_deleted == 0 {
+            return Ok(());
+        }
+
+        if force {
             let entries = {
                 let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
                 trigram.to_db_entries()
-            }; // RwLock read guard dropped before DB write
-            self.db.save_trigrams(&entries)?;
+            };
+            Database::save_trigrams_on(conn, &entries)?;
+        } else {
+            let (upserts, deletes) = {
+                let mut trigram = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+                trigram.take_dirty_entries()
+            };
+            Database::save_dirty_trigrams_on(conn, &upserts, &deletes)?;
         }
 
-        state.current_file = None;
-        state.files_processed = total;
-
-        if let Some(ref cb) = progress {
-            cb(state.clone());
-        }
-
-        Ok(state)
+        Ok(())
     }
 
     /// Indexes a single file.
@@ -495,6 +567,70 @@ mod tests {
     }
 
     #[test]
+    fn test_index_removes_deleted_files_from_trigram() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+        // Create 3 files with unique content
+        fs::write(dir.path().join("alpha.rs"), "fn unique_alpha_function() {}").unwrap();
+        fs::write(dir.path().join("beta.rs"), "fn unique_beta_function() {}").unwrap();
+        fs::write(dir.path().join("gamma.rs"), "fn unique_gamma_function() {}").unwrap();
+
+        let indexer = Indexer::new(db.clone(), trigram.clone(), dir.path().to_path_buf());
+
+        // Index all 3 files
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 3);
+
+        // Delete beta.rs from disk
+        fs::remove_file(dir.path().join("beta.rs")).unwrap();
+
+        // Re-index — should detect deletion
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_deleted, 1);
+
+        // Verify trigram index no longer contains the deleted file's content
+        let tri = trigram.read().unwrap();
+        let results = tri.search("unique_beta_function");
+        // Should be empty (or None): deleted file's trigrams are cleaned up
+        match results {
+            None => {} // Fine: no trigrams match
+            Some(bitmap) => assert!(
+                bitmap.is_empty(),
+                "Deleted file's FileId should not appear in trigram results"
+            ),
+        }
+
+        // Verify that the other files' trigrams still work
+        let alpha_results = tri.search("unique_alpha_function");
+        assert!(alpha_results.is_some());
+        assert!(!alpha_results.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_incremental_index_deletion() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+        fs::write(dir.path().join("keep.rs"), "fn keep() {}").unwrap();
+        fs::write(dir.path().join("remove.rs"), "fn remove() {}").unwrap();
+
+        let indexer = Indexer::new(db.clone(), trigram.clone(), dir.path().to_path_buf());
+
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 2);
+        assert_eq!(db.file_count().unwrap(), 2);
+
+        // Delete one file and re-index
+        fs::remove_file(dir.path().join("remove.rs")).unwrap();
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_deleted, 1);
+        assert_eq!(db.file_count().unwrap(), 1);
+    }
+
+    #[test]
     fn test_hash_computation() {
         let hash1 = compute_hash("hello");
         let hash2 = compute_hash("hello");
@@ -502,5 +638,50 @@ mod tests {
 
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, hash3);
+    }
+
+    #[test]
+    fn test_incremental_trigram_persistence() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+        // Create files with distinct trigram content
+        fs::write(dir.path().join("alpha.rs"), "fn unique_alpha() {}").unwrap();
+        fs::write(dir.path().join("beta.rs"), "fn unique_beta() {}").unwrap();
+
+        let indexer = Indexer::new(db.clone(), trigram.clone(), dir.path().to_path_buf());
+
+        // First index (force=false): uses dirty persistence
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 2);
+
+        // Verify trigrams were persisted to DB
+        let db_trigrams = db.load_all_trigrams().unwrap();
+        assert!(!db_trigrams.is_empty());
+        let initial_trigram_count = db_trigrams.len();
+
+        // Dirty set should be clear after persistence
+        {
+            let tri = trigram.read().unwrap();
+            assert_eq!(tri.dirty_count(), 0);
+        }
+
+        // Add a new file and reindex incrementally
+        fs::write(dir.path().join("gamma.rs"), "fn unique_gamma_xyz() {}").unwrap();
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 1);
+        assert_eq!(progress.files_unchanged, 2);
+
+        // Verify trigram count grew (new trigrams from gamma.rs content)
+        let db_trigrams_after = db.load_all_trigrams().unwrap();
+        assert!(db_trigrams_after.len() >= initial_trigram_count);
+
+        // Verify search still works for all files
+        let tri = trigram.read().unwrap();
+        assert!(tri.search("unique_alpha").is_some());
+        assert!(!tri.search("unique_alpha").unwrap().is_empty());
+        assert!(tri.search("unique_gamma").is_some());
+        assert!(!tri.search("unique_gamma").unwrap().is_empty());
     }
 }

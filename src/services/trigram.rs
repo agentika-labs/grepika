@@ -5,7 +5,7 @@
 //! "auth" finds files with "authentication", "oauth", etc.
 
 use crate::types::{FileId, Trigram};
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use roaring::RoaringBitmap;
 
 /// In-memory trigram index using RoaringBitmaps.
@@ -13,13 +13,29 @@ use roaring::RoaringBitmap;
 /// Each trigram maps to a bitmap of file IDs containing it.
 /// Substring search ANDs all trigram bitmaps together.
 ///
+/// Tracks which trigrams were modified since last persistence,
+/// enabling incremental saves that only write changed entries.
+///
 /// Thread-safe (Send + Sync) when wrapped in appropriate synchronization
 /// primitives (e.g., `Arc<RwLock<TrigramIndex>>`).
-#[derive(Default)]
 pub struct TrigramIndex {
     /// Trigram -> FileIds containing this trigram
     index: AHashMap<Trigram, RoaringBitmap>,
+    /// Trigrams modified since last `take_dirty_entries()` call
+    dirty: AHashSet<Trigram>,
 }
+
+impl Default for TrigramIndex {
+    fn default() -> Self {
+        Self {
+            index: AHashMap::new(),
+            dirty: AHashSet::new(),
+        }
+    }
+}
+
+/// Upserts and deletes for incremental trigram persistence.
+pub type DirtyEntries = (Vec<(Vec<u8>, Vec<u8>)>, Vec<Vec<u8>>);
 
 impl TrigramIndex {
     /// Creates an empty trigram index.
@@ -35,13 +51,21 @@ impl TrigramIndex {
                 .entry(trigram)
                 .or_default()
                 .insert(file_id.as_u32());
+            self.dirty.insert(trigram);
         }
     }
 
     /// Removes a file from the index.
+    ///
+    /// O(total_trigrams) — iterates all trigram bitmaps to remove the file ID.
+    /// Acceptable for few deletions per cycle; consider a reverse index
+    /// (FileId → Set<Trigram>) if bulk deletions become common.
     pub fn remove_file(&mut self, file_id: FileId) {
-        for bitmap in self.index.values_mut() {
-            bitmap.remove(file_id.as_u32());
+        let id = file_id.as_u32();
+        for (trigram, bitmap) in &mut self.index {
+            if bitmap.remove(id) {
+                self.dirty.insert(*trigram);
+            }
         }
     }
 
@@ -92,9 +116,44 @@ impl TrigramIndex {
         self.index.values().map(|b| b.len()).sum()
     }
 
-    /// Clears the index.
+    /// Clears the index and dirty set.
     pub fn clear(&mut self) {
         self.index.clear();
+        self.dirty.clear();
+    }
+
+    /// Returns the number of dirty (modified) trigrams since last persistence.
+    #[must_use]
+    pub fn dirty_count(&self) -> usize {
+        self.dirty.len()
+    }
+
+    /// Takes dirty entries for incremental persistence.
+    ///
+    /// Returns `(upserts, deletes)`:
+    /// - `upserts`: trigrams with non-empty bitmaps that need INSERT OR REPLACE
+    /// - `deletes`: trigram keys whose bitmaps are now empty (need DELETE)
+    ///
+    /// Clears the dirty set after taking entries.
+    pub fn take_dirty_entries(&mut self) -> DirtyEntries {
+        let mut upserts = Vec::with_capacity(self.dirty.len());
+        let mut deletes = Vec::new();
+
+        for trigram in self.dirty.drain() {
+            match self.index.get(&trigram) {
+                Some(bitmap) if !bitmap.is_empty() => {
+                    upserts.push((trigram.as_bytes().to_vec(), Self::bitmap_to_bytes(bitmap)));
+                }
+                _ => {
+                    // Bitmap is empty or missing — delete from DB
+                    deletes.push(trigram.as_bytes().to_vec());
+                    // Also clean up empty bitmaps from memory
+                    self.index.remove(&trigram);
+                }
+            }
+        }
+
+        (upserts, deletes)
     }
 
     /// Serializes a bitmap to bytes for database storage.
@@ -146,6 +205,7 @@ impl TrigramIndex {
     ///
     /// Takes an iterator of (trigram_bytes, serialized_bitmap) tuples.
     /// Invalid entries are silently skipped.
+    /// The dirty set starts empty since loaded entries are already persisted.
     pub fn from_db_entries<I>(entries: I) -> Self
     where
         I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
@@ -165,7 +225,10 @@ impl TrigramIndex {
             }
         }
 
-        Self { index }
+        Self {
+            index,
+            dirty: AHashSet::new(),
+        }
     }
 }
 
@@ -252,5 +315,69 @@ mod tests {
         let results = index.search("auth").unwrap();
         assert!(!results.contains(1));
         assert!(results.contains(2));
+    }
+
+    #[test]
+    fn test_dirty_tracking_add() {
+        let mut index = TrigramIndex::new();
+        assert_eq!(index.dirty_count(), 0);
+
+        index.add_file(FileId::new(1), "hello");
+        assert!(index.dirty_count() > 0);
+
+        let (upserts, deletes) = index.take_dirty_entries();
+        assert!(!upserts.is_empty());
+        assert!(deletes.is_empty());
+        // After taking, dirty set is cleared
+        assert_eq!(index.dirty_count(), 0);
+    }
+
+    #[test]
+    fn test_dirty_tracking_remove_produces_deletes() {
+        let mut index = TrigramIndex::new();
+        index.add_file(FileId::new(1), "xyz");
+        // Clear dirty set (simulating a persistence cycle)
+        let _ = index.take_dirty_entries();
+        assert_eq!(index.dirty_count(), 0);
+
+        // Remove the only file — bitmaps become empty
+        index.remove_file(FileId::new(1));
+        assert!(index.dirty_count() > 0);
+
+        let (upserts, deletes) = index.take_dirty_entries();
+        // All trigrams from "xyz" had only file 1, so they're now empty -> deletes
+        assert!(!deletes.is_empty());
+        // No non-empty bitmaps to upsert
+        assert!(upserts.is_empty());
+    }
+
+    #[test]
+    fn test_dirty_tracking_incremental() {
+        let mut index = TrigramIndex::new();
+        index.add_file(FileId::new(1), "authentication");
+        // Simulate persistence
+        let _ = index.take_dirty_entries();
+        assert_eq!(index.dirty_count(), 0);
+
+        // Add another file — only new/changed trigrams should be dirty
+        index.add_file(FileId::new(2), "authorization");
+        let dirty_count = index.dirty_count();
+        let total_count = index.trigram_count();
+        // Dirty trigrams should be a subset of total
+        assert!(dirty_count <= total_count);
+        assert!(dirty_count > 0);
+    }
+
+    #[test]
+    fn test_from_db_entries_starts_clean() {
+        let mut index = TrigramIndex::new();
+        index.add_file(FileId::new(1), "hello world");
+        let entries = index.to_db_entries();
+
+        let loaded = TrigramIndex::from_db_entries(entries);
+        // Loaded from DB — nothing is dirty
+        assert_eq!(loaded.dirty_count(), 0);
+        // But the index has data
+        assert!(loaded.trigram_count() > 0);
     }
 }

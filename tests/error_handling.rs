@@ -73,7 +73,11 @@ fn test_get_nonexistent_file() {
 
     let result = execute_get(&search, input);
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_lowercase().contains("read"));
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .to_lowercase()
+        .contains("read"));
 }
 
 #[test]
@@ -390,10 +394,9 @@ fn test_score_saturation_bounds() {
     assert_eq!(Score::new(-0.5).as_f64(), 0.0);
     assert_eq!(Score::new(-100.0).as_f64(), 0.0);
 
-    // NaN behavior (clamp handles it)
+    // NaN is treated as zero (defensive hardening in Score::new)
     let nan_score = Score::new(f64::NAN);
-    // clamp with NaN returns NaN, but we should verify it doesn't panic
-    assert!(nan_score.as_f64().is_nan() || nan_score.as_f64() >= 0.0);
+    assert_eq!(nan_score.as_f64(), 0.0);
 }
 
 #[test]

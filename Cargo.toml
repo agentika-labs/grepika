@@ -15,10 +15,10 @@ categories = ["command-line-utilities", "development-tools", "text-processing"]
 
 [dependencies]
 # MCP Server
-rmcp = { version = "0.1", features = ["server", "transport-io"] }
+rmcp = { version = "0.15", features = ["server", "transport-io"] }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 # Grep internals (ripgrep core)
 grep-regex = "0.1"
@@ -51,7 +51,7 @@ dunce = "1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-schemars = { version = "0.8", features = ["derive"] }
+schemars = { version = "1", features = ["derive"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }

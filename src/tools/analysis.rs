@@ -50,19 +50,16 @@ pub struct IndexSize {
 ///
 /// # Errors
 ///
-/// Returns an error string if statistics retrieval fails.
+/// Returns a `ServerError` if statistics retrieval fails.
 pub fn execute_stats(
     service: &Arc<SearchService>,
     indexer: &Indexer,
     input: StatsInput,
-) -> Result<StatsOutput, String> {
-    let stats = indexer.stats().map_err(|e| e.to_string())?;
+) -> crate::error::Result<StatsOutput> {
+    let stats = indexer.stats()?;
 
     let by_type = if input.detailed {
-        let indexed_files = service
-            .db()
-            .get_indexed_files()
-            .map_err(|e| e.to_string())?;
+        let indexed_files = service.db().get_indexed_files()?;
         let mut counts: HashMap<String, u64> = HashMap::new();
 
         for (path, _) in indexed_files {
@@ -134,22 +131,16 @@ pub struct RelatedFile {
 ///
 /// # Errors
 ///
-/// Returns an error string if:
-/// - Path traversal is detected
-/// - File is sensitive
-/// - Source file cannot be read
-/// - Search fails
+/// Returns a `ServerError` if path traversal is detected, file is sensitive, source file cannot be read, or search fails.
 pub fn execute_related(
     service: &Arc<SearchService>,
     input: RelatedInput,
-) -> Result<RelatedOutput, String> {
+) -> crate::error::Result<RelatedOutput> {
     // Security: validate path and check for sensitive files
-    let full_path =
-        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
+    let full_path = security::validate_read_access(service.root(), &input.path)?;
 
     // Read source file
-    let content =
-        fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;
+    let content = fs::read_to_string(&full_path)?;
 
     // Extract keywords/identifiers from source
     let keywords = extract_keywords(&content);
@@ -157,21 +148,31 @@ pub fn execute_related(
     // Search for each keyword and aggregate results
     let mut file_scores: HashMap<String, (f64, Vec<String>)> = HashMap::new();
 
+    let mut search_errors = 0usize;
     for keyword in keywords.iter().take(10) {
-        if let Ok(results) = service.search(keyword, 20) {
-            for result in results {
-                let path_str = result.path.to_string_lossy().to_string();
-                if path_str == input.path {
-                    continue; // Skip source file
-                }
+        match service.search(keyword, 20) {
+            Ok(results) => {
+                for result in results {
+                    let path_str = result.path.to_string_lossy().to_string();
+                    if path_str == input.path {
+                        continue; // Skip source file
+                    }
 
-                let entry = file_scores.entry(path_str).or_insert_with(|| (0.0, vec![]));
-                entry.0 += result.score.as_f64();
-                if !entry.1.contains(keyword) {
-                    entry.1.push(keyword.clone());
+                    let entry = file_scores.entry(path_str).or_insert_with(|| (0.0, vec![]));
+                    entry.0 += result.score.as_f64();
+                    if !entry.1.contains(keyword) {
+                        entry.1.push(keyword.clone());
+                    }
                 }
             }
+            Err(e) => {
+                tracing::debug!(keyword = %keyword, error = %e, "related: keyword search failed");
+                search_errors += 1;
+            }
         }
+    }
+    if search_errors > 0 {
+        tracing::debug!(search_errors, "related: some keyword searches failed");
     }
 
     // Sort by score and convert to output
@@ -255,16 +256,17 @@ pub struct Reference {
 ///
 /// # Errors
 ///
-/// Returns an error string if the grep search fails.
-pub fn execute_refs(service: &Arc<SearchService>, input: RefsInput) -> Result<RefsOutput, String> {
+/// Returns a `ServerError` if the grep search fails.
+pub fn execute_refs(
+    service: &Arc<SearchService>,
+    input: RefsInput,
+) -> crate::error::Result<RefsOutput> {
     // Use grep to find exact symbol matches, keeping raw GrepMatch data
     // to avoid re-reading files (the old approach doubled I/O).
-    let matches_by_file = service
-        .search_grep_with_matches(
-            &format!(r"\b{}\b", regex::escape(&input.symbol)),
-            input.limit * 2,
-        )
-        .map_err(|e| e.to_string())?;
+    let matches_by_file = service.search_grep_with_matches(
+        &format!(r"\b{}\b", regex::escape(&input.symbol)),
+        input.limit * 2,
+    )?;
 
     let root = service.root();
     let mut references = Vec::new();

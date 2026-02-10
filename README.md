@@ -4,46 +4,40 @@
 
 # grepika
 
-Token-efficient MCP server for code search. Combines three search backends for high-quality results:
+Token-efficient MCP server for code search.
 
-- **FTS5** - SQLite full-text search with BM25 ranking
-- **Grep** - Parallel regex search using ripgrep internals
-- **Trigram** - Fast substring search via 3-byte sequence indexing
+LLMs burn context tokens on every search call. grepika indexes your codebase and returns ranked, compact results — so the model spends tokens reasoning instead of reading raw grep output. It combines three backends (FTS5, parallel grep, and trigram indexing) and merges their scores for high-quality results.
 
 ## Why grepika?
 
-Every built-in grep call burns **6x more context** than it needs to. grepika breaks even after just **2 searches** — then every query after that is pure savings.
+grep is a great tool, but it wasn't designed for LLM workflows. It returns unranked file lists, and the model has to make multiple calls to piece together context. grepika gives the model structured tools for the things it actually needs to do:
 
-**Not faster grep — a codebase understanding engine.**
-
-| You want to... | Built-in Grep | grepika |
-|----------------|---------------|---------------|
-| Find a pattern | Unranked file list | **Ranked results** with relevance scores |
+| Task | grep approach | grepika |
+|------|---------------|---------|
+| Find a pattern | Unranked file list | Ranked results with relevance scores |
 | Understand a symbol | Multiple grep calls, manual assembly | `refs` classifies definitions, imports, usages |
 | Explore structure | Read entire files | `outline` extracts functions/classes/structs |
 | Find related code | Guess-and-grep loop | `related` finds files sharing symbols |
-| Natural language query | Doesn't work (needs regex) | `search` with intent detection routes to BM25 |
+| Natural language query | Requires regex | `search` routes to BM25 full-text search |
 
-### Performance
+### Benchmarks
 
-Benchmarked on the same codebase, same queries ([criterion](https://github.com/bheisler/criterion.rs)):
+Measured on the same codebase and queries using [Criterion](https://github.com/bheisler/criterion.rs):
 
 | Metric | grepika | Built-in Grep (ripgrep) |
-|--------|--------------|------------------------|
-| Search latency | **2.5 ms** | 5.3 ms |
-| Response size | **364 bytes avg** | 2,693 bytes avg |
-| Relevance ranking | BM25 + trigram IDF | None (unranked) |
-| Break-even | **2 queries** | N/A |
+|--------|---------|-------------------------|
+| Search latency | 2.5 ms | 5.3 ms |
+| Response size | 364 bytes avg | 2,693 bytes avg |
+| Relevance ranking | BM25 + trigram IDF | None |
 
-**2x faster search. 6x smaller responses. Ranked results.**
+Responses are ~6x smaller on average, which means the MCP schema overhead (~825 tokens) pays for itself after about 2 queries.
 
-**Technical architecture:**
-- **3 search backends** (FTS5 + grep + trigram) with weighted score merging
-- **BM25 ranking** with tuned column weights — the same algorithm powering Elasticsearch
-- **Query intent detection** — automatically classifies regex vs natural language vs exact symbol
-- **190 tests**, zero clippy warnings, Criterion benchmarks for every claim
+### How it works
 
-**Add to your MCP config. Index once. Search smarter.**
+- Three search backends (FTS5 + grep + trigram) with weighted score merging
+- BM25 ranking with tuned column weights
+- Query intent detection — classifies regex vs natural language vs exact symbol
+- 190 tests, zero clippy warnings, Criterion benchmarks
 
 ## Installation
 
@@ -70,14 +64,14 @@ In global mode, the server starts without `--root`. The LLM reads its working di
 **Claude Code:**
 
 ```bash
-# For all your projects (user-level — recommended)
+# For all your projects (user-level)
 claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
 
 # For this project only (shared with team via .mcp.json)
 claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 ```
 
-Or manually add to `~/.claude.json` (user-level) or `.mcp.json` (project-level):
+**Other editors** — add the following to your MCP config file:
 
 ```json
 {
@@ -90,51 +84,22 @@ Or manually add to `~/.claude.json` (user-level) or `.mcp.json` (project-level):
 }
 ```
 
-**Cursor:**
+| Editor | Config file |
+|--------|-------------|
+| Claude Code | `~/.claude.json` (user) or `.mcp.json` (project) |
+| Cursor | `~/.cursor/mcp.json` or `.cursor/mcp.json` |
+| OpenCode | `opencode.json` (uses `"mcp"` key instead of `"mcpServers"`, and `"command": ["npx", ...]` array syntax) |
 
-Add to `~/.cursor/mcp.json` or project `.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "grepika": {
-      "command": "npx",
-      "args": ["-y", "@agentika/grepika", "--mcp"]
-    }
-  }
-}
-```
-
-**OpenCode:**
-
-Add to `opencode.config.json`:
-
-```json
-{
-  "mcp": {
-    "grepika": {
-      "type": "local",
-      "command": ["npx", "-y", "@agentika/grepika", "--mcp"]
-    }
-  }
-}
-```
-
-### Single Project Mode (Alternative)
+<details>
+<summary>Single Project Mode</summary>
 
 Use `--root` to pre-load a specific workspace at startup. The LLM does not need to call `add_workspace`.
 
-**Claude Code:**
-
 ```bash
-# For all your projects (user-level)
 claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp --root /path/to/project
-
-# For this project only (shared with team)
-claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp --root /path/to/project
 ```
 
-Or manually add to `~/.claude.json` (user-level) or `.mcp.json` (project-level):
+Or in your editor's MCP config:
 
 ```json
 {
@@ -147,31 +112,7 @@ Or manually add to `~/.claude.json` (user-level) or `.mcp.json` (project-level):
 }
 ```
 
-**Cursor:**
-
-```json
-{
-  "mcpServers": {
-    "grepika": {
-      "command": "npx",
-      "args": ["-y", "@agentika/grepika", "--mcp", "--root", "/path/to/project"]
-    }
-  }
-}
-```
-
-**OpenCode:**
-
-```json
-{
-  "mcp": {
-    "grepika": {
-      "type": "local",
-      "command": ["npx", "-y", "@agentika/grepika", "--mcp", "--root", "/path/to/project"]
-    }
-  }
-}
-```
+</details>
 
 > **Tip:** Add `"--db", "/path/to/index.db"` to `args` to control where the index is stored.
 
@@ -179,11 +120,7 @@ Or manually add to `~/.claude.json` (user-level) or `.mcp.json` (project-level):
 
 ### Tool Preference
 
-Claude Code has built-in Grep and Glob tools. To make Claude prefer grepika's superior search capabilities:
-
-**Option A: Advisory Instructions (CLAUDE.md)**
-
-Add to your project's `CLAUDE.md`:
+Claude Code has built-in Grep and Glob tools. To make it prefer grepika, add to your project's `CLAUDE.md`:
 
 ```markdown
 ## Code Search
@@ -199,7 +136,9 @@ Prefer grepika MCP tools over built-in Grep/Glob for code search:
 These provide ranked results with FTS5+trigram indexing for better search quality.
 ```
 
-See [docs/claude-code-setup.md](docs/claude-code-setup.md) for a more detailed version.
+See [docs/claude-code-setup.md](docs/claude-code-setup.md) for the full version with a tool mapping table.
+
+Editor-specific guides: [Claude Code](docs/claude-code-setup.md) · [Cursor](docs/cursor-setup.md) · [OpenCode](docs/opencode-setup.md)
 
 ### Pre-authorizing Permissions
 
@@ -256,7 +195,7 @@ grepika --mcp --root /path/to/project
 
 ## Token Efficiency
 
-grepika's indexed search returns **83.8% fewer tokens** on average compared to Claude's built-in Grep tool (which uses ripgrep). This dramatically reduces context consumption when exploring codebases.
+Indexed search returns significantly fewer tokens than raw grep output. Measured against Claude Code's built-in Grep tool (ripgrep):
 
 ```
 Query      │  grepika │  ripgrep │ Savings
@@ -270,7 +209,7 @@ database   │    242 B │   1048 B │  76.9%
 AVERAGE    │    359 B │   2693 B │  83.8%
 ```
 
-The MCP schema adds ~825 tokens of one-time overhead, which pays for itself after just 2 queries (~584 tokens saved per query).
+The MCP schema adds ~825 tokens of one-time overhead, which pays for itself after about 2 queries (~584 tokens saved per query).
 
 ## Configuration
 

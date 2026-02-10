@@ -69,18 +69,18 @@ pub struct GetOutput {
 ///
 /// # Errors
 ///
-/// Returns an error string if:
-/// - Path traversal is detected
-/// - File is sensitive
-/// - File cannot be read
-pub fn execute_get(service: &Arc<SearchService>, input: GetInput) -> Result<GetOutput, String> {
+/// Returns a `ServerError` if path traversal is detected, file is sensitive, or file cannot be read.
+pub fn execute_get(
+    service: &Arc<SearchService>,
+    input: GetInput,
+) -> crate::error::Result<GetOutput> {
     // Security: validate path and check for sensitive files
-    let full_path =
-        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
+    let full_path = security::validate_read_access(service.root(), &input.path)?;
 
     // Use streaming for large files to avoid loading entire file into memory
     let (content, total_lines, start_line, end_line) =
-        read_line_range(&full_path, input.start_line, input.end_line)?;
+        read_line_range(&full_path, input.start_line, input.end_line)
+            .map_err(crate::error::ServerError::Tool)?;
 
     Ok(GetOutput {
         path: input.path.clone(),
@@ -134,20 +134,15 @@ pub struct Symbol {
 ///
 /// # Errors
 ///
-/// Returns an error string if:
-/// - Path traversal is detected
-/// - File is sensitive
-/// - File cannot be read
+/// Returns a `ServerError` if path traversal is detected, file is sensitive, or file cannot be read.
 pub fn execute_outline(
     service: &Arc<SearchService>,
     input: OutlineInput,
-) -> Result<OutlineOutput, String> {
+) -> crate::error::Result<OutlineOutput> {
     // Security: validate path and check for sensitive files
-    let full_path =
-        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
+    let full_path = security::validate_read_access(service.root(), &input.path)?;
 
-    let content =
-        fs::read_to_string(&full_path).map_err(|e| format!("Failed to read file: {e}"))?;
+    let content = fs::read_to_string(&full_path)?;
 
     let file_type = detect_file_type(&full_path);
     let symbols = extract_symbols(&content, &file_type);
@@ -197,13 +192,13 @@ pub struct TocOutput {
 ///
 /// # Errors
 ///
-/// Returns an error string if:
-/// - Path traversal is detected
-/// - Directory cannot be read
-pub fn execute_toc(service: &Arc<SearchService>, input: TocInput) -> Result<TocOutput, String> {
+/// Returns a `ServerError` if path traversal is detected or directory cannot be read.
+pub fn execute_toc(
+    service: &Arc<SearchService>,
+    input: TocInput,
+) -> crate::error::Result<TocOutput> {
     // Security: validate path (toc reads directories, so we use validate_path not validate_read_access)
-    let full_path =
-        security::validate_path(service.root(), &input.path).map_err(|e| e.to_string())?;
+    let full_path = security::validate_path(service.root(), &input.path)?;
 
     let mut tree = String::with_capacity(4096); // Pre-allocate, ~40 bytes per entry
     let mut total_files = 0;
@@ -216,7 +211,8 @@ pub fn execute_toc(service: &Arc<SearchService>, input: TocInput) -> Result<TocO
         &mut tree,
         &mut total_files,
         &mut total_dirs,
-    )?;
+    )
+    .map_err(crate::error::ServerError::Tool)?;
 
     Ok(TocOutput {
         tree,
@@ -265,21 +261,18 @@ pub struct ContextOutput {
 ///
 /// # Errors
 ///
-/// Returns an error string if:
-/// - Path traversal is detected
-/// - File is sensitive
-/// - File cannot be read
+/// Returns a `ServerError` if path traversal is detected, file is sensitive, or file cannot be read.
 pub fn execute_context(
     service: &Arc<SearchService>,
     input: ContextInput,
-) -> Result<ContextOutput, String> {
+) -> crate::error::Result<ContextOutput> {
     // Security: validate path and check for sensitive files
-    let full_path =
-        security::validate_read_access(service.root(), &input.path).map_err(|e| e.to_string())?;
+    let full_path = security::validate_read_access(service.root(), &input.path)?;
 
     // Use streaming for large files to avoid loading entire file into memory
     let (lines, _total, start, end) =
-        read_context_streaming(&full_path, input.line, input.context_lines)?;
+        read_context_streaming(&full_path, input.line, input.context_lines)
+            .map_err(crate::error::ServerError::Tool)?;
 
     // Format with line numbers
     let formatted: Vec<String> = lines

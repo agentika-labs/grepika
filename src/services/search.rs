@@ -9,6 +9,7 @@ use crate::services::grep::GrepMatch;
 use crate::services::{FtsService, GrepService, TrigramIndex};
 use crate::types::{FileId, Score};
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -87,7 +88,7 @@ pub struct SearchResult {
 }
 
 /// Tracks which search methods found a result.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct SearchSources {
     pub fts: bool,
     pub grep: bool,
@@ -267,64 +268,72 @@ impl SearchService {
         }
     }
 
-    /// Batch resolves FileIds to paths, cache-first with DB fallback.
-    fn get_paths_cached(&self, file_ids: &[FileId]) -> HashMap<FileId, Arc<str>> {
-        let mut result = HashMap::with_capacity(file_ids.len());
+    /// Cache-first batch resolution with DB fallback.
+    ///
+    /// For each item, probes the cache via `cache_probe`. Misses are collected
+    /// via `to_miss_key` and resolved in one DB call via `db_fallback`.
+    fn resolve_cached<I, K, V, M>(
+        &self,
+        items: &[I],
+        cache_probe: impl Fn(&PathCache, &I) -> Option<(K, V)>,
+        to_miss_key: impl Fn(&I) -> M,
+        db_fallback: impl FnOnce(Vec<M>) -> HashMap<K, V>,
+    ) -> HashMap<K, V>
+    where
+        K: Eq + Hash,
+    {
+        let mut result = HashMap::with_capacity(items.len());
         let mut misses = Vec::new();
 
-        // Read from cache
         if let Ok(cache) = self.path_cache.read() {
-            for &fid in file_ids {
-                if let Some(path) = cache.id_to_path.get(&fid) {
-                    result.insert(fid, Arc::clone(path));
+            for item in items {
+                if let Some((k, v)) = cache_probe(&cache, item) {
+                    result.insert(k, v);
                 } else {
-                    misses.push(fid);
+                    misses.push(to_miss_key(item));
                 }
             }
         } else {
-            // Poisoned lock — fall back to DB for all
-            misses.extend_from_slice(file_ids);
+            misses = items.iter().map(&to_miss_key).collect();
         }
 
-        // DB fallback for cache misses
         if !misses.is_empty() {
-            if let Ok(db_paths) = self.db.get_paths_batch(&misses) {
-                for (fid, path) in db_paths {
-                    result.insert(fid, Arc::from(path));
-                }
-            }
+            result.extend(db_fallback(misses));
         }
 
         result
     }
 
+    /// Batch resolves FileIds to paths, cache-first with DB fallback.
+    fn get_paths_cached(&self, file_ids: &[FileId]) -> HashMap<FileId, Arc<str>> {
+        self.resolve_cached(
+            file_ids,
+            |cache, &fid| cache.id_to_path.get(&fid).map(|p| (fid, Arc::clone(p))),
+            |&fid| fid,
+            |misses| {
+                self.db
+                    .get_paths_batch(&misses)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(fid, path)| (fid, Arc::from(path)))
+                    .collect()
+            },
+        )
+    }
+
     /// Batch resolves paths to FileIds, cache-first with DB fallback.
     fn get_file_ids_cached(&self, paths: &[String]) -> HashMap<String, FileId> {
-        let mut result = HashMap::with_capacity(paths.len());
-        let mut misses = Vec::new();
-
-        // Read from cache
-        if let Ok(cache) = self.path_cache.read() {
-            for path in paths {
-                if let Some(&fid) = cache.path_to_id.get(path.as_str()) {
-                    result.insert(path.clone(), fid);
-                } else {
-                    misses.push(path.clone());
-                }
-            }
-        } else {
-            // Poisoned lock — fall back to DB for all
-            misses = paths.to_vec();
-        }
-
-        // DB fallback for cache misses
-        if !misses.is_empty() {
-            if let Ok(db_ids) = self.db.get_file_ids_batch(&misses) {
-                result.extend(db_ids);
-            }
-        }
-
-        result
+        self.resolve_cached(
+            paths,
+            |cache, path| {
+                cache
+                    .path_to_id
+                    .get(path.as_str())
+                    .map(|&fid| (path.clone(), fid))
+            },
+            |path| path.clone(),
+            |misses| self.db.get_file_ids_batch(&misses).unwrap_or_default(),
+        )
     }
 
     /// Performs a combined search using all available methods.
@@ -684,7 +693,7 @@ impl SearchService {
                     file_id,
                     path: PathBuf::from(&**path),
                     score,
-                    sources: sources.clone(),
+                    sources,
                     snippets: Vec::new(),
                 });
             }
@@ -771,6 +780,77 @@ mod tests {
         let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap();
         (dir, db, service)
     }
+
+    // ========================================================================
+    // classify_query unit tests
+    // ========================================================================
+
+    #[test]
+    fn test_classify_empty_string() {
+        assert_eq!(classify_query(""), QueryIntent::ShortToken);
+    }
+
+    #[test]
+    fn test_classify_whitespace_only() {
+        assert_eq!(classify_query("   "), QueryIntent::ShortToken);
+    }
+
+    #[test]
+    fn test_classify_short_token() {
+        assert_eq!(classify_query("fn"), QueryIntent::ShortToken);
+        assert_eq!(classify_query("abc"), QueryIntent::ShortToken);
+    }
+
+    #[test]
+    fn test_classify_exact_symbol() {
+        assert_eq!(classify_query("main"), QueryIntent::ExactSymbol);
+        assert_eq!(classify_query("SearchService"), QueryIntent::ExactSymbol);
+    }
+
+    #[test]
+    fn test_classify_natural_language() {
+        assert_eq!(classify_query("auth flow"), QueryIntent::NaturalLanguage);
+        assert_eq!(
+            classify_query("error handling"),
+            QueryIntent::NaturalLanguage
+        );
+    }
+
+    #[test]
+    fn test_classify_regex_backslash() {
+        assert_eq!(classify_query("fn\\s+\\w+"), QueryIntent::Regex);
+    }
+
+    #[test]
+    fn test_classify_regex_alternation() {
+        assert_eq!(classify_query("(a|b)"), QueryIntent::Regex);
+    }
+
+    #[test]
+    fn test_classify_regex_dot_star() {
+        assert_eq!(classify_query("hello.*world"), QueryIntent::Regex);
+    }
+
+    #[test]
+    fn test_classify_regex_character_class() {
+        assert_eq!(classify_query("[A-Z]"), QueryIntent::Regex);
+    }
+
+    #[test]
+    fn test_classify_regex_quantifier() {
+        assert_eq!(classify_query("a+b"), QueryIntent::Regex);
+        assert_eq!(classify_query("x?y"), QueryIntent::Regex);
+    }
+
+    #[test]
+    fn test_classify_regex_anchors() {
+        assert_eq!(classify_query("^start"), QueryIntent::Regex);
+        assert_eq!(classify_query("end$"), QueryIntent::Regex);
+    }
+
+    // ========================================================================
+    // Integration tests
+    // ========================================================================
 
     #[test]
     fn test_combined_search() {

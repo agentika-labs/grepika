@@ -61,14 +61,18 @@ impl Score {
     pub const MAX: Self = Self(1.0);
 
     /// Creates a new score, saturating to [0.0, 1.0] bounds.
+    /// NaN is treated as zero (defensive hardening).
     #[must_use]
     pub fn new(value: f64) -> Self {
+        if value.is_nan() {
+            return Self(0.0);
+        }
         Self(value.clamp(0.0, 1.0))
     }
 
     /// Creates a score from a value already known to be in bounds.
     ///
-    /// # Safety
+    /// # Correctness
     /// Caller must ensure value is in [0.0, 1.0].
     #[must_use]
     pub const fn new_unchecked(value: f64) -> Self {
@@ -208,6 +212,22 @@ mod tests {
     fn test_trigram_short_string() {
         let trigrams: Vec<_> = Trigram::extract("ab").collect();
         assert!(trigrams.is_empty());
+    }
+
+    #[test]
+    fn test_score_nan_becomes_zero() {
+        let score = Score::new(f64::NAN);
+        assert_eq!(score.as_f64(), 0.0);
+    }
+
+    #[test]
+    fn test_score_infinity_saturates() {
+        assert_eq!(Score::new(f64::INFINITY).as_f64(), 1.0);
+    }
+
+    #[test]
+    fn test_score_neg_infinity_saturates() {
+        assert_eq!(Score::new(f64::NEG_INFINITY).as_f64(), 0.0);
     }
 
     #[test]

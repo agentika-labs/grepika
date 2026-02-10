@@ -8,7 +8,7 @@
 //! This module includes ReDoS protection via pattern validation.
 //! See [`crate::security::validate_regex_pattern`] for details.
 
-use crate::error::SearchError;
+use crate::error::{GrepError, SearchError};
 use crate::security;
 use crate::types::Score;
 use grep_matcher::Matcher;
@@ -251,9 +251,14 @@ impl GrepService {
         // Safe: WalkParallel::run() uses thread::scope internally —
         // all threads are joined before run() returns.
         let mut results = Arc::try_unwrap(results)
-            .expect("all walker threads joined")
+            .map_err(|_| {
+                SearchError::Grep(GrepError::Walk("walker threads still hold Arc".into()))
+            })?
             .into_inner()
-            .expect("mutex not poisoned");
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!("grep results mutex was poisoned, recovering partial results");
+                poisoned.into_inner()
+            });
         results.truncate(max_matches);
         Ok(results)
     }

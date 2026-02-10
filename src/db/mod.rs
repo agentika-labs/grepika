@@ -3,6 +3,7 @@
 mod pragmas;
 mod schema;
 
+pub use pragmas::{apply_indexing_pragmas, restore_normal_pragmas};
 pub use pragmas::{apply_pragmas, apply_pragmas_raw};
 pub use schema::{init_schema, SCHEMA_VERSION};
 
@@ -10,6 +11,9 @@ use crate::error::{DbError, DbResult};
 use crate::types::FileId;
 use r2d2::{Pool, PooledConnection};
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::types::ToSql;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::path::Path;
 
 /// Applies per-connection pragmas on every new pool connection.
@@ -54,6 +58,63 @@ where
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(DbError::Sqlite(e)),
     }
+}
+
+/// Runs a closure inside a `BEGIN IMMEDIATE` / `COMMIT` transaction.
+/// Rolls back on error to release the write lock.
+fn with_transaction<T>(
+    conn: &rusqlite::Connection,
+    f: impl FnOnce() -> DbResult<T>,
+) -> DbResult<T> {
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let result = f();
+    match result {
+        Ok(val) => {
+            conn.execute("COMMIT", [])?;
+            Ok(val)
+        }
+        Err(e) => {
+            if let Err(rollback_err) = conn.execute("ROLLBACK", []) {
+                tracing::error!(error = %rollback_err, "ROLLBACK failed after transaction error");
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Executes a `WHERE IN (?)` batch query and collects results into a HashMap.
+///
+/// Builds positional placeholders, boxes parameters, and maps rows via
+/// the provided closure. Used by `get_paths_batch` and `get_file_ids_batch`.
+fn query_batch_map<P, K, V>(
+    conn: &rusqlite::Connection,
+    sql_template: &str,
+    params: &[P],
+    map_row: fn(&rusqlite::Row) -> rusqlite::Result<(K, V)>,
+) -> DbResult<HashMap<K, V>>
+where
+    P: ToSql + Clone + 'static,
+    K: Eq + Hash,
+{
+    if params.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let placeholders: Vec<String> = (1..=params.len()).map(|i| format!("?{i}")).collect();
+    let sql = sql_template.replace("{}", &placeholders.join(","));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let boxed: Vec<Box<dyn ToSql>> = params
+        .iter()
+        .map(|p| Box::new(p.clone()) as Box<dyn ToSql>)
+        .collect();
+    let refs: Vec<&dyn ToSql> = boxed.iter().map(|p| p.as_ref()).collect();
+
+    let results = stmt
+        .query_map(refs.as_slice(), map_row)?
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
+    Ok(results)
 }
 
 /// Database handle with connection pooling.
@@ -121,6 +182,38 @@ impl Database {
         self.pool.get().map_err(DbError::from)
     }
 
+    /// Gets a connection configured for bulk indexing.
+    ///
+    /// Applies `synchronous=OFF`, deferred WAL checkpointing, and
+    /// disabled FTS5 automerge for maximum write throughput.
+    /// The caller must call `exit_indexing_mode()` on the same connection
+    /// after indexing to restore normal settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DbError::Pool` if no connection is available.
+    /// Returns `DbError::Sqlite` if pragma application fails.
+    pub fn enter_indexing_mode(&self) -> DbResult<PooledConnection<SqliteConnectionManager>> {
+        let conn = self.conn()?;
+        apply_indexing_pragmas(&conn).map_err(DbError::Sqlite)?;
+        Ok(conn)
+    }
+
+    /// Restores normal pragmas on a connection after indexing.
+    ///
+    /// Triggers an FTS5 crisis merge and re-enables crash safety.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DbError::Sqlite` if pragma restoration fails.
+    pub fn exit_indexing_mode(
+        &self,
+        conn: &PooledConnection<SqliteConnectionManager>,
+    ) -> DbResult<()> {
+        restore_normal_pragmas(conn).map_err(DbError::Sqlite)?;
+        Ok(())
+    }
+
     /// Performs FTS5 full-text search with BM25 ranking.
     ///
     /// # Errors
@@ -151,6 +244,9 @@ impl Database {
 
     /// Upserts a file into the database.
     ///
+    /// Uses `RETURNING file_id` to get the ID in a single statement,
+    /// avoiding a separate SELECT after each upsert.
+    ///
     /// # Errors
     ///
     /// Returns `DbError::Pool` if no connection is available.
@@ -165,7 +261,7 @@ impl Database {
         // Store hash as i64 since SQLite INTEGER is signed
         let hash_i64 = hash as i64;
 
-        conn.execute(
+        let file_id: u32 = conn.query_row(
             r#"
             INSERT INTO files (path, filename, content, hash, indexed_at)
             VALUES (?1, ?2, ?3, ?4, datetime('now'))
@@ -173,13 +269,9 @@ impl Database {
                 content = excluded.content,
                 hash = excluded.hash,
                 indexed_at = excluded.indexed_at
+            RETURNING file_id
             "#,
             rusqlite::params![path, filename, content, hash_i64],
-        )?;
-
-        let file_id: u32 = conn.query_row(
-            "SELECT file_id FROM files WHERE path = ?1",
-            rusqlite::params![path],
             |row| row.get(0),
         )?;
 
@@ -273,40 +365,88 @@ impl Database {
         Ok(results)
     }
 
-    /// Saves all trigrams to the database.
+    /// Saves all trigrams to the database (full replacement).
     ///
     /// This replaces the entire trigrams table with the new data.
-    /// It's designed for use after indexing completes.
+    /// Used for `force=true` reindexing where the full index is rebuilt.
     ///
     /// # Errors
     ///
     /// Returns `DbError::Pool` if no connection is available.
     /// Returns `DbError::Sqlite` if any insert fails.
     pub fn save_trigrams(&self, entries: &[(Vec<u8>, Vec<u8>)]) -> DbResult<()> {
+        let conn = self.conn()?;
+        Self::save_trigrams_on(&conn, entries)
+    }
+
+    /// Saves all trigrams using a caller-provided connection.
+    pub fn save_trigrams_on(
+        conn: &rusqlite::Connection,
+        entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> DbResult<()> {
         if entries.is_empty() {
             return Ok(());
         }
 
-        let conn = self.conn()?;
-
-        // Use a transaction for efficiency
-        conn.execute("BEGIN IMMEDIATE", [])?;
-
-        // Clear existing trigrams
-        conn.execute("DELETE FROM trigrams", [])?;
-
-        // Insert all new trigrams
-        {
+        with_transaction(conn, || {
+            conn.execute("DELETE FROM trigrams", [])?;
             let mut stmt =
                 conn.prepare_cached("INSERT INTO trigrams (trigram, file_ids) VALUES (?1, ?2)")?;
-
             for (trigram, file_ids) in entries {
                 stmt.execute(rusqlite::params![trigram, file_ids])?;
             }
+            Ok(())
+        })
+    }
+
+    /// Saves only dirty (modified) trigrams to the database.
+    ///
+    /// Uses `INSERT OR REPLACE` for changed trigrams and `DELETE` for
+    /// trigrams whose bitmaps are now empty. Much faster than full
+    /// `save_trigrams()` for incremental indexing.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DbError::Pool` if no connection is available.
+    /// Returns `DbError::Sqlite` if any operation fails.
+    pub fn save_dirty_trigrams(
+        &self,
+        upserts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> DbResult<()> {
+        let conn = self.conn()?;
+        Self::save_dirty_trigrams_on(&conn, upserts, deletes)
+    }
+
+    /// Saves dirty trigrams using a caller-provided connection.
+    pub fn save_dirty_trigrams_on(
+        conn: &rusqlite::Connection,
+        upserts: &[(Vec<u8>, Vec<u8>)],
+        deletes: &[Vec<u8>],
+    ) -> DbResult<()> {
+        if upserts.is_empty() && deletes.is_empty() {
+            return Ok(());
         }
 
-        conn.execute("COMMIT", [])?;
-        Ok(())
+        with_transaction(conn, || {
+            if !upserts.is_empty() {
+                let mut upsert_stmt = conn.prepare_cached(
+                    "INSERT OR REPLACE INTO trigrams (trigram, file_ids) VALUES (?1, ?2)",
+                )?;
+                for (trigram, file_ids) in upserts {
+                    upsert_stmt.execute(rusqlite::params![trigram, file_ids])?;
+                }
+            }
+
+            if !deletes.is_empty() {
+                let mut delete_stmt =
+                    conn.prepare_cached("DELETE FROM trigrams WHERE trigram = ?1")?;
+                for trigram in deletes {
+                    delete_stmt.execute(rusqlite::params![trigram])?;
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Gets the count of trigrams in the database.
@@ -368,17 +508,8 @@ impl Database {
     ///
     /// Returns `DbError::Pool` if no connection is available.
     /// Returns `DbError::Sqlite` if the query fails.
-    pub fn get_all_hashes(&self) -> DbResult<std::collections::HashMap<String, u64>> {
-        let conn = self.conn()?;
-        let mut stmt = conn.prepare_cached("SELECT path, hash FROM files")?;
-        let results = stmt
-            .query_map([], |row| {
-                let path: String = row.get(0)?;
-                let hash: i64 = row.get(1)?;
-                Ok((path, hash as u64))
-            })?
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
-        Ok(results)
+    pub fn get_all_hashes(&self) -> DbResult<HashMap<String, u64>> {
+        self.get_indexed_files().map(|v| v.into_iter().collect())
     }
 
     /// Batch upserts multiple files in a single transaction.
@@ -398,19 +529,29 @@ impl Database {
     /// Returns `DbError::Pool` if no connection is available.
     /// Returns `DbError::Sqlite` if any insert/update fails.
     pub fn upsert_files_batch(&self, files: &[FileData]) -> DbResult<Vec<FileId>> {
+        let conn = self.conn()?;
+        Self::upsert_files_batch_on(&conn, files)
+    }
+
+    /// Batch upserts using a caller-provided connection.
+    ///
+    /// Use this when you need pragma control over the connection
+    /// (e.g., indexing mode with `synchronous=OFF`).
+    pub fn upsert_files_batch_on(
+        conn: &rusqlite::Connection,
+        files: &[FileData],
+    ) -> DbResult<Vec<FileId>> {
         if files.is_empty() {
             return Ok(Vec::new());
         }
 
-        let conn = self.conn()?;
-        let mut file_ids = Vec::with_capacity(files.len());
+        with_transaction(conn, || {
+            let mut file_ids = Vec::with_capacity(files.len());
 
-        // Use IMMEDIATE transaction to avoid SQLITE_BUSY on concurrent access
-        conn.execute("BEGIN IMMEDIATE", [])?;
-
-        // Scope the borrows so we can execute COMMIT after
-        {
-            let mut insert_stmt = conn.prepare_cached(
+            // RETURNING file_id eliminates a separate SELECT per row.
+            // last_insert_rowid() is unreliable with ON CONFLICT DO UPDATE,
+            // but RETURNING works for both INSERT and UPDATE paths.
+            let mut stmt = conn.prepare_cached(
                 r#"
                 INSERT INTO files (path, filename, content, hash, indexed_at)
                 VALUES (?1, ?2, ?3, ?4, datetime('now'))
@@ -418,10 +559,9 @@ impl Database {
                     content = excluded.content,
                     hash = excluded.hash,
                     indexed_at = excluded.indexed_at
+                RETURNING file_id
                 "#,
             )?;
-            let mut select_stmt =
-                conn.prepare_cached("SELECT file_id FROM files WHERE path = ?1")?;
 
             for data in files {
                 let filename = Path::new(&data.path)
@@ -429,26 +569,17 @@ impl Database {
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
 
-                // Store hash as i64 (SQLite INTEGER is signed)
                 let hash_i64 = data.hash as i64;
 
-                insert_stmt.execute(rusqlite::params![
-                    &data.path,
-                    filename,
-                    &data.content,
-                    hash_i64
-                ])?;
-
-                // Note: last_insert_rowid() doesn't work reliably with ON CONFLICT DO UPDATE
-                // so we need to query the file_id explicitly
-                let file_id: u32 =
-                    select_stmt.query_row(rusqlite::params![&data.path], |row| row.get(0))?;
+                let file_id: u32 = stmt.query_row(
+                    rusqlite::params![&data.path, filename, &data.content, hash_i64],
+                    |row| row.get(0),
+                )?;
                 file_ids.push(FileId::new(file_id));
             }
-        }
 
-        conn.execute("COMMIT", [])?;
-        Ok(file_ids)
+            Ok(file_ids)
+        })
     }
 
     /// Gets file path by ID (without loading content).
@@ -475,8 +606,13 @@ impl Database {
     /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file_id(&self, path: &str) -> DbResult<Option<FileId>> {
         let conn = self.conn()?;
+        Self::get_file_id_on(&conn, path)
+    }
+
+    /// Gets file ID using a caller-provided connection.
+    pub fn get_file_id_on(conn: &rusqlite::Connection, path: &str) -> DbResult<Option<FileId>> {
         query_row_optional(
-            &conn,
+            conn,
             "SELECT file_id FROM files WHERE path = ?1",
             rusqlite::params![path],
             |row| Ok(FileId::new(row.get::<_, u32>(0)?)),
@@ -492,38 +628,15 @@ impl Database {
     ///
     /// Returns `DbError::Pool` if no connection is available.
     /// Returns `DbError::Sqlite` if the query fails.
-    pub fn get_paths_batch(
-        &self,
-        file_ids: &[FileId],
-    ) -> DbResult<std::collections::HashMap<FileId, String>> {
-        if file_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-
+    pub fn get_paths_batch(&self, file_ids: &[FileId]) -> DbResult<HashMap<FileId, String>> {
         let conn = self.conn()?;
-
-        // Build WHERE IN clause with positional params
-        let placeholders: Vec<String> = (1..=file_ids.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
+        let ids: Vec<u32> = file_ids.iter().map(|id| id.as_u32()).collect();
+        query_batch_map(
+            &conn,
             "SELECT file_id, path FROM files WHERE file_id IN ({})",
-            placeholders.join(",")
-        );
-
-        let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<Box<dyn rusqlite::types::ToSql>> = file_ids
-            .iter()
-            .map(|id| Box::new(id.as_u32()) as Box<dyn rusqlite::types::ToSql>)
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-
-        let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                Ok((FileId::new(row.get::<_, u32>(0)?), row.get::<_, String>(1)?))
-            })?
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
-
-        Ok(results)
+            &ids,
+            |row| Ok((FileId::new(row.get::<_, u32>(0)?), row.get::<_, String>(1)?)),
+        )
     }
 
     /// Batch gets file IDs by paths (without loading content).
@@ -535,38 +648,14 @@ impl Database {
     ///
     /// Returns `DbError::Pool` if no connection is available.
     /// Returns `DbError::Sqlite` if the query fails.
-    pub fn get_file_ids_batch(
-        &self,
-        paths: &[String],
-    ) -> DbResult<std::collections::HashMap<String, FileId>> {
-        if paths.is_empty() {
-            return Ok(std::collections::HashMap::new());
-        }
-
+    pub fn get_file_ids_batch(&self, paths: &[String]) -> DbResult<HashMap<String, FileId>> {
         let conn = self.conn()?;
-
-        // Build WHERE IN clause with positional params
-        let placeholders: Vec<String> = (1..=paths.len()).map(|i| format!("?{i}")).collect();
-        let sql = format!(
+        query_batch_map(
+            &conn,
             "SELECT path, file_id FROM files WHERE path IN ({})",
-            placeholders.join(",")
-        );
-
-        let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<Box<dyn rusqlite::types::ToSql>> = paths
-            .iter()
-            .map(|p| Box::new(p.clone()) as Box<dyn rusqlite::types::ToSql>)
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-
-        let results = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, FileId::new(row.get::<_, u32>(1)?)))
-            })?
-            .collect::<Result<std::collections::HashMap<_, _>, _>>()?;
-
-        Ok(results)
+            paths,
+            |row| Ok((row.get::<_, String>(0)?, FileId::new(row.get::<_, u32>(1)?))),
+        )
     }
 
     /// Gets total file count.
@@ -589,6 +678,11 @@ impl Database {
     /// Returns `DbError::Sqlite` if the delete operation fails.
     pub fn delete_file(&self, path: &str) -> DbResult<bool> {
         let conn = self.conn()?;
+        Self::delete_file_on(&conn, path)
+    }
+
+    /// Deletes a file using a caller-provided connection.
+    pub fn delete_file_on(conn: &rusqlite::Connection, path: &str) -> DbResult<bool> {
         let rows = conn.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path])?;
         Ok(rows > 0)
     }

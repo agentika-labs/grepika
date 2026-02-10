@@ -360,7 +360,7 @@ fn test_get_tool_nonexistent_file() {
 
     assert!(result.is_err(), "Should return error for nonexistent file");
     assert!(
-        result.unwrap_err().contains("Failed to read"),
+        result.unwrap_err().to_string().contains("Failed to read"),
         "Error should mention reading failure"
     );
 }

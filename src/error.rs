@@ -34,16 +34,16 @@ pub enum ServerError {
 /// Database-specific errors.
 #[derive(Error, Debug)]
 pub enum DbError {
-    #[error("SQLite error: {0}")]
+    #[error("SQLite error: {0}. Try running 'index' with force=true to rebuild.")]
     Sqlite(#[from] rusqlite::Error),
 
-    #[error("Connection pool error: {0}")]
+    #[error("Connection pool error: {0}. Try again in a moment, or restart the server.")]
     Pool(#[from] r2d2::Error),
 
     #[error("Schema migration failed: {0}")]
     Migration(String),
 
-    #[error("File not found in database: {path}")]
+    #[error("File not found in database: {path}. Run 'index' to add new files, or check the path is relative to workspace root.")]
     FileNotFound { path: PathBuf },
 
     #[error("Database is locked. Another process may be indexing. Wait a moment and retry.")]
@@ -122,11 +122,14 @@ pub type SearchResult<T> = std::result::Result<T, SearchError>;
 /// Result type alias for index operations.
 pub type IndexResult<T> = std::result::Result<T, IndexError>;
 
-// Error code implementations for machine-readable error responses
-impl ServerError {
-    /// Returns a machine-readable error code.
-    #[must_use]
-    pub fn code(&self) -> &'static str {
+/// Trait for error types that provide machine-readable codes.
+pub trait ErrorCode {
+    /// Returns a machine-readable error code string.
+    fn code(&self) -> &'static str;
+}
+
+impl ErrorCode for ServerError {
+    fn code(&self) -> &'static str {
         match self {
             Self::Database(e) => e.code(),
             Self::Search(e) => e.code(),
@@ -139,10 +142,8 @@ impl ServerError {
     }
 }
 
-impl DbError {
-    /// Returns a machine-readable error code.
-    #[must_use]
-    pub fn code(&self) -> &'static str {
+impl ErrorCode for DbError {
+    fn code(&self) -> &'static str {
         match self {
             Self::Sqlite(_) => "SQLITE_ERROR",
             Self::Pool(_) => "POOL_ERROR",
@@ -153,10 +154,8 @@ impl DbError {
     }
 }
 
-impl SearchError {
-    /// Returns a machine-readable error code.
-    #[must_use]
-    pub fn code(&self) -> &'static str {
+impl ErrorCode for SearchError {
+    fn code(&self) -> &'static str {
         match self {
             Self::InvalidPattern(_) => "INVALID_PATTERN",
             Self::Grep(e) => e.code(),
@@ -167,10 +166,8 @@ impl SearchError {
     }
 }
 
-impl GrepError {
-    /// Returns a machine-readable error code.
-    #[must_use]
-    pub fn code(&self) -> &'static str {
+impl ErrorCode for GrepError {
+    fn code(&self) -> &'static str {
         match self {
             Self::RegexBuild(_) => "REGEX_BUILD_ERROR",
             Self::FileRead { .. } => "FILE_READ_ERROR",
@@ -180,10 +177,8 @@ impl GrepError {
     }
 }
 
-impl IndexError {
-    /// Returns a machine-readable error code.
-    #[must_use]
-    pub fn code(&self) -> &'static str {
+impl ErrorCode for IndexError {
+    fn code(&self) -> &'static str {
         match self {
             Self::FileIndex { .. } => "FILE_INDEX_ERROR",
             Self::Hash(_) => "HASH_ERROR",
@@ -194,15 +189,50 @@ impl IndexError {
     }
 }
 
+impl ServerError {
+    /// Returns true if the LLM client can fix this error (bad input, not found, etc.)
+    pub fn is_client_fixable(&self) -> bool {
+        matches!(
+            self,
+            Self::Search(SearchError::InvalidPattern(_))
+                | Self::Search(SearchError::NoResults { .. })
+                | Self::Database(DbError::FileNotFound { .. })
+                | Self::Config(_)
+                | Self::Tool(_)
+        )
+    }
+}
+
 impl From<GrepError> for ServerError {
     fn from(err: GrepError) -> Self {
         Self::Search(SearchError::Grep(err))
     }
 }
 
-// Conversion to rmcp tool errors
-impl From<ServerError> for rmcp::Error {
+impl From<crate::security::SecurityError> for ServerError {
+    fn from(err: crate::security::SecurityError) -> Self {
+        Self::Tool(err.to_string())
+    }
+}
+
+// Conversion to rmcp tool errors.
+// Maps client-fixable errors to invalid_params (-32602) and server faults to internal_error (-32603).
+// The machine-readable code from `.code()` is preserved in `data.code` for MCP clients.
+impl From<ServerError> for rmcp::ErrorData {
     fn from(err: ServerError) -> Self {
-        rmcp::Error::internal_error(err.to_string(), None)
+        let code = err.code();
+        let data = Some(serde_json::json!({ "code": code }));
+        let message = err.to_string();
+
+        match &err {
+            // Client-fixable errors → invalid_params (-32602)
+            ServerError::Search(SearchError::InvalidPattern(_))
+            | ServerError::Search(SearchError::NoResults { .. })
+            | ServerError::Database(DbError::FileNotFound { .. })
+            | ServerError::Config(_)
+            | ServerError::Tool(_) => rmcp::ErrorData::invalid_params(message, data),
+            // Server-side faults → internal_error (-32603)
+            _ => rmcp::ErrorData::internal_error(message, data),
+        }
     }
 }

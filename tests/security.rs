@@ -74,7 +74,7 @@ fn test_get_tool_blocks_path_traversal() {
         },
     );
     assert!(result.is_err(), "Should block ../etc/passwd");
-    let err = result.unwrap_err();
+    let err = result.unwrap_err().to_string();
     assert!(
         err.contains("traversal"),
         "Error should mention traversal, got: {err}"
@@ -205,7 +205,7 @@ fn test_get_tool_blocks_sensitive_files() {
     );
     assert!(result.is_err(), "Should block .env file");
     assert!(
-        result.unwrap_err().contains("sensitive"),
+        result.unwrap_err().to_string().contains("sensitive"),
         "Error should mention sensitive file"
     );
 
@@ -318,7 +318,7 @@ fn test_null_byte_rejected_in_get() {
         },
     );
     assert!(result.is_err(), "Should block null byte in path");
-    let err = result.unwrap_err();
+    let err = result.unwrap_err().to_string();
     assert!(
         err.contains("traversal"),
         "Error should mention traversal, got: {err}"

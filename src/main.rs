@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Initialize profiling (active only when --log-file is provided)
-    grepika::server::init_profiling(cli.log_file.as_deref());
+    grepika::profiling::init(cli.log_file.as_deref());
 
     if cli.mcp {
         // MCP server mode
@@ -152,7 +152,9 @@ async fn run_cli(root: PathBuf, db: Option<PathBuf>, cmd: Commands) -> anyhow::R
 
     // Initialize database - use global cache location by default
     let db_path = db.unwrap_or_else(|| grepika::default_db_path(&root));
-    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let database = Arc::new(Database::open(&db_path)?);
 
     // Load trigram index from database (if previously persisted)
@@ -181,8 +183,8 @@ async fn run_cli(root: PathBuf, db: Option<PathBuf>, cmd: Commands) -> anyhow::R
 
         Commands::Index { force } => {
             let input = grepika::tools::IndexInput { force };
-            let result =
-                grepika::tools::execute_index(&indexer, input).map_err(|e| anyhow::anyhow!(e))?;
+            let result = grepika::tools::execute_index(&indexer, input, None)
+                .map_err(|e| anyhow::anyhow!(e))?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
 

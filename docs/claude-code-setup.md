@@ -12,7 +12,7 @@ claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 
 > **Scope reference:** `-s user` writes to `~/.claude.json` (all projects), `-s project` writes to `.mcp.json` (committed, shared with team), `-s local` (default) writes to `.claude/settings.local.json` (gitignored, personal).
 
-For Cursor and OpenCode setup, see the [README](../README.md#mcp-server-setup).
+For other editors: [Cursor setup](cursor-setup.md) · [OpenCode setup](opencode-setup.md)
 
 ## CLAUDE.md Snippet
 
@@ -22,7 +22,7 @@ Copy this section into your project's `CLAUDE.md` file to instruct Claude Code t
 
 ## Code Search
 
-Use the grepika MCP server for all code search operations instead of built-in Grep/Glob tools:
+Prefer grepika MCP tools over built-in Grep/Glob for code search:
 
 | Task | Use This Tool | Instead Of |
 |------|---------------|------------|
@@ -40,12 +40,11 @@ Use the grepika MCP server for all code search operations instead of built-in Gr
 
 **First time setup:** Run `mcp__grepika__index` to build the search index before using other tools. The index updates incrementally on subsequent runs.
 
-**Global Mode:** When the server is started with `--mcp` (without `--root`), it runs in global mode. The LLM must call `mcp__grepika__add_workspace` with the project root path before using any other tools. The server's `get_info()` response will guide this. This is the recommended setup — the LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
+**Global Mode (recommended):** When the server is started with `--mcp` (without `--root`), it runs in global mode. The LLM must call `mcp__grepika__add_workspace` with the project root path before using any other tools. The server's `get_info()` response will guide this. The LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
 
 **Why prefer grepika:**
-- Combines FTS5 + ripgrep + trigram indexing for superior search quality
-- Returns ranked results with relevance scores
-- More token-efficient than multiple Grep/Glob calls
+- Combines FTS5 + ripgrep + trigram indexing for ranked, relevance-scored results
+- Returns compact responses — about 6x smaller than raw grep output on average
 - Maintains an incremental index for faster subsequent searches
 
 **When to still use Claude Code's built-in tools:**
@@ -103,7 +102,10 @@ To avoid permission prompts for grepika tools:
 }
 ```
 
-**Explicit Tool List** - If you prefer explicit permissions:
+<details>
+<summary>Explicit Tool List</summary>
+
+If you prefer explicit permissions instead of the wildcard:
 
 ```json
 {
@@ -125,5 +127,7 @@ To avoid permission prompts for grepika tools:
   }
 }
 ```
+
+</details>
 
 **Verify** - Run `/permissions` in Claude Code to see active permissions, or `/doctor` to check for issues.
