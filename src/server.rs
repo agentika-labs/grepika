@@ -324,7 +324,7 @@ impl GrepikaServer {
     /// Load a project directory as the active workspace.
     #[tool(description = "Load a project directory as the active workspace for code search.\n\n\
         Call this FIRST with your project's root path before using search tools.\n\
-        The workspace persists for this session. Index data is cached across sessions.\n\n\
+        The workspace persists for this session. Index data is cached across sessions.\n\
         Example: add_workspace(path='/Users/adam/projects/my-app')")]
     async fn add_workspace(
         &self,
@@ -382,9 +382,9 @@ impl GrepikaServer {
                     db_path,
                     file_count,
                     if file_count == 0 {
-                        "\n\nRun 'index' tool to index the codebase."
+                        "\n\nIMPORTANT: Call 'index' next to enable search tools (search, relevant, related).\nFilesystem tools (toc, get, outline, context, diff, refs) are ready now."
                     } else {
-                        ""
+                        "\n\nSearch tools ready. Run 'index' to pick up recent file changes."
                     }
                 );
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
@@ -408,7 +408,7 @@ impl GrepikaServer {
     }
 
     /// Search for code patterns across the codebase.
-    #[tool(description = "Search for code patterns. Supports regex and natural language queries.\n\nExamples: 'fn\\\\s+process_', 'authentication flow', 'SearchService'\nModes: combined (default, best quality), fts (natural language), grep (regex)\n\nTip: Use 'refs' for symbol reference analysis, 'get' to read matched files.\nNote: Run 'index' tool first if this is your first search.")]
+    #[tool(description = "Search for code patterns. Supports regex and natural language queries.\n\nExamples: 'fn\\\\s+process_', 'authentication flow', 'SearchService'\nModes: combined (default, best quality), fts (natural language), grep (regex)\n\nTip: Use 'refs' for symbol reference analysis, 'get' to read matched files.\nRequires index.")]
     async fn search(
         &self,
         #[tool(param)]
@@ -436,7 +436,7 @@ impl GrepikaServer {
 
     /// Find files most relevant to a topic or concept.
     #[tool(
-        description = "Find files most relevant to a topic. Uses combined search for best results.\n\nExamples: 'authentication flow', 'database connection pooling', 'error handling'\n\nTip: Use 'outline' to understand file structure, 'get' to read specific sections."
+        description = "Find files most relevant to a topic. Uses combined search for best results.\n\nExamples: 'authentication flow', 'database connection pooling', 'error handling'\n\nTip: Use 'outline' to understand file structure, 'get' to read specific sections.\nRequires index."
     )]
     async fn relevant(
         &self,
@@ -460,7 +460,7 @@ impl GrepikaServer {
     }
 
     /// Get file content with optional line range.
-    #[tool(description = "Get file content. Supports line range selection.\n\nExamples: path='src/main.rs', start_line=10, end_line=50\n\nTip: Use 'outline' first to find symbol locations, then 'get' to read them.")]
+    #[tool(description = "Get file content. Supports line range selection.\n\nExamples: path='src/main.rs', start_line=10, end_line=50\n\nTip: Use 'outline' first to find symbol locations, then 'get' to read them.\nWorks without index.")]
     async fn get(
         &self,
         #[tool(param)]
@@ -487,7 +487,7 @@ impl GrepikaServer {
     }
 
     /// Get file outline showing functions, classes, and other symbols.
-    #[tool(description = "Extract file structure (functions, classes, structs, etc.)\n\nSupported languages: Rust, Python, JavaScript/TypeScript, Go\n\nTip: Use 'get' or 'context' to read the code at specific symbol locations.")]
+    #[tool(description = "Extract file structure (functions, classes, structs, etc.)\n\nSupported languages: Rust, Python, JavaScript/TypeScript, Go\n\nTip: Use 'get' or 'context' to read the code at specific symbol locations.\nWorks without index.")]
     async fn outline(
         &self,
         #[tool(param)]
@@ -504,7 +504,7 @@ impl GrepikaServer {
     }
 
     /// Get directory table of contents.
-    #[tool(description = "Get directory tree structure.\n\nExamples: path='src', depth=2\n\nTip: Use 'search' or 'relevant' to find specific files by content.")]
+    #[tool(description = "Get directory tree structure.\n\nExamples: path='src', depth=2\n\nTip: Use 'search' or 'relevant' to find specific files by content.\nWorks without index.")]
     async fn toc(
         &self,
         #[tool(param)]
@@ -527,7 +527,7 @@ impl GrepikaServer {
     }
 
     /// Get context around a specific line.
-    #[tool(description = "Get surrounding context for a line.\n\nExamples: path='src/lib.rs', line=42, context_lines=15\n\nTip: Use after 'search' or 'refs' to see code around a match.")]
+    #[tool(description = "Get surrounding context for a line.\n\nExamples: path='src/lib.rs', line=42, context_lines=15\n\nTip: Use after 'search' or 'refs' to see code around a match.\nWorks without index.")]
     async fn context(
         &self,
         #[tool(param)]
@@ -554,7 +554,7 @@ impl GrepikaServer {
     }
 
     /// Get index statistics.
-    #[tool(description = "Get index statistics and file type breakdown.\n\nUse detailed=true for per-filetype counts. Useful for checking index health.")]
+    #[tool(description = "Get index statistics and file type breakdown.\n\nUse detailed=true for per-filetype counts. Useful for checking index health.\nRequires index.")]
     async fn stats(
         &self,
         #[tool(param)]
@@ -574,7 +574,7 @@ impl GrepikaServer {
     }
 
     /// Find files related to a given file.
-    #[tool(description = "Find files related to a source file by shared symbols.\n\nExamples: path='src/auth.rs'\n\nTip: Use 'refs' to trace a specific symbol's usage across files.")]
+    #[tool(description = "Find files related to a source file by shared symbols.\n\nExamples: path='src/auth.rs'\n\nTip: Use 'refs' to trace a specific symbol's usage across files.\nRequires index.")]
     async fn related(
         &self,
         #[tool(param)]
@@ -597,7 +597,7 @@ impl GrepikaServer {
     }
 
     /// Find references to a symbol.
-    #[tool(description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.")]
+    #[tool(description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.\nWorks without index.")]
     async fn refs(
         &self,
         #[tool(param)]
@@ -620,7 +620,7 @@ impl GrepikaServer {
     }
 
     /// Update the search index.
-    #[tool(description = "Update the search index (incremental by default).\n\nUse force=true to rebuild from scratch if results seem stale.\nMust be run before first search. Subsequent runs are incremental and fast.")]
+    #[tool(description = "Update the search index (incremental by default).\n\nUse force=true to rebuild from scratch if results seem stale.\nSubsequent runs are incremental and fast.")]
     async fn index(
         &self,
         #[tool(param)]
@@ -645,7 +645,7 @@ impl GrepikaServer {
     }
 
     /// Compare two files.
-    #[tool(description = "Show differences between two files.\n\nExamples: file1='src/old.rs', file2='src/new.rs', context=5\nReturns unified diff with addition/deletion statistics.")]
+    #[tool(description = "Show differences between two files.\n\nExamples: file1='src/old.rs', file2='src/new.rs', context=5\nReturns unified diff with addition/deletion statistics.\nWorks without index.")]
     async fn diff(
         &self,
         #[tool(param)]
@@ -679,22 +679,23 @@ impl ServerHandler for GrepikaServer {
         let has_workspace = self.workspace.read().unwrap().is_some();
 
         let setup = if has_workspace {
-            "SETUP: Run 'index' tool first (incremental, ~30-60s for typical projects)."
+            "SETUP: Workspace loaded. Run 'index' if you need to pick up file changes."
         } else {
             "SETUP:\n\
              1. Call 'add_workspace' with your project's root path (absolute path)\n\
-             2. Run 'index' (first time only - index data is cached across sessions)\n\
-             3. Use search/relevant/refs to find code"
+             2. Call 'index' to build the search index (cached across sessions)\n\
+             3. Use search/relevant to find code\n\
+             Note: toc/get/outline/context/diff/refs work immediately without indexing"
         };
 
         let instructions = format!(
             "grepika: Token-efficient code search with trigram indexing.\n\n\
              {setup}\n\n\
              WORKFLOW:\n\
-             1. search/relevant -> find files\n\
-             2. outline -> understand structure\n\
-             3. get/context -> read specific sections\n\
-             4. refs -> trace symbol usage\n\n\
+             1. search/relevant -> find files (needs index)\n\
+             2. outline/toc -> understand structure (no index needed)\n\
+             3. get/context -> read specific sections (no index needed)\n\
+             4. refs -> trace symbol usage (no index needed)\n\n\
              TIPS:\n\
              - Use mode=grep for regex, mode=fts for natural language\n\
              - Run 'index' periodically to pick up changes\n\
