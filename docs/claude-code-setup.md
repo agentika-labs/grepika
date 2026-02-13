@@ -131,3 +131,32 @@ If you prefer explicit permissions instead of the wildcard:
 </details>
 
 **Verify** - Run `/permissions` in Claude Code to see active permissions, or `/doctor` to check for issues.
+
+## Claude Code Plugin
+
+The optional [grepika plugin](https://github.com/agentika-labs/agentika-plugin-marketplace/tree/main/plugins/grepika) adds skills, an exploration agent, and a slash command on top of the base MCP tools.
+
+**Add the marketplace:**
+
+```bash
+/plugin marketplace add agentika-labs/agentika-plugin-marketplace
+```
+
+**Install the plugin:**
+
+```bash
+/plugin install grepika@agentika-labs-agentika-plugin-marketplace
+```
+
+### What it adds
+
+| Type | Name | Description |
+|------|------|-------------|
+| Agent | Explorer | Codebase exploration agent that orchestrates grepika's search tools |
+| Skill | `/learn-codebase` | Architecture overview, key modules, and suggested reading order |
+| Skill | `/investigate` | Bug/error investigation — traces call chains and finds error origins |
+| Skill | `/impact` | Change impact analysis — blast radius, test coverage gaps, refactoring steps |
+| Skill | `/index-status` | Index health diagnostics |
+| Command | `/index` | Build or refresh the search index |
+
+The plugin is optional — all MCP tools work standalone without it.

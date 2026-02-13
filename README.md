@@ -140,6 +140,28 @@ See [docs/claude-code-setup.md](docs/claude-code-setup.md) for the full version 
 
 Editor-specific guides: [Claude Code](docs/claude-code-setup.md) · [Cursor](docs/cursor-setup.md) · [OpenCode](docs/opencode-setup.md)
 
+### Claude Code Plugin
+
+The optional [grepika plugin](https://github.com/agentika-labs/agentika-plugin-marketplace/tree/main/plugins/grepika) adds skills, an exploration agent, and a slash command on top of the base MCP tools.
+
+Add the marketplace and install:
+
+```bash
+/plugin marketplace add agentika-labs/agentika-plugin-marketplace
+/plugin install grepika@agentika-labs-agentika-plugin-marketplace
+```
+
+| Type | Name | Description |
+|------|------|-------------|
+| Agent | Explorer | Codebase exploration agent that orchestrates grepika's search tools |
+| Skill | `/learn-codebase` | Architecture overview, key modules, and suggested reading order |
+| Skill | `/investigate` | Bug/error investigation — traces call chains and finds error origins |
+| Skill | `/impact` | Change impact analysis — blast radius, test coverage gaps, refactoring steps |
+| Skill | `/index-status` | Index health diagnostics |
+| Command | `/index` | Build or refresh the search index |
+
+The plugin is optional — all MCP tools work standalone without it.
+
 ### Pre-authorizing Permissions
 
 To avoid permission prompts, add to `.claude/settings.local.json` (project) or `~/.claude/settings.json` (global):
