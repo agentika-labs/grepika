@@ -388,6 +388,7 @@ impl Indexer {
             .git_ignore(true)
             .git_global(true)
             .git_exclude(true)
+            .max_filesize(Some(self.config.max_file_size))
             .build();
 
         for entry in walker.filter_map(Result::ok) {
@@ -423,13 +424,6 @@ impl Indexer {
                     if !filename_matched {
                         continue;
                     }
-                }
-            }
-
-            // Check file size
-            if let Ok(metadata) = fs::metadata(path) {
-                if metadata.len() > self.config.max_file_size {
-                    continue;
                 }
             }
 

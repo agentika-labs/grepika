@@ -368,12 +368,23 @@ fn test_rwlock_poisoning_recovery() {
         index.add_file(FileId::new(1), "test content");
     }
 
-    // Simulate a panic during write (we won't actually panic, but verify recovery works)
-    // The codebase uses unwrap_or_else(|e| e.into_inner()) for poisoning recovery
+    // Poison the lock by panicking while holding a write guard
+    let trigram_clone = Arc::clone(&trigram);
+    let handle = thread::spawn(move || {
+        let _guard = trigram_clone.write().unwrap();
+        panic!("intentional panic to poison the lock");
+    });
+    let _ = handle.join(); // Thread panicked, lock is now poisoned
 
-    // Test that reads still work
-    let result = trigram.read();
-    assert!(result.is_ok() || result.is_err()); // Should not panic either way
+    // Verify the lock is actually poisoned
+    assert!(trigram.read().is_err(), "Lock should be poisoned");
+
+    // Verify recovery via unwrap_or_else(|e| e.into_inner()) — the pattern used in server.rs
+    let index = trigram.read().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        index.trigram_count() > 0,
+        "Data should be intact after poisoning recovery"
+    );
 }
 
 // ============================================================================
@@ -481,11 +492,12 @@ fn test_concurrent_tool_execution() {
                             let _ = execute_search(&search, input);
                         }
                         1 => {
-                            let input = RelevantInput {
-                                topic: "tool".to_string(),
+                            let input = SearchInput {
+                                query: "tool".to_string(),
                                 limit: 5,
+                                mode: SearchMode::Fts,
                             };
-                            let _ = execute_relevant(&search, input);
+                            let _ = execute_search(&search, input);
                         }
                         2 => {
                             let input = TocInput {

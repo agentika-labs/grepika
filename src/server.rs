@@ -1,7 +1,6 @@
 //! MCP server implementation using rmcp.
 
 use crate::db::Database;
-use crate::error::ErrorCode;
 use crate::services::{Indexer, SearchService, TrigramIndex};
 use crate::tools;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -132,22 +131,14 @@ where
 {
     match tokio::task::spawn_blocking(f).await {
         Ok(Ok(output)) => {
-            let value = serde_json::to_value(&output)
+            let json = serde_json::to_string(&output)
                 .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-            Ok(CallToolResult::structured(value))
+            Ok(CallToolResult::success(vec![Content::text(json)]))
         }
         Ok(Err(e)) => {
             if e.is_client_fixable() {
                 // LLM can see the error and adapt (retry with different input)
-                Ok(CallToolResult {
-                    content: vec![Content::text(e.to_string())],
-                    structured_content: Some(serde_json::json!({
-                        "code": e.code(),
-                        "message": e.to_string(),
-                    })),
-                    is_error: Some(true),
-                    meta: None,
-                })
+                Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
             } else {
                 // Server fault → protocol error channel
                 Err(e.into())
@@ -236,14 +227,6 @@ pub struct SearchParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct RelevantParams {
-    /// Topic or concept to search for
-    pub topic: String,
-    /// Maximum files (default: 10)
-    pub limit: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
 pub struct GetParams {
     /// File path relative to root
     pub path: String,
@@ -284,14 +267,6 @@ pub struct StatsParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-pub struct RelatedParams {
-    /// Source file path
-    pub path: String,
-    /// Maximum related files (default: 10)
-    pub limit: Option<usize>,
-}
-
-#[derive(Deserialize, JsonSchema)]
 pub struct RefsParams {
     /// Symbol/identifier to find
     pub symbol: String,
@@ -313,6 +288,8 @@ pub struct DiffParams {
     pub file2: String,
     /// Context lines around changes (default: 3)
     pub context: Option<usize>,
+    /// Maximum output lines before truncation (default: 5000, 0 = unlimited)
+    pub max_lines: Option<usize>,
 }
 
 // ─── MCP Server ──────────────────────────────────────────────────────────────
@@ -353,11 +330,25 @@ impl GrepikaServer {
         }
     }
 
+    /// Returns the tool schemas without requiring an async MCP context.
+    /// Used by benchmarks to measure schema size.
+    pub fn tool_schemas(&self) -> Vec<Tool> {
+        self.tool_router.list_all()
+    }
+
+    /// Acquires a read lock on the workspace, recovering from poisoning.
+    fn workspace_read(&self) -> std::sync::RwLockReadGuard<'_, Option<Arc<Workspace>>> {
+        self.workspace.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Acquires a write lock on the workspace, recovering from poisoning.
+    fn workspace_write(&self) -> std::sync::RwLockWriteGuard<'_, Option<Arc<Workspace>>> {
+        self.workspace.write().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Returns the active workspace, or a tool-level error guiding the LLM.
     fn active(&self) -> Result<Arc<Workspace>, CallToolResult> {
-        self.workspace
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
+        self.workspace_read()
             .clone()
             .ok_or_else(|| CallToolResult::error(vec![Content::text(NO_WORKSPACE_MSG)]))
     }
@@ -405,7 +396,6 @@ impl GrepikaServer {
             };
 
         let db_override = self.db_override.clone();
-        let workspace_lock = Arc::clone(&self.workspace);
 
         // Workspace::new() is blocking (DB open, trigram load) — use spawn_blocking
         let result =
@@ -419,7 +409,7 @@ impl GrepikaServer {
                 let file_count = ws.search.cached_total_files();
 
                 // Store the new workspace
-                *workspace_lock.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(ws));
+                *self.workspace_write() = Some(Arc::new(ws));
 
                 let msg = format!(
                     "Workspace loaded: {}\nDatabase: {}\nCached index: {} files{}",
@@ -427,7 +417,7 @@ impl GrepikaServer {
                     db_path,
                     file_count,
                     if file_count == 0 {
-                        "\n\nIMPORTANT: Call 'index' next to enable search tools (search, relevant, related).\nFilesystem tools (toc, get, outline, context, diff, refs) are ready now."
+                        "\n\nIMPORTANT: Call 'index' next to enable search tools.\nFilesystem tools (toc, get, outline, context, diff, refs) are ready now."
                     } else {
                         "\n\nSearch tools ready. Run 'index' to pick up recent file changes."
                     }
@@ -464,29 +454,6 @@ impl GrepikaServer {
         };
         let search = Arc::clone(&ws.search);
         spawn_tool(move || tools::execute_search(&search, input)).await
-    }
-
-    #[tool(
-        description = "Find files most relevant to a topic. Uses combined search for best results.\n\nExamples: 'authentication flow', 'database connection pooling', 'error handling'\n\nTip: Use 'outline' to understand file structure, 'get' to read specific sections.\nRequires index.",
-        annotations(
-            title = "Find Relevant Files",
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn relevant(
-        &self,
-        Parameters(params): Parameters<RelevantParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ws = require_workspace!(self);
-        let input = tools::RelevantInput {
-            topic: params.topic,
-            limit: params.limit.unwrap_or(10).min(100),
-        };
-        let search = Arc::clone(&ws.search);
-        spawn_tool(move || tools::execute_relevant(&search, input)).await
     }
 
     #[tool(
@@ -604,29 +571,6 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Find files related to a source file by shared symbols.\n\nExamples: path='src/auth.rs'\n\nTip: Use 'refs' to trace a specific symbol's usage across files.\nRequires index.",
-        annotations(
-            title = "Related Files",
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = false
-        )
-    )]
-    async fn related(
-        &self,
-        Parameters(params): Parameters<RelatedParams>,
-    ) -> Result<CallToolResult, rmcp::ErrorData> {
-        let ws = require_workspace!(self);
-        let input = tools::RelatedInput {
-            path: params.path,
-            limit: params.limit.unwrap_or(10),
-        };
-        let search = Arc::clone(&ws.search);
-        spawn_tool(move || tools::execute_related(&search, input)).await
-    }
-
-    #[tool(
         description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.\nWorks without index.",
         annotations(
             title = "Find References",
@@ -720,21 +664,13 @@ impl GrepikaServer {
 
         match result {
             Ok(Ok(output)) => {
-                let value = serde_json::to_value(&output)
+                let json = serde_json::to_string(&output)
                     .map_err(|e| rmcp::ErrorData::internal_error(e.to_string(), None))?;
-                Ok(CallToolResult::structured(value))
+                Ok(CallToolResult::success(vec![Content::text(json)]))
             }
             Ok(Err(e)) => {
                 if e.is_client_fixable() {
-                    Ok(CallToolResult {
-                        content: vec![Content::text(e.to_string())],
-                        structured_content: Some(serde_json::json!({
-                            "code": e.code(),
-                            "message": e.to_string(),
-                        })),
-                        is_error: Some(true),
-                        meta: None,
-                    })
+                    Ok(CallToolResult::error(vec![Content::text(e.to_string())]))
                 } else {
                     Err(e.into())
                 }
@@ -762,6 +698,7 @@ impl GrepikaServer {
             file1: params.file1,
             file2: params.file2,
             context: params.context.unwrap_or(3),
+            max_lines: params.max_lines.unwrap_or(5000),
         };
         let search = Arc::clone(&ws.search);
         spawn_tool(move || tools::execute_diff(&search, input)).await
@@ -772,11 +709,7 @@ impl GrepikaServer {
 // Manual impl (no #[tool_handler]) so we can override call_tool with profiling middleware.
 impl ServerHandler for GrepikaServer {
     fn get_info(&self) -> ServerInfo {
-        let has_workspace = self
-            .workspace
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
+        let has_workspace = self.workspace_read().is_some();
 
         let setup = if has_workspace {
             "SETUP: Workspace loaded. Run 'index' if you need to pick up file changes."
@@ -784,7 +717,7 @@ impl ServerHandler for GrepikaServer {
             "SETUP:\n\
              1. Call 'add_workspace' with your project's root path (absolute path)\n\
              2. Call 'index' to build the search index (cached across sessions)\n\
-             3. Use search/relevant to find code\n\
+             3. Use search to find code\n\
              Note: toc/get/outline/context/diff/refs work immediately without indexing"
         };
 
@@ -792,7 +725,7 @@ impl ServerHandler for GrepikaServer {
             "grepika: Token-efficient code search with trigram indexing.\n\n\
              {setup}\n\n\
              WORKFLOW:\n\
-             1. search/relevant -> find files (needs index)\n\
+             1. search -> find files (needs index)\n\
              2. outline/toc -> understand structure (no index needed)\n\
              3. get/context -> read specific sections (no index needed)\n\
              4. refs -> trace symbol usage (no index needed)\n\n\

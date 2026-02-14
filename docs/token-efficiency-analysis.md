@@ -1,101 +1,132 @@
-# Token Efficiency Analysis: grepika vs Traditional Search
+# grepika vs Built-in Search
 
-This document analyzes the token efficiency gains when using grepika compared to traditional grep-based code search in LLM-assisted development workflows.
+## Search Quality
 
-## Summary
+grep is a pattern matcher. grepika is a code search engine. The difference shows up
+when the LLM needs to understand code, not just find strings.
 
-**83.8% token reduction** compared to traditional search approaches.
+### What grepika can do that Grep can't
 
-| Metric | Traditional Search | grepika | Improvement |
-|--------|-------------------|---------------|-------------|
-| Average tokens/query | 12,847 | 2,082 | 83.8% reduction |
-| Context efficiency | ~1x | ~5x | 5x more exploration per context window |
+| Task | Grep | grepika |
+|------|------|---------|
+| Natural language query | Needs regex | FTS5 routes "authentication flow" to concept search |
+| Ranked results | Flat file list | BM25 + trigram scoring, best matches first |
+| Reference classification | Finds the string | `refs` tells you: definition, import, usage, type_usage |
+| File structure | Read the whole file | `outline` extracts functions/classes/structs |
+| Related code | Guess and grep again | `refs` classifies definitions, imports, usages |
 
-## Why the Difference Exists
+### Where Grep is better
 
-### Traditional Search Returns Raw Text with Context
-When using grep or ripgrep directly, results include:
-- Full file paths repeated for each match
-- Surrounding context lines (often 3-5 lines before/after)
-- Redundant matches across similar files
-- No deduplication of common patterns
+- Exact regex patterns — Grep is precise and has no indexing step
+- Known file paths — Read is direct, no MCP wrapper needed
+- Simple file discovery — Glob with patterns like `**/*.rs`
 
-### grepika Returns Indexed Metadata
-The MCP server approach provides:
-- **Pre-ranked results** - BM25 scoring eliminates irrelevant matches before they reach the LLM
-- **Deduplicated content** - Trigram indexing identifies and merges similar results
-- **Structured output** - JSON with file IDs, line numbers, and relevance scores
-- **On-demand expansion** - Only fetch full content when needed via `get` tool
+### Persistent index
 
-## Organizational Cost Savings
+Grep scans the filesystem on every call. grepika indexes once and persists the db
+across sessions at `~/.cache/grepika/<hash>.db`.
 
-Based on typical Claude API pricing ($3/MTok input, $15/MTok output) and observed query patterns:
+- First session: `add_workspace` + `index` (full index, one-time)
+- Subsequent sessions: `index` verifies xxHash digests, skips unchanged files (~50 tokens, milliseconds)
+- Search hits SQLite FTS5 + in-memory trigrams — sub-5ms even on large codebases
+- Incremental: only changed files get re-read and re-indexed
 
-### Conservative (10 engineers, light usage)
-- Queries per engineer per day: 20
-- Token savings per query: 10,765
-- **Annual savings: ~$420**
+## Token Efficiency
 
-### Typical (50 engineers, moderate usage)
-- Queries per engineer per day: 30
-- Token savings per query: 10,765
-- **Annual savings: ~$10,500**
+### How the index reduces tokens
 
-### Heavy (200 engineers, intensive usage)
-- Queries per engineer per day: 40
-- Token savings per query: 10,765
-- **Annual savings: ~$168,000**
+ripgrep scans the filesystem and returns all matches — it can't rank because
+it has no term frequencies or document statistics. grepika's index stores
+pre-computed BM25 scores, trigram counts, and file metadata, enabling it to
+return only the top-N most relevant results instead of everything.
 
-## Beyond Direct Cost Savings
+The savings come from this mechanism: "return top-20 ranked results"
+vs "return all matching lines."
 
-### Context Window Efficiency
-With 83.8% fewer tokens per search operation, developers can:
-- Perform **5x more searches** within the same context window
-- Maintain longer conversation history for complex debugging sessions
-- Include more reference code when asking architectural questions
+### What we measured
 
-### Response Quality Improvements
-Pre-filtered, ranked results mean:
-- LLMs spend fewer tokens processing irrelevant matches
-- Higher signal-to-noise ratio in search results
-- More accurate code navigation suggestions
+We ran queries through ripgrep (Claude Code's Grep backend) and grepika `search`
+on the grepika codebase (~25 Rust files). The benchmark suite
+(`benches/token_efficiency.rs`) covers 9 queries across all 4 `QueryIntent`
+categories: exact symbols, short tokens, natural language, and regex.
 
-### Session Productivity Gains
-Typical code exploration session comparison:
+#### Query: "SearchService" (exact symbol)
+| Tool | Mode | Bytes | Tokens (~) | What you get |
+|------|------|-------|------------|--------------|
+| Grep | files_with_matches | ~500 B* | ~125 | Bare file paths |
+| ripgrep | content (matching lines) | ~8,610 B | ~2,153 | Unranked matching lines |
+| grepika | search (20 results) | ~3,375 B | ~844 | 20 ranked results + scores + snippets |
 
-| Scenario | Traditional | grepika |
-|----------|-------------|---------------|
-| Searches before context limit | 8-10 | 40-50 |
-| Files explorable per session | 15-20 | 75-100 |
-| Refactoring scope visibility | Limited | Comprehensive |
+#### Query: "fn" (short token — many matches)
+| Tool | Mode | Bytes | Tokens (~) | What you get |
+|------|------|-------|------------|--------------|
+| Grep | files_with_matches | ~500 B* | ~125 | Bare file paths |
+| ripgrep | content (matching lines) | ~31,469 B | ~7,867 | Unranked matching lines |
+| grepika | search (20 results) | ~1,832 B | ~458 | 20 ranked results + scores + snippets |
 
-## Break-Even Analysis
+\* File-list mode bytes are approximate (not benchmarked). Grep file-list returns
+fewer bytes than grepika but provides no context about what matched or why.
 
-The indexing operation has a one-time cost per codebase update:
-- Small project (1K files): ~500ms, ~2,000 tokens overhead
-- Medium project (10K files): ~3s, ~5,000 tokens overhead
-- Large project (100K+ files): ~30s, ~10,000 tokens overhead
+### The comparison depends on what you're comparing against
 
-**Break-even point: 2 queries**
+- **Grep file-list mode**: Returns fewer bytes (~500 B) than grepika (~2,500 B avg).
+  But it gives the LLM zero context about what matched or why.
+- **ripgrep content mode**: Returns more bytes on average (~12,600 B) than
+  grepika (~2,500 B) — and grepika's results are ranked. However, on natural
+  language queries where ripgrep finds few literal matches, grepika can be larger.
+- **Full workflow**: Grep file-list mode needs 5-10 follow-up Read calls to get
+  context. grepika's snippets often provide enough to act on directly, needing
+  only 1-3 targeted `get` calls.
 
-After just 2 search queries, the token savings from indexed search exceed the indexing overhead.
+### Per-query comparison (Criterion benchmarks)
 
-## Methodology
+Compared against ripgrep content mode on the grepika codebase, 9 queries
+covering all `QueryIntent` categories:
 
-Token counts measured using:
-- Anthropic's tokenizer for Claude models
-- Benchmark suite in `benches/token_efficiency.rs`
-- Real-world query patterns from development sessions
+```
+Query                │  grepika │  ripgrep (content) │ Savings
+─────────────────────┼──────────┼────────────────────┼────────
+SearchService        │  3,375 B │         8,610 B    │  ~61%
+Score                │  2,789 B │         5,574 B    │  ~50%
+Database             │  2,156 B │        10,174 B    │  ~79%
+fn                   │  1,832 B │        31,469 B    │  ~94%
+use                  │  1,963 B │        23,308 B    │  ~92%
+search service       │  3,797 B │         1,632 B    │ -133%
+error handling       │  2,666 B │           986 B    │ -170%
+fn\s+\w+             │    385 B │        29,501 B    │  ~99%
+impl.*for            │  3,214 B │         2,480 B    │  -30%
+─────────────────────┼──────────┼────────────────────┼────────
+Average              │  2,464 B │        12,637 B    │
+```
 
-Search scenarios tested:
-1. Symbol lookup (function/class definitions)
-2. Error message tracing
-3. Pattern discovery (similar code patterns)
-4. Dependency analysis (import/usage tracking)
-5. Refactoring scope assessment
+Savings are largest on high-match queries (symbols, short tokens, regex) where
+ripgrep returns many unranked lines. grepika can be larger on natural language
+queries — "error handling" routes to FTS5 concept search in grepika but ripgrep
+treats it as a literal string, finding few matches (986 B). Similarly,
+`impl.*for` matches relatively few lines, so ripgrep's output is small while
+grepika's structured JSON adds overhead.
 
-## Conclusion
+On aggregate, grepika returns ~80% fewer bytes
+(`(12,637 - 2,464) / 12,637`). The bigger win is qualitative:
+ranked results with snippets vs unranked matching lines.
 
-grepika's indexed approach transforms code search from a token-expensive operation into an efficient, scalable tool for LLM-assisted development. The combination of FTS5, ripgrep, and trigram indexing delivers search quality comparable to or better than raw grep while consuming a fraction of the tokens.
+### MCP schema overhead
 
-For teams using Claude Code or similar LLM development tools, the ROI is immediate and compounds with usage intensity.
+grepika's 11 tools add ~1,915 tokens (7,661 bytes) to the tool definitions.
+Claude Code uses prompt caching — tool definitions are cached after
+the first API call. Cached cost: ~192 tokens/turn (90% discount).
+Tool call results in conversation history are also cached on subsequent turns.
+
+Break-even: ~1 search query per session. Average per-query savings (~10,173 bytes)
+exceed the full schema overhead on the first query.
+
+### Methodology
+
+- Token approximation: 1 token ~ 4 bytes
+- All numbers from Criterion benchmarks (`benches/token_efficiency.rs`) run on
+  the grepika codebase (~25 Rust files) against ripgrep content-mode output
+- 9 queries covering all 4 `QueryIntent` categories: exact symbols (SearchService,
+  Score, Database), short tokens (fn, use), natural language (search service,
+  error handling), and regex (fn\s+\w+, impl.*for)
+- MCP schema size measured by extracting live tool schemas from `GrepikaServer`
+- File-list mode bytes are approximate (not benchmarked)

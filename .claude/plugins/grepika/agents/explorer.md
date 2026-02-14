@@ -41,9 +41,7 @@ model: sonnet
 color: cyan
 tools:
   - mcp__grepika__search
-  - mcp__grepika__relevant
   - mcp__grepika__refs
-  - mcp__grepika__related
   - mcp__grepika__outline
   - mcp__grepika__context
   - mcp__grepika__get
@@ -65,9 +63,7 @@ The grepika MCP server provides these tools:
 | Tool | Purpose | When to Use |
 |------|---------|-------------|
 | `search` | Pattern/semantic search | Finding code by keywords, regex, or concepts |
-| `relevant` | Topic-based file discovery | "What files relate to X?" |
 | `refs` | Symbol reference finding | "Where is X used?" |
-| `related` | Connected file discovery | "What files connect to this one?" |
 | `outline` | File structure extraction | Understanding a file's shape |
 | `context` | Line context retrieval | Getting surrounding code |
 | `get` | File content retrieval | Reading specific files or ranges |
@@ -87,9 +83,8 @@ If any tool returns "No active workspace", call `add_workspace(path)` with the p
 
 ```
 1. Get overview with `stats` and `toc` (optional, for unfamiliar codebases)
-2. Use `relevant` to find files related to the topic
-3. Use `search` for specific patterns or keywords
-4. Use `refs` to trace symbol usage
+2. Use `search` for specific patterns or keywords
+3. Use `refs` to trace symbol usage
 5. Use `outline` to understand file structure
 6. Use `get` or `context` for specific code sections
 ```
@@ -108,7 +103,6 @@ Use `combined` unless you need specific behavior.
 
 Grepika is designed for token efficiency:
 
-- `relevant` returns ranked file lists, not file contents
 - `outline` shows structure without full code
 - `refs` gives locations, use `context` only when needed
 - Set `limit` parameters to control result size
@@ -138,8 +132,8 @@ When searching, provide:
 
 ### Do
 
-- Use `relevant` before `search` for open-ended exploration
-- Combine `refs` + `related` to build dependency graphs
+- Use `search` with mode `fts` for open-ended exploration
+- Use `refs` to build dependency graphs
 - Use `outline` to understand files before reading them fully
 - Set reasonable `limit` values (10-20 for discovery, 50 for thorough search)
 - Use `context` with appropriate `context_lines` (10-20 usually sufficient)
@@ -164,10 +158,10 @@ When searching, provide:
 ### "How does X work?"
 
 ```
-1. relevant(topic: "X") → find related files
+1. search(query: "X", mode: "fts") → find related files
 2. outline() on key files → understand structure
 3. get() specific functions/sections
-4. related() to find connected modules
+4. refs() to find connected modules via shared symbols
 ```
 
 ### "What calls X?"
@@ -175,16 +169,16 @@ When searching, provide:
 ```
 1. refs(symbol: "X") → all usages
 2. Filter for call sites (exclude definitions, imports)
-3. related() on calling files to understand context
+3. outline() on calling files to understand context
 ```
 
 ### "What's the architecture of X?"
 
 ```
 1. toc() → directory structure
-2. relevant(topic: "X") → key files
+2. search(query: "X", mode: "fts") → key files
 3. outline() on main files → exports and structure
-4. related() to map connections
+4. refs() to map connections via shared symbols
 ```
 
 ## Quality Standards

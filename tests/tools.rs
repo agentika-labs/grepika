@@ -195,11 +195,11 @@ fn test_search_tool_fts_mode() {
     let result = execute_search(&search, input).unwrap();
 
     assert!(!result.results.is_empty());
-    // FTS results should have "fts" source
+    // FTS results should have "f" in compact sources
     for item in &result.results {
         assert!(
-            item.sources.contains(&"fts".to_string()),
-            "FTS mode results should have 'fts' source"
+            item.sources.contains('f'),
+            "FTS mode results should have 'f' source"
         );
     }
 }
@@ -217,11 +217,11 @@ fn test_search_tool_grep_mode() {
     let result = execute_search(&search, input).unwrap();
 
     assert!(!result.results.is_empty());
-    // Grep results should have "grep" source
+    // Grep results should have "g" in compact sources
     for item in &result.results {
         assert!(
-            item.sources.contains(&"grep".to_string()),
-            "Grep mode results should have 'grep' source"
+            item.sources.contains('g'),
+            "Grep mode results should have 'g' source"
         );
     }
 }
@@ -257,53 +257,6 @@ fn test_search_tool_respects_limit() {
 }
 
 // ============================================================================
-// Relevant Tool Tests
-// ============================================================================
-
-#[test]
-fn test_relevant_tool_happy_path() {
-    let (_dir, search, _indexer) = setup_test_services();
-
-    let input = RelevantInput {
-        topic: "authentication".to_string(),
-        limit: 10,
-    };
-
-    let result = execute_relevant(&search, input).unwrap();
-
-    assert!(!result.files.is_empty());
-    // Should find auth-related files
-    assert!(
-        result.files.iter().any(|f| f.path.contains("auth")),
-        "Should find auth.rs as relevant to 'authentication'"
-    );
-}
-
-#[test]
-fn test_relevant_tool_provides_reasons() {
-    let (_dir, search, _indexer) = setup_test_services();
-
-    let input = RelevantInput {
-        topic: "error handling".to_string(),
-        limit: 10,
-    };
-
-    let result = execute_relevant(&search, input).unwrap();
-
-    // Each file should have a reason
-    for file in &result.files {
-        assert!(
-            !file.reason.is_empty(),
-            "Each relevant file should have a reason"
-        );
-        assert!(
-            file.reason.contains("match"),
-            "Reason should describe the match type"
-        );
-    }
-}
-
-// ============================================================================
 // Get Tool Tests
 // ============================================================================
 
@@ -321,7 +274,7 @@ fn test_get_tool_happy_path() {
 
     assert!(!result.content.is_empty());
     assert!(result.content.contains("authenticate"));
-    assert!(result.total_lines > 0);
+    assert!(result.total_lines.unwrap_or(1) > 0);
 }
 
 #[test]
@@ -379,7 +332,8 @@ fn test_get_tool_line_beyond_eof() {
 
     // Should gracefully handle, content may contain only boundary markers
     // The actual file content between markers should be empty or minimal
-    assert!(result.start_line <= result.total_lines || result.total_lines > 0);
+    let total = result.total_lines.unwrap_or(result.end_line);
+    assert!(result.start_line <= total || total > 0);
 }
 
 // ============================================================================
@@ -406,7 +360,7 @@ fn test_outline_tool_rust_file() {
     let has_authenticate = result
         .symbols
         .iter()
-        .any(|s| s.name == "authenticate" && s.kind == "function");
+        .any(|s| s.name == "authenticate" && s.kind == "fn");
     assert!(has_authenticate, "Should find 'authenticate' function");
 
     // Should find the User struct
@@ -670,22 +624,6 @@ fn test_refs_tool_no_matches() {
 // Related Tool Tests
 // ============================================================================
 
-#[test]
-fn test_related_tool_finds_related_files() {
-    let (_dir, search, _indexer) = setup_test_services();
-
-    let input = RelatedInput {
-        path: "auth.rs".to_string(),
-        limit: 10,
-    };
-
-    let result = execute_related(&search, input).unwrap();
-
-    assert_eq!(result.source, "auth.rs");
-    // Config and main should be related to auth (they use it)
-    // Note: May or may not find relations depending on keyword extraction
-}
-
 // ============================================================================
 // Content Boundary Marker Tests
 // ============================================================================
@@ -822,18 +760,4 @@ fn test_search_results_exclude_sensitive_files() {
             item.path
         );
     }
-}
-
-#[test]
-fn test_related_tool_nonexistent_file() {
-    let (_dir, search, _indexer) = setup_test_services();
-
-    let input = RelatedInput {
-        path: "nonexistent.rs".to_string(),
-        limit: 10,
-    };
-
-    let result = execute_related(&search, input);
-
-    assert!(result.is_err());
 }

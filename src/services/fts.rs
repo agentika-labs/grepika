@@ -8,6 +8,20 @@ use crate::error::DbResult;
 use crate::types::{FileId, Score};
 use std::sync::Arc;
 
+/// Fixed reference for BM25 normalization.
+///
+/// BM25 scores are negative (more negative = better match).
+/// Using a fixed reference preserves absolute relevance,
+/// unlike max-normalization which always gives top result Score(1.0).
+/// Reference value of 15.0 tuned to typical BM25 range with
+/// column weights (5.0, 10.0, 1.0) for code search.
+const BM25_REFERENCE: f64 = 15.0;
+
+/// Normalizes a raw BM25 score to a Score in [0.0, 1.0].
+fn normalize_bm25(bm25: f64) -> Score {
+    Score::new((bm25.abs() / BM25_REFERENCE).min(1.0))
+}
+
 /// FTS5 search service.
 pub struct FtsService {
     db: Arc<Database>,
@@ -35,20 +49,9 @@ impl FtsService {
         }
         let results = self.db.fts_search(&fts_query, limit)?;
 
-        // Fixed-reference BM25 normalization (Q3):
-        // BM25 scores are negative (more negative = better match).
-        // Using a fixed reference preserves absolute relevance,
-        // unlike max-normalization which always gives top result Score(1.0).
-        // Reference value of 15.0 tuned to typical BM25 range with
-        // column weights (5.0, 10.0, 1.0) for code search.
-        const BM25_REFERENCE: f64 = 15.0;
-
         let normalized: Vec<_> = results
             .into_iter()
-            .map(|(file_id, bm25)| {
-                let normalized = (bm25.abs() / BM25_REFERENCE).min(1.0);
-                (file_id, Score::new(normalized))
-            })
+            .map(|(file_id, bm25)| (file_id, normalize_bm25(bm25)))
             .collect();
 
         Ok(normalized)
@@ -66,7 +69,7 @@ impl FtsService {
         self.db.fts_search(&fts_query, limit).map(|results| {
             results
                 .into_iter()
-                .map(|(id, score)| (id, Score::new(score.abs())))
+                .map(|(id, bm25)| (id, normalize_bm25(bm25)))
                 .collect()
         })
     }
@@ -82,7 +85,7 @@ impl FtsService {
         self.db.fts_search(&fts_query, limit).map(|results| {
             results
                 .into_iter()
-                .map(|(id, score)| (id, Score::new(score.abs())))
+                .map(|(id, bm25)| (id, normalize_bm25(bm25)))
                 .collect()
         })
     }

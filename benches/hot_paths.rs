@@ -523,6 +523,39 @@ fn bench_db_read(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Standalone Grep Benchmarks
+// ============================================================================
+
+/// Benchmarks grep search with pattern variety matching all QueryIntent types.
+///
+/// Tests literal, simple regex, complex regex, and no-match patterns to
+/// reveal how grep performance varies by query complexity.
+fn bench_grep_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grep_search");
+    group.sample_size(50);
+
+    let dir = TempDir::new().expect("temp dir");
+    let db = Arc::new(Database::in_memory().expect("db"));
+    setup_bench_files(dir.path(), &db, 200);
+    let search = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).expect("search");
+
+    let patterns = [
+        ("literal", "authenticate"),
+        ("simple_regex", r"fn\s+\w+"),
+        ("complex_regex", r"impl.*Handler"),
+        ("no_match", "xyzzy_nonexistent"),
+    ];
+
+    for (name, pattern) in patterns {
+        group.bench_with_input(BenchmarkId::new("pattern", name), &pattern, |b, p| {
+            b.iter(|| black_box(search.search_grep(p, 20)))
+        });
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Real Repository Benchmarks
 // ============================================================================
 
@@ -583,6 +616,7 @@ criterion_group!(
     search_benches,
     bench_combined_search,
     bench_combined_search_2k,
+    bench_grep_search,
 );
 
 criterion_group!(db_benches, bench_db_upsert, bench_db_read,);

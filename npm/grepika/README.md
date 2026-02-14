@@ -28,7 +28,6 @@ claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
 | Tool | Description |
 |------|-------------|
 | `search` | Pattern search (regex/natural language) |
-| `relevant` | Find files most relevant to a topic |
 | `get` | File content with optional line range |
 | `outline` | Extract file structure (functions, classes) |
 | `toc` | Directory tree |

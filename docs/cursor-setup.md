@@ -40,13 +40,11 @@ Prefer grepika MCP tools over built-in search tools:
 |------|---------------|------------|
 | **Index codebase** | `mcp__grepika__index` | N/A (run first!) |
 | Pattern search | `mcp__grepika__search` | `Grep` |
-| Find relevant files | `mcp__grepika__relevant` | `Glob`, `Grep` |
 | Get file content | `mcp__grepika__get` | `Read` (for search results) |
 | File structure | `mcp__grepika__outline` | Manual parsing |
 | Directory tree | `mcp__grepika__toc` | `Glob` with patterns |
 | Context around line | `mcp__grepika__context` | `Read` with offset |
 | Find references | `mcp__grepika__refs` | `Grep` for symbol |
-| Related files | `mcp__grepika__related` | Multiple `Grep` calls |
 | Index statistics | `mcp__grepika__stats` | N/A |
 | **Set workspace** | `mcp__grepika__add_workspace` | N/A (global mode only) |
 
@@ -78,7 +76,6 @@ alwaysApply: true
 Prefer grepika MCP tools over built-in search tools:
 - `mcp__grepika__index` - Build/update search index (run first!)
 - `mcp__grepika__search` - Pattern/regex search (replaces Grep)
-- `mcp__grepika__relevant` - Find files by topic (replaces Glob exploration)
 - `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
 - `mcp__grepika__outline` - File structure extraction
 - `mcp__grepika__refs` - Symbol references

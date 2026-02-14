@@ -2,8 +2,8 @@
 //!
 //! # Security
 //!
-//! The `related` and `refs` tools validate paths to prevent traversal
-//! attacks and block access to sensitive files.
+//! The `refs` tool validates paths to prevent traversal
+//! attacks and blocks access to sensitive files.
 //!
 //! See [`crate::security`] for details.
 
@@ -12,8 +12,28 @@ use crate::services::{Indexer, SearchService};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fmt;
 use std::sync::Arc;
+
+/// Classification of how a symbol is used at a reference site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefKind {
+    Definition,
+    Import,
+    TypeUsage,
+    Usage,
+}
+
+impl fmt::Display for RefKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Definition => f.write_str("definition"),
+            Self::Import => f.write_str("import"),
+            Self::TypeUsage => f.write_str("type_usage"),
+            Self::Usage => f.write_str("usage"),
+        }
+    }
+}
 
 /// Input for the stats tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -88,131 +108,6 @@ pub fn execute_stats(
     })
 }
 
-/// Input for the related tool.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RelatedInput {
-    /// File path to find related files for
-    pub path: String,
-    /// Maximum related files to return
-    #[serde(default = "default_related_limit")]
-    pub limit: usize,
-}
-
-const fn default_related_limit() -> usize {
-    10
-}
-
-/// Output for the related tool.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RelatedOutput {
-    /// Source file
-    pub source: String,
-    /// Related files
-    pub related: Vec<RelatedFile>,
-}
-
-/// A related file.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RelatedFile {
-    /// File path
-    pub path: String,
-    /// Relationship type
-    pub relationship: String,
-    /// Similarity score
-    pub similarity: f64,
-}
-
-/// Executes the related tool.
-///
-/// # Security
-///
-/// - Validates path stays within root directory
-/// - Blocks access to sensitive files (.env, credentials, keys)
-///
-/// # Errors
-///
-/// Returns a `ServerError` if path traversal is detected, file is sensitive, source file cannot be read, or search fails.
-pub fn execute_related(
-    service: &Arc<SearchService>,
-    input: RelatedInput,
-) -> crate::error::Result<RelatedOutput> {
-    // Security: validate path and check for sensitive files
-    let full_path = security::validate_read_access(service.root(), &input.path)?;
-
-    // Read source file
-    let content = fs::read_to_string(&full_path)?;
-
-    // Extract keywords/identifiers from source
-    let keywords = extract_keywords(&content);
-
-    // Search for each keyword and aggregate results
-    let mut file_scores: HashMap<String, (f64, Vec<String>)> = HashMap::new();
-
-    let mut search_errors = 0usize;
-    for keyword in keywords.iter().take(10) {
-        match service.search(keyword, 20) {
-            Ok(results) => {
-                for result in results {
-                    let path_str = result.path.to_string_lossy().to_string();
-                    if path_str == input.path {
-                        continue; // Skip source file
-                    }
-
-                    let entry = file_scores.entry(path_str).or_insert_with(|| (0.0, vec![]));
-                    entry.0 += result.score.as_f64();
-                    if !entry.1.contains(keyword) {
-                        entry.1.push(keyword.clone());
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::debug!(keyword = %keyword, error = %e, "related: keyword search failed");
-                search_errors += 1;
-            }
-        }
-    }
-    if search_errors > 0 {
-        tracing::debug!(search_errors, "related: some keyword searches failed");
-    }
-
-    // Sort by score and convert to output
-    let mut related: Vec<_> = file_scores
-        .into_iter()
-        .map(|(path, (score, keywords))| {
-            let relative = std::path::Path::new(&path)
-                .strip_prefix(service.root())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or(path);
-
-            let relationship = if keywords.len() > 3 {
-                "strong".to_string()
-            } else if keywords.len() > 1 {
-                "moderate".to_string()
-            } else {
-                "weak".to_string()
-            };
-
-            RelatedFile {
-                path: relative,
-                relationship,
-                similarity: (score / keywords.len() as f64).min(1.0),
-            }
-        })
-        .collect();
-
-    related.sort_by(|a, b| {
-        b.similarity
-            .partial_cmp(&a.similarity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    related.truncate(input.limit);
-
-    Ok(RelatedOutput {
-        source: input.path,
-        related,
-    })
-}
-
 /// Input for the refs tool (find references).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RefsInput {
@@ -271,12 +166,6 @@ pub fn execute_refs(
     let root = service.root();
     let mut references = Vec::new();
 
-    // Pre-build contains-check strings once (avoids per-call format! allocations)
-    let pat_space = format!(" {}", input.symbol);
-    let pat_paren = format!(" {}(", input.symbol);
-    let pat_angle = format!(" {}<", input.symbol);
-    let contains_pats = (pat_space.as_str(), pat_paren.as_str(), pat_angle.as_str());
-
     for (path, matches) in &matches_by_file {
         // Security: skip sensitive files from search results
         if security::is_sensitive_file(path).is_some() {
@@ -291,7 +180,7 @@ pub fn execute_refs(
 
         for m in matches {
             let trimmed = m.line_content.trim();
-            let ref_type = classify_reference(trimmed, &input.symbol, contains_pats);
+            let ref_type = classify_reference(trimmed, &input.symbol);
 
             references.push(Reference {
                 path: relative.clone(),
@@ -314,76 +203,6 @@ pub fn execute_refs(
 }
 
 // Helper functions
-
-fn extract_keywords(content: &str) -> Vec<String> {
-    let mut keywords = Vec::new();
-
-    // Simple identifier extraction
-    for word in content.split(|c: char| !c.is_alphanumeric() && c != '_') {
-        let word = word.trim();
-        if word.len() >= 4
-            && word.len() <= 30
-            && !is_common_keyword(word)
-            && word.chars().next().is_some_and(|c| c.is_alphabetic())
-            && !keywords.contains(&word.to_string())
-        {
-            keywords.push(word.to_string());
-        }
-    }
-
-    keywords
-}
-
-fn is_common_keyword(word: &str) -> bool {
-    matches!(
-        word.to_lowercase().as_str(),
-        "function"
-            | "return"
-            | "const"
-            | "true"
-            | "false"
-            | "null"
-            | "undefined"
-            | "string"
-            | "number"
-            | "boolean"
-            | "import"
-            | "export"
-            | "default"
-            | "from"
-            | "this"
-            | "self"
-            | "async"
-            | "await"
-            | "public"
-            | "private"
-            | "protected"
-            | "static"
-            | "void"
-            | "class"
-            | "struct"
-            | "enum"
-            | "interface"
-            | "type"
-            | "impl"
-            | "trait"
-            | "where"
-            | "match"
-            | "case"
-            | "break"
-            | "continue"
-            | "while"
-            | "loop"
-            | "else"
-            | "elif"
-            | "then"
-            | "error"
-            | "result"
-            | "option"
-            | "some"
-            | "none"
-    )
-}
 
 /// Trims a line to ~60 chars centered on the first occurrence of `symbol`.
 /// If the line is short enough, returns it unchanged.
@@ -414,10 +233,7 @@ fn trim_around_match(line: &str, symbol: &str) -> String {
 }
 
 /// Classifies a reference line as definition/import/type_usage/usage.
-///
-/// `contains_pats` are pre-built " symbol", " symbol(", " symbol<" strings
-/// to avoid per-call `format!` allocations.
-fn classify_reference(line: &str, symbol: &str, contains_pats: (&str, &str, &str)) -> &'static str {
+fn classify_reference(line: &str, symbol: &str) -> RefKind {
     let trimmed = line.trim();
 
     // Check for definitions
@@ -431,12 +247,12 @@ fn classify_reference(line: &str, symbol: &str, contains_pats: (&str, &str, &str
         || trimmed.starts_with("type ")
         || trimmed.starts_with("interface ");
 
-    let contains_symbol = trimmed.contains(contains_pats.0)
-        || trimmed.contains(contains_pats.1)
-        || trimmed.contains(contains_pats.2);
-
-    if is_definition_keyword && contains_symbol {
-        return "definition";
+    if is_definition_keyword
+        && (trimmed.contains(&format!(" {symbol}"))
+            || trimmed.contains(&format!(" {symbol}("))
+            || trimmed.contains(&format!(" {symbol}<")))
+    {
+        return RefKind::Definition;
     }
 
     // Check for imports
@@ -445,7 +261,7 @@ fn classify_reference(line: &str, symbol: &str, contains_pats: (&str, &str, &str
         || trimmed.starts_with("from ")
         || trimmed.contains("require(")
     {
-        return "import";
+        return RefKind::Import;
     }
 
     // Check for type annotations
@@ -453,10 +269,10 @@ fn classify_reference(line: &str, symbol: &str, contains_pats: (&str, &str, &str
         || trimmed.contains(&format!("-> {symbol}"))
         || trimmed.contains(&format!("<{symbol}"))
     {
-        return "type_usage";
+        return RefKind::TypeUsage;
     }
 
-    "usage"
+    RefKind::Usage
 }
 
 fn format_bytes(bytes: u64) -> String {

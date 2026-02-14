@@ -7,8 +7,8 @@ mod search;
 
 // analysis
 pub use analysis::{
-    execute_refs, execute_related, execute_stats, IndexSize, Reference, RefsInput, RefsOutput,
-    RelatedFile, RelatedInput, RelatedOutput, StatsInput, StatsOutput,
+    execute_refs, execute_stats, IndexSize, Reference, RefsInput, RefsOutput, StatsInput,
+    StatsOutput,
 };
 
 // content
@@ -25,6 +25,5 @@ pub use index::{
 
 // search
 pub use search::{
-    execute_relevant, execute_search, MatchSnippetOutput, RelevantFile, RelevantInput,
-    RelevantOutput, SearchInput, SearchMode, SearchOutput, SearchResultItem,
+    execute_search, MatchSnippetOutput, SearchInput, SearchMode, SearchOutput, SearchResultItem,
 };

@@ -110,21 +110,6 @@ fn test_context_nonexistent_file() {
     assert!(result.is_err());
 }
 
-#[test]
-fn test_related_nonexistent_file() {
-    let dir = TempDir::new().unwrap();
-    let db = Arc::new(Database::in_memory().unwrap());
-    let search = Arc::new(SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap());
-
-    let input = RelatedInput {
-        path: "phantom.rs".to_string(),
-        limit: 10,
-    };
-
-    let result = execute_related(&search, input);
-    assert!(result.is_err());
-}
-
 // ============================================================================
 // Binary File Handling
 // ============================================================================
@@ -225,7 +210,7 @@ fn test_get_empty_file() {
             .contains("--- END FILE CONTENT: empty.txt ---"),
         "Should have end marker"
     );
-    assert_eq!(result.total_lines, 0);
+    assert_eq!(result.total_lines, Some(0));
 }
 
 #[test]

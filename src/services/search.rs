@@ -9,7 +9,6 @@ use crate::services::grep::GrepMatch;
 use crate::services::{FtsService, GrepService, TrigramIndex};
 use crate::types::{FileId, Score};
 use std::collections::{HashMap, HashSet};
-use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -54,7 +53,7 @@ fn classify_query(query: &str) -> QueryIntent {
     }
 
     // Short single token
-    if trimmed.len() < 4 {
+    if trimmed.len() < SHORT_TOKEN_MAX_LEN {
         return QueryIntent::ShortToken;
     }
 
@@ -96,19 +95,19 @@ pub struct SearchSources {
 }
 
 impl SearchSources {
-    /// Returns human-readable labels for each active source.
-    pub fn to_labels(&self) -> Vec<&'static str> {
-        let mut labels = Vec::with_capacity(3);
+    /// Returns a compact string representation using single chars: f=fts, g=grep, t=trigram.
+    pub fn to_compact(&self) -> String {
+        let mut s = String::with_capacity(3);
         if self.fts {
-            labels.push("fts");
+            s.push('f');
         }
         if self.grep {
-            labels.push("grep");
+            s.push('g');
         }
         if self.trigram {
-            labels.push("trigram");
+            s.push('t');
         }
-        labels
+        s
     }
 
     /// Returns how many sources contributed to this result.
@@ -116,6 +115,14 @@ impl SearchSources {
         self.fts as u8 + self.grep as u8 + self.trigram as u8
     }
 }
+
+/// Tokens shorter than this are classified as `ShortToken` (low selectivity).
+const SHORT_TOKEN_MAX_LEN: usize = 4;
+
+/// Trigram bitmap selectivity threshold (percentage).
+/// When a trigram bitmap matches >= this percentage of files, the bitmap
+/// is not selective enough to be useful as a grep pre-filter.
+const TRIGRAM_SELECTIVITY_THRESHOLD: u64 = 80;
 
 /// Default limit when callers pass 0 (i.e. "no preference").
 const DEFAULT_SEARCH_LIMIT: usize = 50;
@@ -268,72 +275,58 @@ impl SearchService {
         }
     }
 
-    /// Cache-first batch resolution with DB fallback.
-    ///
-    /// For each item, probes the cache via `cache_probe`. Misses are collected
-    /// via `to_miss_key` and resolved in one DB call via `db_fallback`.
-    fn resolve_cached<I, K, V, M>(
-        &self,
-        items: &[I],
-        cache_probe: impl Fn(&PathCache, &I) -> Option<(K, V)>,
-        to_miss_key: impl Fn(&I) -> M,
-        db_fallback: impl FnOnce(Vec<M>) -> HashMap<K, V>,
-    ) -> HashMap<K, V>
-    where
-        K: Eq + Hash,
-    {
-        let mut result = HashMap::with_capacity(items.len());
+    /// Batch resolves FileIds to paths, cache-first with DB fallback.
+    fn get_paths_cached(&self, file_ids: &[FileId]) -> HashMap<FileId, Arc<str>> {
+        let mut result = HashMap::with_capacity(file_ids.len());
         let mut misses = Vec::new();
 
         if let Ok(cache) = self.path_cache.read() {
-            for item in items {
-                if let Some((k, v)) = cache_probe(&cache, item) {
-                    result.insert(k, v);
+            for &fid in file_ids {
+                if let Some(p) = cache.id_to_path.get(&fid) {
+                    result.insert(fid, Arc::clone(p));
                 } else {
-                    misses.push(to_miss_key(item));
+                    misses.push(fid);
                 }
             }
         } else {
-            misses = items.iter().map(&to_miss_key).collect();
+            misses.extend_from_slice(file_ids);
         }
 
         if !misses.is_empty() {
-            result.extend(db_fallback(misses));
+            result.extend(
+                self.db
+                    .get_paths_batch(&misses)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(fid, path)| (fid, Arc::from(path))),
+            );
         }
 
         result
     }
 
-    /// Batch resolves FileIds to paths, cache-first with DB fallback.
-    fn get_paths_cached(&self, file_ids: &[FileId]) -> HashMap<FileId, Arc<str>> {
-        self.resolve_cached(
-            file_ids,
-            |cache, &fid| cache.id_to_path.get(&fid).map(|p| (fid, Arc::clone(p))),
-            |&fid| fid,
-            |misses| {
-                self.db
-                    .get_paths_batch(&misses)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(fid, path)| (fid, Arc::from(path)))
-                    .collect()
-            },
-        )
-    }
-
     /// Batch resolves paths to FileIds, cache-first with DB fallback.
     fn get_file_ids_cached(&self, paths: &[String]) -> HashMap<String, FileId> {
-        self.resolve_cached(
-            paths,
-            |cache, path| {
-                cache
-                    .path_to_id
-                    .get(path.as_str())
-                    .map(|&fid| (path.clone(), fid))
-            },
-            |path| path.clone(),
-            |misses| self.db.get_file_ids_batch(&misses).unwrap_or_default(),
-        )
+        let mut result = HashMap::with_capacity(paths.len());
+        let mut misses = Vec::new();
+
+        if let Ok(cache) = self.path_cache.read() {
+            for path in paths {
+                if let Some(&fid) = cache.path_to_id.get(path.as_str()) {
+                    result.insert(path.clone(), fid);
+                } else {
+                    misses.push(path.clone());
+                }
+            }
+        } else {
+            misses = paths.to_vec();
+        }
+
+        if !misses.is_empty() {
+            result.extend(self.db.get_file_ids_batch(&misses).unwrap_or_default());
+        }
+
+        result
     }
 
     /// Performs a combined search using all available methods.
@@ -359,7 +352,9 @@ impl SearchService {
         // Run searches based on intent
         // For regex queries, skip FTS (it can't handle regex)
         let fts_results = if intent != QueryIntent::Regex {
-            self.fts.search(query, limit * 2).unwrap_or_default()
+            self.fts
+                .search(query, (limit * 5 / 4).max(limit + 1))
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -376,7 +371,11 @@ impl SearchService {
 
         let (grep_results, grep_matches) = self
             .grep
-            .search_files_with_matches_filtered(query, limit * 2, file_filter.as_ref())
+            .search_files_with_matches_filtered(
+                query,
+                (limit * 5 / 4).max(limit + 1),
+                file_filter.as_ref(),
+            )
             .unwrap_or_default();
 
         // Override weights based on intent.
@@ -508,10 +507,14 @@ impl SearchService {
     /// Returns `None` if the bitmap is absent or matches >=80% of files
     /// (filter overhead would exceed savings). Otherwise resolves FileIds
     /// to paths via batch lookup.
+    ///
+    /// Uses `HashSet<Arc<Path>>` to avoid per-path heap allocations that
+    /// `HashSet<PathBuf>` would incur. The grep walker's `entry.path()`
+    /// returns `&Path`, which can look up via `Borrow<Path>` — zero-copy.
     fn build_trigram_filter(
         &self,
         trigram: &Option<roaring::RoaringBitmap>,
-    ) -> Option<HashSet<PathBuf>> {
+    ) -> Option<HashSet<Arc<Path>>> {
         let bitmap = trigram.as_ref()?;
         let total = self.total_files();
         if total == 0 {
@@ -519,8 +522,9 @@ impl SearchService {
         }
 
         let match_count = bitmap.len();
-        // Skip filter when bitmap matches >=80% of files (not selective enough)
-        if match_count * 100 / total >= 80 {
+        // Skip filter when bitmap matches >=80% of files (not selective enough).
+        // Use multiplication instead of division to avoid integer truncation.
+        if match_count * 100 >= total * TRIGRAM_SELECTIVITY_THRESHOLD {
             return None;
         }
 
@@ -528,7 +532,10 @@ impl SearchService {
         let file_ids: Vec<FileId> = bitmap.iter().map(FileId::new).collect();
         let path_map = self.get_paths_cached(&file_ids);
 
-        let filter: HashSet<PathBuf> = path_map.into_values().map(|s| PathBuf::from(&*s)).collect();
+        let filter: HashSet<Arc<Path>> = path_map
+            .into_values()
+            .map(|s| Arc::from(Path::new(&*s)))
+            .collect();
 
         if filter.is_empty() {
             None
@@ -578,23 +585,46 @@ impl SearchService {
             }
         }
 
-        // Batch resolve grep paths to file_ids via cache (P1+P2)
-        // Pre-compute path strings once (1D: avoids double to_string_lossy)
-        let grep_path_strings: Vec<String> = grep
-            .iter()
-            .map(|(p, _)| p.to_string_lossy().to_string())
-            .collect();
-        let grep_ids = self.get_file_ids_cached(&grep_path_strings);
+        // Resolve grep paths to file_ids: cache-first, defer String alloc to misses.
+        // to_string_lossy() returns Cow<str> — zero-alloc for valid UTF-8 paths.
+        let mut grep_misses: Vec<String> = Vec::new();
+        let mut grep_pending: Vec<(PathBuf, Score)> = Vec::new();
 
-        // Zip pre-computed strings with grep results to avoid re-conversion (1D)
-        for (i, (path, score)) in grep.into_iter().enumerate() {
-            if let Some(&file_id) = grep_ids.get(&grep_path_strings[i]) {
-                let entry = score_accum
-                    .entry(file_id)
-                    .or_insert_with(|| (0.0, 0.0, SearchSources::default(), path));
-                entry.0 += score.as_f64() * config.grep_weight;
-                entry.1 += config.grep_weight;
-                entry.2.grep = true;
+        if let Ok(cache) = self.path_cache.read() {
+            for (path, score) in grep {
+                let path_str = path.to_string_lossy();
+                if let Some(&file_id) = cache.path_to_id.get(path_str.as_ref()) {
+                    let entry = score_accum
+                        .entry(file_id)
+                        .or_insert_with(|| (0.0, 0.0, SearchSources::default(), path));
+                    entry.0 += score.as_f64() * config.grep_weight;
+                    entry.1 += config.grep_weight;
+                    entry.2.grep = true;
+                } else {
+                    grep_misses.push(path_str.into_owned());
+                    grep_pending.push((path, score));
+                }
+            }
+        } else {
+            // Cache poisoned — fall back to DB for all
+            for (path, _) in &grep {
+                grep_misses.push(path.to_string_lossy().to_string());
+            }
+            grep_pending = grep;
+        }
+
+        if !grep_misses.is_empty() {
+            let miss_ids = self.db.get_file_ids_batch(&grep_misses).unwrap_or_default();
+            for (path, score) in grep_pending {
+                let path_str = path.to_string_lossy();
+                if let Some(&file_id) = miss_ids.get(path_str.as_ref()) {
+                    let entry = score_accum
+                        .entry(file_id)
+                        .or_insert_with(|| (0.0, 0.0, SearchSources::default(), path));
+                    entry.0 += score.as_f64() * config.grep_weight;
+                    entry.1 += config.grep_weight;
+                    entry.2.grep = true;
+                }
             }
         }
 
@@ -635,7 +665,7 @@ impl SearchService {
                 };
 
                 let bonus_mult = if source_count > 1 {
-                    1.0 + config.multi_source_bonus * (source_count - 1) as f64
+                    1.0 + config.multi_source_bonus * (2.0_f64.powi(source_count as i32 - 1) - 1.0)
                 } else {
                     1.0
                 };
@@ -659,11 +689,19 @@ impl SearchService {
         });
         results.truncate(limit);
 
-        // Lazy snippet extraction (1B): only for surviving top-N results
+        // Lazy snippet extraction (1B): only for surviving top-N results.
+        // Deduplicate consecutive same-line matches (cheap for N≤3).
         for result in &mut results {
             if let Some(matches) = grep_matches.get(result.path.as_path()) {
+                let mut last_line = None;
                 result.snippets = matches
                     .iter()
+                    .filter(|m| {
+                        let dominated = last_line == Some(m.line_number);
+                        last_line = Some(m.line_number);
+                        !dominated
+                    })
+                    .take(3)
                     .map(|m| MatchSnippet {
                         line_number: m.line_number,
                         line_content: m.line_content.clone(),
@@ -672,6 +710,40 @@ impl SearchService {
                     })
                     .collect();
             }
+        }
+
+        // Position-aware re-ranking: boost results with matches in significant positions.
+        let mut boosted = false;
+        for result in &mut results {
+            let mut boost = 0.0_f64;
+            for snippet in &result.snippets {
+                // Matches in the first 5 lines (file header / exports)
+                if snippet.line_number <= 5 {
+                    boost = boost.max(0.03);
+                }
+                // Matches on definition lines
+                let trimmed = snippet.line_content.trim_start();
+                if trimmed.starts_with("fn ")
+                    || trimmed.starts_with("pub fn ")
+                    || trimmed.starts_with("struct ")
+                    || trimmed.starts_with("class ")
+                    || trimmed.starts_with("def ")
+                    || trimmed.starts_with("function ")
+                {
+                    boost = boost.max(0.02);
+                }
+            }
+            if boost > 0.0 {
+                result.score = result.score.merge(Score::new(boost));
+                boosted = true;
+            }
+        }
+        if boosted {
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
 
         Ok(results)

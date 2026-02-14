@@ -17,20 +17,20 @@ grep is a great tool, but it wasn't designed for LLM workflows. It returns unran
 | Find a pattern | Unranked file list | Ranked results with relevance scores |
 | Understand a symbol | Multiple grep calls, manual assembly | `refs` classifies definitions, imports, usages |
 | Explore structure | Read entire files | `outline` extracts functions/classes/structs |
-| Find related code | Guess-and-grep loop | `related` finds files sharing symbols |
+| Find related code | Guess-and-grep loop | `refs` finds files sharing symbols |
 | Natural language query | Requires regex | `search` routes to BM25 full-text search |
 
 ### Benchmarks
 
-Measured on the same codebase and queries using [Criterion](https://github.com/bheisler/criterion.rs):
+Criterion benchmarks against ripgrep (Claude Code's Grep backend) on the grepika codebase, 9 queries across all intent categories:
 
-| Metric | grepika | Built-in Grep (ripgrep) |
-|--------|---------|-------------------------|
-| Search latency | 2.5 ms | 5.3 ms |
-| Response size | 364 bytes avg | 2,693 bytes avg |
+| Metric | grepika | ripgrep (content mode) |
+|--------|---------|------------------------|
+| Search latency | 2.3–2.8 ms | 4.9–6.1 ms |
+| Response size | ~2,500 B avg | ~12,600 B avg |
 | Relevance ranking | BM25 + trigram IDF | None |
 
-Responses are ~6x smaller on average, which means the MCP schema overhead (~825 tokens) pays for itself after about 2 queries.
+~80% fewer bytes on aggregate vs ripgrep content mode, with ranked results and snippets. Savings are largest on high-match queries (e.g. `fn` saves 94%); natural language queries where ripgrep finds few literal matches can be larger with grepika. See [full analysis](docs/token-efficiency-analysis.md).
 
 ### How it works
 
@@ -172,7 +172,6 @@ Claude Code has built-in Grep and Glob tools. To make it prefer grepika, add to 
 Prefer grepika MCP tools over built-in Grep/Glob for code search:
 - `mcp__grepika__index` - Build/update search index (run first!)
 - `mcp__grepika__search` - Pattern/regex search (replaces Grep)
-- `mcp__grepika__relevant` - Find files by topic (replaces Glob exploration)
 - `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
 - `mcp__grepika__outline` - File structure extraction
 - `mcp__grepika__refs` - Symbol references
@@ -235,6 +234,24 @@ grepika get <path> -s 1 -e 100
 # View index statistics
 grepika stats
 
+# Extract file structure (functions, classes, structs)
+grepika outline <path>
+
+# Directory tree
+grepika toc --root /path/to/project -d 3
+
+# Surrounding context for a line
+grepika context <path> -l 42 -c 10
+
+# Find all references to a symbol
+grepika refs <symbol>
+
+# Compare two files
+grepika diff <file1> <file2>
+
+# Generate shell completions
+grepika completions <shell>
+
 # Run as MCP server (global mode — LLM calls add_workspace)
 grepika --mcp
 
@@ -247,13 +264,11 @@ grepika --mcp --root /path/to/project
 | Tool | Description |
 |------|-------------|
 | `search` | Pattern search (regex/natural language) |
-| `relevant` | Find files most relevant to a topic |
 | `get` | File content with optional line range |
 | `outline` | Extract file structure (functions, classes) |
 | `toc` | Directory tree |
 | `context` | Surrounding lines around a specific line |
 | `stats` | Index statistics |
-| `related` | Files related by shared symbols |
 | `refs` | Find all references to a symbol |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
@@ -261,21 +276,29 @@ grepika --mcp --root /path/to/project
 
 ## Token Efficiency
 
-Indexed search returns significantly fewer tokens than raw grep output. Measured against Claude Code's built-in Grep tool (ripgrep):
+Compared to ripgrep content output (matching lines), indexed search returns fewer tokens per query. The bigger win is search quality — ranking, NLP queries, and reference classification reduce follow-up reads.
+
+Criterion benchmarks on the grepika codebase (~25 Rust files), 9 queries across all intent categories:
 
 ```
-Query      │  grepika │  ripgrep │ Savings
-───────────┼──────────┼──────────┼────────
-auth       │    326 B │   2109 B │  84.5%
-config     │    502 B │   3749 B │  86.6%
-error      │    478 B │   5322 B │  91.0%
-handler    │    248 B │   1239 B │  80.0%
-database   │    242 B │   1048 B │  76.9%
-───────────┼──────────┼──────────┼────────
-AVERAGE    │    359 B │   2693 B │  83.8%
+Query             │  grepika │  ripgrep (content) │ Savings
+──────────────────┼──────────┼────────────────────┼────────
+SearchService     │  3,375 B │         8,610 B    │  ~61%
+Score             │  2,789 B │         5,574 B    │  ~50%
+Database          │  2,156 B │        10,174 B    │  ~79%
+fn                │  1,832 B │        31,469 B    │  ~94%
+use               │  1,963 B │        23,308 B    │  ~92%
+search service    │  3,797 B │         1,632 B    │ -133%
+error handling    │  2,666 B │           986 B    │ -170%
+fn\s+\w+          │    385 B │        29,501 B    │  ~99%
+impl.*for         │  3,214 B │         2,480 B    │  -30%
 ```
 
-The MCP schema adds ~825 tokens of one-time overhead, which pays for itself after about 2 queries (~584 tokens saved per query).
+Savings are largest on high-match queries where ripgrep returns many unranked lines. Natural language queries (e.g. "error handling") route to FTS5 concept search in grepika but match few literals in ripgrep, making grepika's output larger.
+
+The MCP schema adds ~1,915 tokens (7,661 bytes) of one-time overhead. Claude Code caches tool definitions after the first call (~192 tokens/turn with 90% discount). Break-even: ~1 query per session.
+
+See [docs/token-efficiency-analysis.md](docs/token-efficiency-analysis.md) for the full comparison including Grep file-list mode and workflow analysis.
 
 ## Configuration
 

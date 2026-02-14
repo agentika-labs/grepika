@@ -89,6 +89,10 @@ pub fn restore_normal_pragmas(conn: &Connection) -> rusqlite::Result<()> {
         "INSERT INTO files_fts(files_fts, rank) VALUES('automerge', 8)",
     )?;
 
+    // ANALYZE: update SQLite's query planner statistics so it picks
+    // optimal index strategies for subsequent queries.
+    conn.execute("ANALYZE", [])?;
+
     Ok(())
 }
 

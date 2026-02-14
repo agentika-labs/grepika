@@ -1,0 +1,33 @@
+# cargo-deny configuration — v2 schema
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+unmaintained = "workspace"
+yanked = "warn"
+
+[licenses]
+# All licenses are denied unless explicitly allowed
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "Zlib",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

@@ -43,7 +43,7 @@ grepika --mcp --log-file /tmp/grepika.log
 ```
 MCP Server (rmcp)          ← JSON-RPC stdin/stdout
        │
-Tool Router (server.rs)    ← search, relevant, get, outline, toc, context, stats, refs, index, diff, add_workspace
+Tool Router (server.rs)    ← search, get, outline, toc, context, stats, refs, index, diff, add_workspace
        │
 Workspace                  ← Holds root + SearchService + Indexer (None in global mode)
        │
@@ -86,13 +86,11 @@ SQLite + r2d2 pool         ← .grepika/index.db
 | Tool | Description |
 |------|-------------|
 | `search` | Pattern search (regex/natural language) |
-| `relevant` | Find files most relevant to a topic |
 | `get` | File content with optional line range |
 | `outline` | Extract file structure (functions, classes) |
 | `toc` | Directory tree |
 | `context` | Surrounding lines around a specific line |
 | `stats` | Index statistics |
-| `related` | Files related by shared symbols |
 | `refs` | Find all references to a symbol |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |

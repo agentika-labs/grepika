@@ -92,6 +92,13 @@ pub struct DiffInput {
     /// Context lines around changes
     #[serde(default = "default_diff_context")]
     pub context: usize,
+    /// Maximum output lines before truncation (default: 5000, 0 = unlimited)
+    #[serde(default = "default_max_diff_lines")]
+    pub max_lines: usize,
+}
+
+const fn default_max_diff_lines() -> usize {
+    5000
 }
 
 const fn default_diff_context() -> usize {
@@ -103,8 +110,10 @@ const fn default_diff_context() -> usize {
 pub struct DiffOutput {
     /// Diff hunks
     pub hunks: Vec<DiffHunk>,
-    /// Summary statistics
+    /// Summary statistics (always reflects full diff, even when truncated)
     pub stats: DiffStats,
+    /// Whether output was truncated due to max_lines limit
+    pub truncated: bool,
 }
 
 /// A diff hunk (includes @@ header in content).
@@ -149,10 +158,20 @@ pub fn execute_diff(
     let lines1: Vec<&str> = content1.lines().collect();
     let lines2: Vec<&str> = content2.lines().collect();
 
-    // Simple line-by-line diff
-    let (hunks, stats) = compute_diff(&lines1, &lines2, input.context);
+    let max_lines = if input.max_lines == 0 {
+        usize::MAX
+    } else {
+        input.max_lines
+    };
 
-    Ok(DiffOutput { hunks, stats })
+    // Simple line-by-line diff
+    let (hunks, stats, truncated) = compute_diff(&lines1, &lines2, input.context, max_lines);
+
+    Ok(DiffOutput {
+        hunks,
+        stats,
+        truncated,
+    })
 }
 
 /// Maximum LCS table cells before falling back to a synthetic error.
@@ -160,11 +179,15 @@ pub fn execute_diff(
 const MAX_LCS_CELLS: usize = 25_000_000;
 
 /// Computes a simple diff between two sets of lines.
+///
+/// Returns `(hunks, stats, truncated)`. When `max_lines` is exceeded, stops
+/// emitting hunks but still computes full stats so the LLM knows total scope.
 fn compute_diff(
     old_lines: &[&str],
     new_lines: &[&str],
     context: usize,
-) -> (Vec<DiffHunk>, DiffStats) {
+    max_lines: usize,
+) -> (Vec<DiffHunk>, DiffStats, bool) {
     let m = old_lines.len();
     let n = new_lines.len();
 
@@ -183,12 +206,15 @@ fn compute_diff(
                 additions: 0,
                 deletions: 0,
             },
+            false,
         );
     }
 
     let mut hunks = Vec::new();
     let mut additions = 0;
     let mut deletions = 0;
+    let mut total_output_lines = 0;
+    let mut truncated = false;
 
     // Use a simple LCS-based diff algorithm
     let lcs = longest_common_subsequence(old_lines, new_lines);
@@ -250,9 +276,16 @@ fn compute_diff(
                     "@@ -{},{} +{},{} @@",
                     hunk_old_start, old_count, hunk_new_start, new_count
                 );
-                hunks.push(DiffHunk {
-                    content: format!("{}\n{}", header, hunk_lines.join("\n")),
-                });
+
+                // Check truncation before emitting
+                total_output_lines += hunk_lines.len() + 1; // +1 for header
+                if total_output_lines > max_lines {
+                    truncated = true;
+                } else {
+                    hunks.push(DiffHunk {
+                        content: format!("{}\n{}", header, hunk_lines.join("\n")),
+                    });
+                }
                 hunk_lines.clear();
                 in_hunk = false;
             }
@@ -262,7 +295,7 @@ fn compute_diff(
         new_idx += 1;
     }
 
-    // Process remaining lines
+    // Process remaining lines (still count for stats even if truncated)
     while old_idx < old_lines.len() {
         if !in_hunk {
             hunk_old_start = old_idx + 1;
@@ -295,9 +328,15 @@ fn compute_diff(
             "@@ -{},{} +{},{} @@",
             hunk_old_start, old_count, hunk_new_start, new_count
         );
-        hunks.push(DiffHunk {
-            content: format!("{}\n{}", header, hunk_lines.join("\n")),
-        });
+
+        total_output_lines += hunk_lines.len() + 1;
+        if total_output_lines > max_lines {
+            truncated = true;
+        } else {
+            hunks.push(DiffHunk {
+                content: format!("{}\n{}", header, hunk_lines.join("\n")),
+            });
+        }
     }
 
     let stats = DiffStats {
@@ -305,7 +344,7 @@ fn compute_diff(
         deletions,
     };
 
-    (hunks, stats)
+    (hunks, stats, truncated)
 }
 
 /// Computes the longest common subsequence of two sequences.

@@ -51,8 +51,10 @@ pub struct GrepConfig {
     pub before_context: usize,
     /// Context lines after match
     pub after_context: usize,
-    /// Maximum threads for parallel grep (0 = auto-detect, capped at 8)
+    /// Maximum threads for parallel grep (0 = auto-detect)
     pub max_threads: usize,
+    /// Upper bound on thread count (caps both auto-detected and explicit values)
+    pub thread_cap: usize,
 }
 
 impl Default for GrepConfig {
@@ -66,6 +68,7 @@ impl Default for GrepConfig {
             before_context: 0,
             after_context: 0,
             max_threads: 0, // Auto-detect
+            thread_cap: 8,
         }
     }
 }
@@ -96,12 +99,13 @@ impl GrepService {
     ///
     /// Returns `SearchError::Grep` if configuration is invalid.
     pub fn with_config(root: PathBuf, config: GrepConfig) -> Result<Self, SearchError> {
+        let cap = config.thread_cap;
         let num_threads = if config.max_threads > 0 {
-            config.max_threads.min(8)
+            config.max_threads.min(cap)
         } else {
             std::thread::available_parallelism()
                 .map_or(4, |n| n.get())
-                .min(8)
+                .min(cap)
         };
 
         Ok(Self {
@@ -143,7 +147,7 @@ impl GrepService {
         &self,
         pattern: &str,
         limit: usize,
-        file_filter: Option<&HashSet<PathBuf>>,
+        file_filter: Option<&HashSet<Arc<Path>>>,
     ) -> Result<Vec<GrepMatch>, SearchError> {
         // Validate pattern for ReDoS vulnerabilities
         security::validate_regex_pattern(pattern)
@@ -298,10 +302,11 @@ impl GrepService {
         &self,
         pattern: &str,
         limit: usize,
-        file_filter: Option<&HashSet<PathBuf>>,
+        file_filter: Option<&HashSet<Arc<Path>>>,
     ) -> Result<GrepSearchResult, SearchError> {
-        // 2B: Reduced overcollection from 3x to 2x (ample for top-3 snippets)
-        let matches = self.search_parallel_filtered(pattern, limit * 2, file_filter)?;
+        // Overcollect by ~25% to ensure enough results survive dedup/filtering
+        let matches =
+            self.search_parallel_filtered(pattern, (limit * 5 / 4).max(limit + 1), file_filter)?;
 
         // 2A: Single HashMap holding stats + snippets. Arc<Path> key =
         // cheap clone (atomic increment) instead of PathBuf heap alloc.

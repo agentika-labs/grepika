@@ -32,7 +32,8 @@ fn timestamp() -> String {
     let h = time_of_day / 3600;
     let m = (time_of_day % 3600) / 60;
     let s = time_of_day % 60;
-    // Civil date from days since 1970-01-01 (algorithm from Howard Hinnant)
+    // Civil date from days since 1970-01-01
+    // Howard Hinnant's civil_from_days: https://howardhinnant.github.io/date_algorithms.html
     let z = days as i64 + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
     let doe = (z - era * 146097) as u64;
@@ -87,8 +88,29 @@ pub fn log(msg: &str) {
     }
 }
 
-/// Gets current memory usage in MB.
+/// TTL for cached memory measurement. Within a single tool call,
+/// the before/after measurements are <500ms apart, so the second
+/// call reuses the cached value instead of spawning another `ps`.
+static CACHED_MEM: Mutex<Option<(std::time::Instant, f64)>> = Mutex::new(None);
+
+/// Gets current memory usage in MB (cached with 500ms TTL).
 pub fn get_memory_mb() -> f64 {
+    if let Ok(cache) = CACHED_MEM.lock() {
+        if let Some((ts, val)) = *cache {
+            if ts.elapsed() < std::time::Duration::from_millis(500) {
+                return val;
+            }
+        }
+    }
+    let val = measure_memory_mb();
+    if let Ok(mut cache) = CACHED_MEM.lock() {
+        *cache = Some((std::time::Instant::now(), val));
+    }
+    val
+}
+
+/// Measures memory via `ps` subprocess (Unix only).
+fn measure_memory_mb() -> f64 {
     #[cfg(unix)]
     {
         use std::process::Command;

@@ -1,4 +1,10 @@
 //! Database layer with connection pooling and FTS5.
+//!
+//! # Error Convention
+//!
+//! Unless otherwise documented, all public methods on [`Database`] may return:
+//! - `DbError::Pool` if no pooled connection is available within the timeout
+//! - `DbError::Sqlite` if the underlying SQL operation fails
 
 mod pragmas;
 mod schema;
@@ -84,8 +90,8 @@ fn with_transaction<T>(
 
 /// Executes a `WHERE IN (?)` batch query and collects results into a HashMap.
 ///
-/// Builds positional placeholders, boxes parameters, and maps rows via
-/// the provided closure. Used by `get_paths_batch` and `get_file_ids_batch`.
+/// Builds positional placeholders and maps rows via the provided closure.
+/// Used by `get_paths_batch` and `get_file_ids_batch`.
 fn query_batch_map<P, K, V>(
     conn: &rusqlite::Connection,
     sql_template: &str,
@@ -93,7 +99,7 @@ fn query_batch_map<P, K, V>(
     map_row: fn(&rusqlite::Row) -> rusqlite::Result<(K, V)>,
 ) -> DbResult<HashMap<K, V>>
 where
-    P: ToSql + Clone + 'static,
+    P: ToSql,
     K: Eq + Hash,
 {
     if params.is_empty() {
@@ -104,11 +110,7 @@ where
     let sql = sql_template.replace("{}", &placeholders.join(","));
 
     let mut stmt = conn.prepare(&sql)?;
-    let boxed: Vec<Box<dyn ToSql>> = params
-        .iter()
-        .map(|p| Box::new(p.clone()) as Box<dyn ToSql>)
-        .collect();
-    let refs: Vec<&dyn ToSql> = boxed.iter().map(|p| p.as_ref()).collect();
+    let refs: Vec<&dyn ToSql> = params.iter().map(|p| p as &dyn ToSql).collect();
 
     let results = stmt
         .query_map(refs.as_slice(), map_row)?
@@ -174,10 +176,6 @@ impl Database {
     }
 
     /// Gets a connection from the pool.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available within the timeout.
     pub fn conn(&self) -> DbResult<PooledConnection<SqliteConnectionManager>> {
         self.pool.get().map_err(DbError::from)
     }
@@ -215,11 +213,6 @@ impl Database {
     }
 
     /// Performs FTS5 full-text search with BM25 ranking.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query execution fails.
     pub fn fts_search(&self, query: &str, limit: usize) -> DbResult<Vec<(FileId, f64)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare_cached(
@@ -246,11 +239,6 @@ impl Database {
     ///
     /// Uses `RETURNING file_id` to get the ID in a single statement,
     /// avoiding a separate SELECT after each upsert.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the insert/update operation fails.
     pub fn upsert_file(&self, path: &str, content: &str, hash: u64) -> DbResult<FileId> {
         let conn = self.conn()?;
         let filename = Path::new(path)
@@ -279,11 +267,6 @@ impl Database {
     }
 
     /// Gets file content by ID.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file(&self, file_id: FileId) -> DbResult<Option<(String, String)>> {
         let conn = self.conn()?;
         query_row_optional(
@@ -295,11 +278,6 @@ impl Database {
     }
 
     /// Gets file content by path.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file_by_path(&self, path: &str) -> DbResult<Option<(FileId, String)>> {
         let conn = self.conn()?;
         query_row_optional(
@@ -311,11 +289,6 @@ impl Database {
     }
 
     /// Stores trigram index data.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the insert/update operation fails.
     pub fn upsert_trigrams(&self, trigram: &[u8], file_ids_blob: &[u8]) -> DbResult<()> {
         let conn = self.conn()?;
         conn.execute(
@@ -330,11 +303,6 @@ impl Database {
     }
 
     /// Gets trigram file IDs.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_trigram_files(&self, trigram: &[u8]) -> DbResult<Option<Vec<u8>>> {
         let conn = self.conn()?;
         query_row_optional(
@@ -347,13 +315,8 @@ impl Database {
 
     /// Loads all trigrams from the database.
     ///
-    /// Returns an iterator of (trigram_bytes, bitmap_bytes) tuples.
-    /// This is used to restore the in-memory trigram index on startup.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
+    /// Returns (trigram_bytes, bitmap_bytes) tuples used to restore
+    /// the in-memory trigram index on startup.
     pub fn load_all_trigrams(&self) -> DbResult<Vec<(Vec<u8>, Vec<u8>)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare_cached("SELECT trigram, file_ids FROM trigrams")?;
@@ -404,11 +367,6 @@ impl Database {
     /// Uses `INSERT OR REPLACE` for changed trigrams and `DELETE` for
     /// trigrams whose bitmaps are now empty. Much faster than full
     /// `save_trigrams()` for incremental indexing.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if any operation fails.
     pub fn save_dirty_trigrams(
         &self,
         upserts: &[(Vec<u8>, Vec<u8>)],
@@ -450,11 +408,6 @@ impl Database {
     }
 
     /// Gets the count of trigrams in the database.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
     pub fn trigram_count(&self) -> DbResult<u64> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM trigrams", [], |row| row.get(0))?;
@@ -462,11 +415,6 @@ impl Database {
     }
 
     /// Gets all file_id → path mappings for cache population.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
     pub fn get_all_file_paths(&self) -> DbResult<Vec<(FileId, String)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare_cached("SELECT file_id, path FROM files")?;
@@ -481,11 +429,6 @@ impl Database {
     }
 
     /// Gets all indexed file paths with their hashes.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
     pub fn get_indexed_files(&self) -> DbResult<Vec<(String, u64)>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare_cached("SELECT path, hash FROM files")?;
@@ -501,13 +444,7 @@ impl Database {
 
     /// Gets all indexed file paths with their hashes as a HashMap.
     ///
-    /// This is optimized for change detection during indexing,
-    /// allowing O(1) lookups instead of O(n) database queries.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
+    /// Optimized for O(1) change detection during indexing.
     pub fn get_all_hashes(&self) -> DbResult<HashMap<String, u64>> {
         self.get_indexed_files().map(|v| v.into_iter().collect())
     }
@@ -583,11 +520,6 @@ impl Database {
     }
 
     /// Gets file path by ID (without loading content).
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file_path(&self, file_id: FileId) -> DbResult<Option<String>> {
         let conn = self.conn()?;
         query_row_optional(
@@ -599,11 +531,6 @@ impl Database {
     }
 
     /// Gets file ID by path (without loading content).
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails (other than no rows).
     pub fn get_file_id(&self, path: &str) -> DbResult<Option<FileId>> {
         let conn = self.conn()?;
         Self::get_file_id_on(&conn, path)
@@ -621,13 +548,7 @@ impl Database {
 
     /// Batch gets file paths by IDs (without loading content).
     ///
-    /// Returns a HashMap of FileId -> path for all found IDs.
     /// Missing IDs are silently omitted from the result.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
     pub fn get_paths_batch(&self, file_ids: &[FileId]) -> DbResult<HashMap<FileId, String>> {
         let conn = self.conn()?;
         let ids: Vec<u32> = file_ids.iter().map(|id| id.as_u32()).collect();
@@ -641,13 +562,7 @@ impl Database {
 
     /// Batch gets file IDs by paths (without loading content).
     ///
-    /// Returns a HashMap of path -> FileId for all found paths.
     /// Missing paths are silently omitted from the result.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
     pub fn get_file_ids_batch(&self, paths: &[String]) -> DbResult<HashMap<String, FileId>> {
         let conn = self.conn()?;
         query_batch_map(
@@ -659,11 +574,6 @@ impl Database {
     }
 
     /// Gets total file count.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the query fails.
     pub fn file_count(&self) -> DbResult<u64> {
         let conn = self.conn()?;
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))?;
@@ -671,11 +581,6 @@ impl Database {
     }
 
     /// Deletes a file from the index.
-    ///
-    /// # Errors
-    ///
-    /// Returns `DbError::Pool` if no connection is available.
-    /// Returns `DbError::Sqlite` if the delete operation fails.
     pub fn delete_file(&self, path: &str) -> DbResult<bool> {
         let conn = self.conn()?;
         Self::delete_file_on(&conn, path)

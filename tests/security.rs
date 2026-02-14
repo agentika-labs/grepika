@@ -156,6 +156,7 @@ fn test_diff_tool_blocks_path_traversal() {
             file1: "../etc/passwd".to_string(),
             file2: "main.rs".to_string(),
             context: 3,
+            max_lines: 5000,
         },
     );
     assert!(result.is_err(), "Should block path traversal in file1");
@@ -167,23 +168,10 @@ fn test_diff_tool_blocks_path_traversal() {
             file1: "main.rs".to_string(),
             file2: "../etc/shadow".to_string(),
             context: 3,
+            max_lines: 5000,
         },
     );
     assert!(result.is_err(), "Should block path traversal in file2");
-}
-
-#[test]
-fn test_related_tool_blocks_path_traversal() {
-    let (_dir, service, _indexer) = setup_test_services();
-
-    let result = execute_related(
-        &service,
-        RelatedInput {
-            path: "../../etc/passwd".to_string(),
-            limit: 10,
-        },
-    );
-    assert!(result.is_err(), "Should block path traversal");
 }
 
 // =============================================================================
@@ -271,6 +259,7 @@ fn test_diff_tool_blocks_sensitive_files() {
             file1: ".env".to_string(),
             file2: "main.rs".to_string(),
             context: 3,
+            max_lines: 5000,
         },
     );
     assert!(result.is_err(), "Should block .env in file1");
@@ -282,23 +271,10 @@ fn test_diff_tool_blocks_sensitive_files() {
             file1: "main.rs".to_string(),
             file2: ".env.production".to_string(),
             context: 3,
+            max_lines: 5000,
         },
     );
     assert!(result.is_err(), "Should block .env.production in file2");
-}
-
-#[test]
-fn test_related_tool_blocks_sensitive_files() {
-    let (_dir, service, _indexer) = setup_test_services();
-
-    let result = execute_related(
-        &service,
-        RelatedInput {
-            path: ".env".to_string(),
-            limit: 10,
-        },
-    );
-    assert!(result.is_err(), "Should block .env file");
 }
 
 // =============================================================================

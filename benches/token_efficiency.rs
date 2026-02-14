@@ -4,301 +4,91 @@
 //! The goal is to quantify the break-even point where MCP schema overhead
 //! is offset by per-query token savings.
 //!
-//! Run with: `cargo bench token_efficiency`
+//! Uses the **real grepika codebase** (or `BENCH_REPO_PATH`) with queries
+//! covering all 4 `QueryIntent` categories.
+//!
+//! Run with: `cargo bench --bench token_efficiency`
 //! View reports: `open target/criterion/report/index.html`
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use grepika::bench_utils::{BenchmarkStats, BreakEvenAnalysis, ComparisonResult, TokenMetrics};
 use grepika::db::Database;
-use grepika::services::SearchService;
-use grepika::tools::{SearchOutput, SearchResultItem};
+use grepika::server::GrepikaServer;
+use grepika::services::{Indexer, SearchService, TrigramIndex};
+use grepika::tools::{MatchSnippetOutput, SearchOutput, SearchResultItem};
+use rmcp::model::{CallToolResult, RawContent};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
-use tempfile::TempDir;
+use std::sync::{Arc, RwLock};
 
 // ============================================================================
-// Test Fixtures
+// Real Codebase Setup
 // ============================================================================
 
-/// Creates a test codebase with realistic Rust code.
-fn create_test_codebase() -> (TempDir, Arc<Database>, SearchService) {
-    let dir = TempDir::new().expect("Failed to create temp dir");
-    let db = Arc::new(Database::in_memory().expect("Failed to create database"));
+/// Sets up a real codebase for benchmarking.
+///
+/// Uses the grepika repository itself by default, or `BENCH_REPO_PATH` if set.
+/// Index is stored in `target/bench_cache/` for fast incremental reindexing.
+fn setup_real_codebase() -> (PathBuf, Arc<Database>, SearchService) {
+    let root = std::env::var("BENCH_REPO_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
 
-    // Create realistic source files
-    let files = vec![
-        (
-            "src/auth.rs",
-            r#"
-//! Authentication module.
+    let db_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("bench_cache");
+    fs::create_dir_all(&db_dir).expect("bench cache dir");
+    let db_path = db_dir.join("token_efficiency.db");
+    let db = Arc::new(Database::open(&db_path).expect("open DB"));
 
-use crate::config::Config;
-use crate::error::AuthError;
+    // Index (incremental — fast on rerun)
+    let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+    let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
+    indexer.index(None, false).expect("index");
 
-/// Authenticates a user with the given credentials.
-pub fn authenticate(username: &str, password: &str, config: &Config) -> Result<User, AuthError> {
-    let hash = hash_password(password);
-    let user = find_user(username)?;
-    verify_password(&user, &hash)?;
-    Ok(user)
+    let search = SearchService::new(Arc::clone(&db), root.clone()).expect("search service");
+    (root, db, search)
 }
 
-/// Validates an authentication token.
-pub fn validate_token(token: &str) -> Result<Claims, AuthError> {
-    let decoded = decode_jwt(token)?;
-    if decoded.is_expired() {
-        return Err(AuthError::TokenExpired);
-    }
-    Ok(decoded.claims)
-}
+// ============================================================================
+// Query Patterns (all 4 QueryIntent categories)
+// ============================================================================
 
-fn hash_password(password: &str) -> String {
-    // Implementation
-    password.to_string()
-}
-
-fn find_user(username: &str) -> Result<User, AuthError> {
-    // Database lookup
-    Ok(User { name: username.to_string() })
-}
-
-fn verify_password(user: &User, hash: &str) -> Result<(), AuthError> {
-    // Password verification
-    Ok(())
-}
-"#,
-        ),
-        (
-            "src/config.rs",
-            r#"
-//! Configuration module.
-
-use std::env;
-
-/// Application configuration.
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub database_url: String,
-    pub auth_secret: String,
-    pub port: u16,
-    pub debug: bool,
-}
-
-impl Config {
-    /// Loads configuration from environment variables.
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Ok(Self {
-            database_url: env::var("DATABASE_URL")?,
-            auth_secret: env::var("AUTH_SECRET")?,
-            port: env::var("PORT").unwrap_or("8080".to_string()).parse()?,
-            debug: env::var("DEBUG").map(|v| v == "true").unwrap_or(false),
-        })
-    }
-
-    /// Creates a default configuration for testing.
-    pub fn default_test() -> Self {
-        Self {
-            database_url: "sqlite::memory:".to_string(),
-            auth_secret: "test_secret".to_string(),
-            port: 8080,
-            debug: true,
-        }
-    }
-}
-"#,
-        ),
-        (
-            "src/handler.rs",
-            r#"
-//! Request handlers.
-
-use crate::auth::{authenticate, validate_token};
-use crate::config::Config;
-use crate::error::HandlerError;
-
-/// Handles login requests.
-pub async fn handle_login(
-    request: LoginRequest,
-    config: &Config,
-) -> Result<LoginResponse, HandlerError> {
-    let user = authenticate(&request.username, &request.password, config)?;
-    let token = generate_token(&user)?;
-    Ok(LoginResponse { token, user_id: user.id })
-}
-
-/// Handles authenticated requests.
-pub async fn handle_protected_resource(
-    token: &str,
-    config: &Config,
-) -> Result<ResourceResponse, HandlerError> {
-    let claims = validate_token(token)?;
-    let resource = fetch_resource(&claims.user_id)?;
-    Ok(ResourceResponse { data: resource })
-}
-
-/// Handles user profile updates.
-pub async fn handle_profile_update(
-    token: &str,
-    update: ProfileUpdate,
-) -> Result<ProfileResponse, HandlerError> {
-    let claims = validate_token(token)?;
-    update_profile(&claims.user_id, update)?;
-    Ok(ProfileResponse { success: true })
-}
-"#,
-        ),
-        (
-            "src/error.rs",
-            r#"
-//! Error types.
-
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum AuthError {
-    #[error("Invalid credentials")]
-    InvalidCredentials,
-    #[error("Token expired")]
-    TokenExpired,
-    #[error("User not found: {0}")]
-    UserNotFound(String),
-}
-
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("Missing environment variable: {0}")]
-    MissingVar(String),
-    #[error("Invalid configuration: {0}")]
-    Invalid(String),
-}
-
-#[derive(Debug, Error)]
-pub enum HandlerError {
-    #[error("Authentication error: {0}")]
-    Auth(#[from] AuthError),
-    #[error("Not found: {0}")]
-    NotFound(String),
-    #[error("Internal error")]
-    Internal,
-}
-"#,
-        ),
-        (
-            "src/main.rs",
-            r#"
-//! Main entry point.
-
-mod auth;
-mod config;
-mod error;
-mod handler;
-
-use config::Config;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::from_env()?;
-
-    println!("Starting server on port {}", config.port);
-
-    // Server setup would go here
-    Ok(())
-}
-"#,
-        ),
-        (
-            "src/database.rs",
-            r#"
-//! Database operations.
-
-use crate::error::DatabaseError;
-
-pub struct DatabasePool {
-    connection_string: String,
-}
-
-impl DatabasePool {
-    pub fn new(connection_string: &str) -> Result<Self, DatabaseError> {
-        Ok(Self {
-            connection_string: connection_string.to_string(),
-        })
-    }
-
-    pub async fn query<T>(&self, sql: &str) -> Result<Vec<T>, DatabaseError> {
-        // Query implementation
-        Ok(vec![])
-    }
-
-    pub async fn execute(&self, sql: &str) -> Result<u64, DatabaseError> {
-        // Execute implementation
-        Ok(0)
-    }
-}
-"#,
-        ),
-        (
-            "tests/auth_test.rs",
-            r#"
-//! Authentication tests.
-
-use crate::auth::{authenticate, validate_token};
-use crate::config::Config;
-
-#[test]
-fn test_authenticate_success() {
-    let config = Config::default_test();
-    let result = authenticate("user", "password", &config);
-    assert!(result.is_ok());
-}
-
-#[test]
-fn test_authenticate_invalid_password() {
-    let config = Config::default_test();
-    let result = authenticate("user", "wrong", &config);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_validate_token_expired() {
-    let result = validate_token("expired_token");
-    assert!(result.is_err());
-}
-"#,
-        ),
-    ];
-
-    for (path, content) in files {
-        let full_path = dir.path().join(path);
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).expect("Failed to create directory");
-        }
-        fs::write(&full_path, content).expect("Failed to write file");
-        db.upsert_file(
-            full_path.to_string_lossy().as_ref(),
-            content,
-            xxhash_rust::xxh3::xxh3_64(content.as_bytes()),
-        )
-        .expect("Failed to insert file");
-    }
-
-    let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf())
-        .expect("Failed to create search service");
-
-    (dir, db, service)
-}
+/// Benchmark queries covering all QueryIntent categories.
+///
+/// Format: (name, query, expected_intent_description)
+const BENCHMARK_QUERIES: &[(&str, &str, &str)] = &[
+    // ExactSymbol (single word >= 4 chars)
+    ("exact_SearchService", "SearchService", "ExactSymbol"),
+    ("exact_Score", "Score", "ExactSymbol"),
+    ("exact_Database", "Database", "ExactSymbol"),
+    // ShortToken (single word < 4 chars)
+    ("short_fn", "fn", "ShortToken"),
+    ("short_use", "use", "ShortToken"),
+    // NaturalLanguage (multiple words)
+    ("natural_search_flow", "search service", "NaturalLanguage"),
+    (
+        "natural_error_handling",
+        "error handling",
+        "NaturalLanguage",
+    ),
+    // Regex (metacharacters)
+    ("regex_fn_def", r"fn\s+\w+", "Regex"),
+    ("regex_impl_for", r"impl.*for", "Regex"),
+];
 
 // ============================================================================
 // Grepika Output Measurement
 // ============================================================================
 
-/// Measures grepika search output size.
+/// Measures grepika search output size using the real search service.
 fn measure_grepika_search(service: &SearchService, query: &str, limit: usize) -> TokenMetrics {
     let results = service.search(query, limit).unwrap_or_default();
     let root = service.root();
 
-    // Convert to SearchOutput (same format as MCP tool)
     let items: Vec<SearchResultItem> = results
         .iter()
         .map(|r| {
@@ -309,22 +99,24 @@ fn measure_grepika_search(service: &SearchService, query: &str, limit: usize) ->
                 .to_string_lossy()
                 .to_string();
 
-            let mut sources = Vec::new();
-            if r.sources.fts {
-                sources.push("fts".to_string());
-            }
-            if r.sources.grep {
-                sources.push("grep".to_string());
-            }
-            if r.sources.trigram {
-                sources.push("trigram".to_string());
-            }
+            let sources = r.sources.to_compact();
+
+            let snippets: Vec<MatchSnippetOutput> = r
+                .snippets
+                .iter()
+                .map(|s| MatchSnippetOutput {
+                    line: s.line_number,
+                    text: s.line_content.clone(),
+                    highlight_start: s.match_start,
+                    highlight_end: s.match_end,
+                })
+                .collect();
 
             SearchResultItem {
                 path: relative_path,
                 score: r.score.as_f64(),
                 sources,
-                snippets: Vec::new(),
+                snippets,
             }
         })
         .collect();
@@ -339,468 +131,239 @@ fn measure_grepika_search(service: &SearchService, query: &str, limit: usize) ->
 }
 
 // ============================================================================
-// Ripgrep Output Measurement (Claude Grep Proxy)
+// Ripgrep Output Measurement
 // ============================================================================
 
-/// Measures ripgrep output size (simulating Claude's Grep tool).
+/// Returns true if ripgrep is available on the system.
+fn rg_available() -> bool {
+    Command::new("rg").arg("--version").output().is_ok()
+}
+
+/// Measures ripgrep output size (simulating Claude's Grep tool content mode).
 ///
-/// Uses `rg --json` to get structured output with context lines,
-/// then transforms it to match Claude's typical Grep response format.
-fn measure_ripgrep_search(dir: &TempDir, query: &str, limit: usize) -> TokenMetrics {
-    // Try to run ripgrep
+/// Returns None if `rg` is not installed.
+fn measure_ripgrep_search(root: &PathBuf, query: &str, limit: usize) -> Option<TokenMetrics> {
     let output = Command::new("rg")
-        .args([
-            "--json", // JSON output
-            "-C",
-            "3", // 3 lines of context (Claude default)
-            "--max-count",
-            &limit.to_string(), // Limit matches per file
-            query,
-        ])
-        .current_dir(dir.path())
+        .args(["--json", "--max-count", &limit.to_string(), query])
+        .current_dir(root)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .output();
-
-    let output = match output {
-        Ok(o) => o,
-        Err(_) => {
-            // ripgrep not available, simulate typical output size
-            return simulate_ripgrep_output(query, limit);
-        }
-    };
+        .output()
+        .ok()?;
 
     if !output.status.success() && output.stdout.is_empty() {
-        // No matches or error
-        return TokenMetrics::default();
+        return Some(TokenMetrics::default());
     }
 
-    // Parse JSON lines output and transform to Claude-like format
     let reader = BufReader::new(output.stdout.as_slice());
     let mut claude_output = String::new();
     let mut result_count = 0;
-    let mut files_found = std::collections::HashSet::new();
+    let mut files_found = HashSet::new();
 
     for line in reader.lines().map_while(Result::ok) {
-        // ripgrep JSON format has type field
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-            match json.get("type").and_then(|t| t.as_str()) {
-                Some("match") => {
-                    if let Some(data) = json.get("data") {
-                        if let Some(path) = data
-                            .get("path")
-                            .and_then(|p| p.get("text"))
-                            .and_then(|t| t.as_str())
-                        {
-                            files_found.insert(path.to_string());
-                        }
-                        // Add the match line to output (simulating Claude's format)
-                        if let Some(lines) = data
-                            .get("lines")
-                            .and_then(|l| l.get("text"))
-                            .and_then(|t| t.as_str())
-                        {
-                            let line_num = data
-                                .get("line_number")
-                                .and_then(|n| n.as_u64())
-                                .unwrap_or(0);
-                            claude_output.push_str(&format!(
-                                "{}:{}: {}\n",
-                                data.get("path")
-                                    .and_then(|p| p.get("text"))
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or(""),
-                                line_num,
-                                lines.trim()
-                            ));
-                            result_count += 1;
-                        }
+            if json.get("type").and_then(|t| t.as_str()) == Some("match") {
+                if let Some(data) = json.get("data") {
+                    if let Some(path) = data
+                        .get("path")
+                        .and_then(|p| p.get("text"))
+                        .and_then(|t| t.as_str())
+                    {
+                        files_found.insert(path.to_string());
+                    }
+                    if let Some(lines) = data
+                        .get("lines")
+                        .and_then(|l| l.get("text"))
+                        .and_then(|t| t.as_str())
+                    {
+                        let line_num = data
+                            .get("line_number")
+                            .and_then(|n| n.as_u64())
+                            .unwrap_or(0);
+                        claude_output.push_str(&format!(
+                            "{}:{}: {}\n",
+                            data.get("path")
+                                .and_then(|p| p.get("text"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or(""),
+                            line_num,
+                            lines.trim()
+                        ));
+                        result_count += 1;
                     }
                 }
-                Some("context") => {
-                    // Add context lines
-                    if let Some(data) = json.get("data") {
-                        if let Some(lines) = data
-                            .get("lines")
-                            .and_then(|l| l.get("text"))
-                            .and_then(|t| t.as_str())
-                        {
-                            let line_num = data
-                                .get("line_number")
-                                .and_then(|n| n.as_u64())
-                                .unwrap_or(0);
-                            claude_output.push_str(&format!(
-                                "{}:{}- {}\n",
-                                data.get("path")
-                                    .and_then(|p| p.get("text"))
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or(""),
-                                line_num,
-                                lines.trim()
-                            ));
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
 
-    TokenMetrics::from_ripgrep_output(&claude_output, result_count, files_found.len())
-}
-
-/// Simulates ripgrep output when rg is not available.
-///
-/// Based on typical Claude Grep output characteristics:
-/// - ~4x more verbose than grepika due to context lines
-fn simulate_ripgrep_output(query: &str, limit: usize) -> TokenMetrics {
-    // Simulate finding matches with context
-    // Typical ripgrep output with 3 lines context is ~4x grepika
-    let simulated_bytes = (query.len() + 50) * limit * 4; // ~4x multiplier for context
-    TokenMetrics {
-        output_bytes: simulated_bytes,
-        estimated_tokens: simulated_bytes / 4,
-        result_count: limit,
-        files_found: limit.min(5), // Assume matches spread across fewer files
-    }
+    Some(TokenMetrics::from_ripgrep_output(
+        &claude_output,
+        result_count,
+        files_found.len(),
+    ))
 }
 
 // ============================================================================
-// MCP Schema Size Measurement
+// Output Format Measurement (CLI, JSON, MCP JSON-RPC)
 // ============================================================================
 
-/// Captures the MCP tool schema JSON for token cost estimation.
+/// Measures a grepika search result in all three output formats.
 ///
-/// This measures the one-time cost paid when an MCP server is initialized.
-fn measure_mcp_schema_size() -> usize {
-    // Manually construct schema representation matching rmcp output
-    // This is based on the 11 tools defined in server.rs
-    let schema = serde_json::json!({
-        "tools": [
-            {
-                "name": "search",
-                "description": "Search for code patterns. Supports regex and natural language queries.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query (regex or natural language)"},
-                        "limit": {"type": "integer", "description": "Maximum results (default: 20)"},
-                        "mode": {"type": "string", "description": "Search mode: combined, fts, or grep (default: combined)"}
-                    },
-                    "required": ["query"]
-                }
-            },
-            {
-                "name": "relevant",
-                "description": "Find files most relevant to a topic. Uses combined search for best results.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "topic": {"type": "string", "description": "Topic or concept to search for"},
-                        "limit": {"type": "integer", "description": "Maximum files (default: 10)"}
-                    },
-                    "required": ["topic"]
-                }
-            },
-            {
-                "name": "get",
-                "description": "Get file content. Supports line range selection.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path relative to root"},
-                        "start_line": {"type": "integer", "description": "Starting line (1-indexed, default: 1)"},
-                        "end_line": {"type": "integer", "description": "Ending line (0 = end of file)"}
-                    },
-                    "required": ["path"]
-                }
-            },
-            {
-                "name": "outline",
-                "description": "Extract file structure (functions, classes, structs, etc.)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path relative to root"}
-                    },
-                    "required": ["path"]
-                }
-            },
-            {
-                "name": "toc",
-                "description": "Get directory tree structure",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Directory path (default: root)"},
-                        "depth": {"type": "integer", "description": "Maximum depth (default: 3)"}
-                    }
-                }
-            },
-            {
-                "name": "context",
-                "description": "Get surrounding context for a line",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "File path"},
-                        "line": {"type": "integer", "description": "Center line number"},
-                        "context_lines": {"type": "integer", "description": "Lines of context before and after (default: 10)"}
-                    },
-                    "required": ["path", "line"]
-                }
-            },
-            {
-                "name": "stats",
-                "description": "Get index statistics and file type breakdown",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "detailed": {"type": "boolean", "description": "Include detailed breakdown by file type"}
-                    }
-                }
-            },
-            {
-                "name": "related",
-                "description": "Find files related to a source file by shared symbols",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Source file path"},
-                        "limit": {"type": "integer", "description": "Maximum related files (default: 10)"}
-                    },
-                    "required": ["path"]
-                }
-            },
-            {
-                "name": "refs",
-                "description": "Find all references to a symbol/identifier",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "symbol": {"type": "string", "description": "Symbol/identifier to find"},
-                        "limit": {"type": "integer", "description": "Maximum references (default: 50)"}
-                    },
-                    "required": ["symbol"]
-                }
-            },
-            {
-                "name": "index",
-                "description": "Update the search index (incremental by default)",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "force": {"type": "boolean", "description": "Force full re-index"}
-                    }
-                }
-            },
-            {
-                "name": "diff",
-                "description": "Show differences between two files",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "file1": {"type": "string", "description": "First file path"},
-                        "file2": {"type": "string", "description": "Second file path"},
-                        "context": {"type": "integer", "description": "Context lines around changes (default: 3)"}
-                    },
-                    "required": ["file1", "file2"]
-                }
+/// Returns (cli_formatted_bytes, cli_json_bytes, mcp_jsonrpc_bytes).
+fn measure_output_formats(
+    service: &SearchService,
+    query: &str,
+    limit: usize,
+) -> (usize, usize, usize) {
+    let results = service.search(query, limit).unwrap_or_default();
+    let root = service.root();
+
+    let items: Vec<SearchResultItem> = results
+        .iter()
+        .map(|r| {
+            let relative_path = r
+                .path
+                .strip_prefix(root)
+                .unwrap_or(&r.path)
+                .to_string_lossy()
+                .to_string();
+
+            let sources = r.sources.to_compact();
+
+            let snippets: Vec<MatchSnippetOutput> = r
+                .snippets
+                .iter()
+                .map(|s| MatchSnippetOutput {
+                    line: s.line_number,
+                    text: s.line_content.clone(),
+                    highlight_start: s.match_start,
+                    highlight_end: s.match_end,
+                })
+                .collect();
+
+            SearchResultItem {
+                path: relative_path,
+                score: r.score.as_f64(),
+                sources,
+                snippets,
             }
-        ]
-    });
+        })
+        .collect();
 
-    serde_json::to_string(&schema).unwrap().len()
+    let search_output = SearchOutput {
+        results: items,
+        has_more: false,
+    };
+
+    // 1. CLI formatted output (via grepika::fmt::fmt_search)
+    let mut cli_buf = Vec::new();
+    grepika::fmt::fmt_search(&mut cli_buf, &search_output, false).expect("fmt_search");
+    let cli_bytes = cli_buf.len();
+
+    // 2. CLI JSON output (what --json produces)
+    let cli_json = serde_json::to_string(&search_output).expect("json serialize");
+    let cli_json_bytes = cli_json.len();
+
+    // 3. MCP JSON-RPC — exact production path from spawn_tool (server.rs)
+    let json = serde_json::to_string(&search_output).expect("json serialize mcp");
+    let result = CallToolResult::success(vec![rmcp::model::Content::text(json)]);
+    let mcp_bytes: usize = result
+        .content
+        .iter()
+        .map(|c| match &c.raw {
+            RawContent::Text(t) => t.text.len(),
+            _ => 0,
+        })
+        .sum();
+
+    (cli_bytes, cli_json_bytes, mcp_bytes)
+}
+
+// ============================================================================
+// MCP Schema Size Measurement (live extraction)
+// ============================================================================
+
+/// Extracts the actual MCP tool schema from GrepikaServer.
+///
+/// Stays in sync with schema changes automatically — no hand-crafted JSON.
+fn measure_mcp_schema_size() -> usize {
+    let server = GrepikaServer::new_empty(None);
+    let tools = server.tool_schemas();
+    serde_json::to_string(&tools).unwrap().len()
 }
 
 // ============================================================================
 // Criterion Benchmarks
 // ============================================================================
 
-/// Benchmarks token output size for different query patterns.
+/// Benchmarks token output size for all QueryIntent categories.
 fn bench_token_output_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("token_output_size");
-    group.sample_size(30); // Statistical minimum
+    group.sample_size(30);
 
-    let (dir, _db, service) = create_test_codebase();
+    let (root, _db, service) = setup_real_codebase();
+    let has_rg = rg_available();
+    if !has_rg {
+        eprintln!("\nripgrep not found — skipping rg comparison benchmarks");
+    }
 
-    let queries = [
-        ("fn_search", "fn authenticate"),
-        ("struct_def", r"struct Config"),
-        ("error_pattern", "Error"),
-        ("impl_block", "impl"),
-        ("use_import", "use crate"),
-    ];
-
-    for (name, pattern) in queries {
-        // Measure grepika output size
-        group.bench_with_input(BenchmarkId::new("grepika", name), &pattern, |b, p| {
-            b.iter(|| black_box(measure_grepika_search(&service, p, 20)))
+    for &(name, query, _intent) in BENCHMARK_QUERIES {
+        group.bench_with_input(BenchmarkId::new("grepika", name), &query, |b, q| {
+            b.iter(|| black_box(measure_grepika_search(&service, q, 20)))
         });
 
-        // Measure ripgrep output size (Claude Grep proxy)
-        group.bench_with_input(BenchmarkId::new("ripgrep", name), &pattern, |b, p| {
-            b.iter(|| black_box(measure_ripgrep_search(&dir, p, 20)))
-        });
+        if has_rg {
+            group.bench_with_input(BenchmarkId::new("ripgrep", name), &query, |b, q| {
+                b.iter(|| black_box(measure_ripgrep_search(&root, q, 20)))
+            });
+        }
     }
 
     group.finish();
 }
 
-/// Benchmarks to collect comparison data for summary.
+/// Benchmarks and collects comparison data, then prints summary.
 fn bench_token_comparison(c: &mut Criterion) {
     let mut group = c.benchmark_group("token_comparison");
     group.sample_size(50);
 
-    let (dir, _db, service) = create_test_codebase();
-
-    let queries = [
-        ("auth", "authenticate"),
-        ("config", "Config"),
-        ("error", "Error"),
-        ("handler", "handle"),
-        ("database", "database"),
-    ];
+    let (root, _db, service) = setup_real_codebase();
+    let has_rg = rg_available();
 
     let mut comparisons = Vec::new();
     let mut grepika_bytes_samples = Vec::new();
     let mut ripgrep_bytes_samples = Vec::new();
 
-    for (name, pattern) in queries {
-        // Collect samples
-        let grepika_metrics = measure_grepika_search(&service, pattern, 20);
-        let ripgrep_metrics = measure_ripgrep_search(&dir, pattern, 20);
-
+    for &(name, query, _intent) in BENCHMARK_QUERIES {
+        let grepika_metrics = measure_grepika_search(&service, query, 20);
         grepika_bytes_samples.push(grepika_metrics.output_bytes as f64);
-        ripgrep_bytes_samples.push(ripgrep_metrics.output_bytes as f64);
 
-        comparisons.push(ComparisonResult::new(
-            name,
-            grepika_metrics,
-            ripgrep_metrics,
-        ));
+        if has_rg {
+            if let Some(ripgrep_metrics) = measure_ripgrep_search(&root, query, 20) {
+                ripgrep_bytes_samples.push(ripgrep_metrics.output_bytes as f64);
+                comparisons.push(ComparisonResult::new(
+                    name,
+                    grepika_metrics,
+                    ripgrep_metrics,
+                ));
+            }
+        }
 
-        // Benchmark the measurements themselves
         group.bench_function(BenchmarkId::new("measure", name), |b| {
-            b.iter(|| {
-                let a = measure_grepika_search(&service, pattern, 20);
-                let r = measure_ripgrep_search(&dir, pattern, 20);
-                black_box((a, r))
-            })
+            b.iter(|| black_box(measure_grepika_search(&service, query, 20)))
         });
     }
 
     group.finish();
 
-    // Print comparison summary
+    // Print comparison summary (grepika-only if rg unavailable)
     print_comparison_summary(&comparisons, &grepika_bytes_samples, &ripgrep_bytes_samples);
+
+    // Print output format comparison
+    print_output_format_comparison(&service);
 }
 
-/// Prints a formatted comparison summary after benchmarks complete.
-fn print_comparison_summary(
-    comparisons: &[ComparisonResult],
-    grepika_samples: &[f64],
-    ripgrep_samples: &[f64],
-) {
-    let schema_bytes = measure_mcp_schema_size();
-    let analysis = BreakEvenAnalysis::calculate(schema_bytes, comparisons);
-    let grepika_stats = BenchmarkStats::from_samples(grepika_samples);
-    let ripgrep_stats = BenchmarkStats::from_samples(ripgrep_samples);
-
-    eprintln!("\n");
-    eprintln!("═══════════════════════════════════════════════════════════════════════");
-    eprintln!("                 TOKEN EFFICIENCY COMPARISON                           ");
-    eprintln!("═══════════════════════════════════════════════════════════════════════");
-    eprintln!();
-    eprintln!(
-        "{:<20} │ {:>12} │ {:>12} │ {:>10}",
-        "Query", "grepika", "ripgrep", "Savings"
-    );
-    eprintln!("─────────────────────┼──────────────┼──────────────┼────────────");
-
-    for c in comparisons {
-        eprintln!(
-            "{:<20} │ {:>10} B │ {:>10} B │ {:>8.1}%",
-            c.query, c.grepika.output_bytes, c.ripgrep.output_bytes, c.savings_percent
-        );
-    }
-
-    eprintln!("─────────────────────┼──────────────┼──────────────┼────────────");
-
-    let avg_savings: f64 =
-        comparisons.iter().map(|c| c.savings_percent).sum::<f64>() / comparisons.len() as f64;
-    eprintln!(
-        "{:<20} │ {:>10.0} B │ {:>10.0} B │ {:>8.1}%",
-        "AVERAGE", grepika_stats.mean, ripgrep_stats.mean, avg_savings
-    );
-
-    eprintln!();
-    eprintln!("Statistical Reliability (CV% < 50% is good):");
-    eprintln!(
-        "  grepika CV%: {:.1}% {}",
-        grepika_stats.cv_percent,
-        if grepika_stats.is_reliable(50.0) {
-            "✓"
-        } else {
-            "⚠"
-        }
-    );
-    eprintln!(
-        "  ripgrep CV%:  {:.1}% {}",
-        ripgrep_stats.cv_percent,
-        if ripgrep_stats.is_reliable(50.0) {
-            "✓"
-        } else {
-            "⚠"
-        }
-    );
-
-    eprintln!();
-    eprintln!("═══════════════════════════════════════════════════════════════════════");
-    eprintln!("                      BREAK-EVEN ANALYSIS                              ");
-    eprintln!("═══════════════════════════════════════════════════════════════════════");
-    eprintln!();
-    eprintln!(
-        "MCP Schema overhead:     {:>6} bytes ({} tokens)",
-        schema_bytes, analysis.schema_tokens
-    );
-    eprintln!(
-        "Per-query savings:       {:>6.0} bytes ({:.0} tokens avg)",
-        analysis.avg_savings_bytes, analysis.avg_savings_tokens
-    );
-    eprintln!(
-        "Break-even point:        {:>6} queries",
-        analysis.break_even_queries
-    );
-    eprintln!();
-
-    if analysis.break_even_queries < 20 {
-        eprintln!(
-            "✓ Sessions with {}+ searches → grepika is more efficient",
-            analysis.break_even_queries
-        );
-        eprintln!(
-            "  Sessions with <{} searches → Built-in Grep wins",
-            analysis.break_even_queries
-        );
-    } else if analysis.break_even_queries < usize::MAX {
-        eprintln!(
-            "⚠ High break-even point ({} queries) - consider for long sessions only",
-            analysis.break_even_queries
-        );
-    } else {
-        eprintln!("⚠ No token savings detected - ripgrep may be more efficient");
-    }
-
-    eprintln!();
-    eprintln!("═══════════════════════════════════════════════════════════════════════");
-}
-
-// ============================================================================
-// Schema Size Benchmark
-// ============================================================================
-
-/// Benchmarks MCP schema serialization overhead.
+/// Benchmarks MCP schema serialization overhead using live extraction.
 fn bench_schema_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("mcp_schema");
     group.sample_size(100);
@@ -811,25 +374,20 @@ fn bench_schema_size(c: &mut Criterion) {
 
     group.finish();
 
-    // Report schema size
     let schema_bytes = measure_mcp_schema_size();
     eprintln!(
         "\nMCP Schema Size: {} bytes (~{} tokens)",
         schema_bytes,
-        schema_bytes / 4
+        (schema_bytes + 2) / 4
     );
 }
-
-// ============================================================================
-// Result Density Benchmark
-// ============================================================================
 
 /// Benchmarks result density (files per token).
 fn bench_result_density(c: &mut Criterion) {
     let mut group = c.benchmark_group("result_density");
     group.sample_size(30);
 
-    let (dir, _db, service) = create_test_codebase();
+    let (_root, _db, service) = setup_real_codebase();
 
     let limits = [5, 10, 20, 50];
 
@@ -840,16 +398,161 @@ fn bench_result_density(c: &mut Criterion) {
                 black_box(metrics.result_density())
             })
         });
-
-        group.bench_with_input(BenchmarkId::new("ripgrep", limit), &limit, |b, &l| {
-            b.iter(|| {
-                let metrics = measure_ripgrep_search(&dir, "fn", l);
-                black_box(metrics.result_density())
-            })
-        });
     }
 
     group.finish();
+}
+
+// ============================================================================
+// Summary Printing
+// ============================================================================
+
+fn print_comparison_summary(
+    comparisons: &[ComparisonResult],
+    grepika_samples: &[f64],
+    ripgrep_samples: &[f64],
+) {
+    let schema_bytes = measure_mcp_schema_size();
+    let grepika_stats = BenchmarkStats::from_samples(grepika_samples);
+
+    eprintln!("\n");
+    eprintln!("═══════════════════════════════════════════════════════════════════════");
+    eprintln!("                 TOKEN EFFICIENCY COMPARISON                           ");
+    eprintln!("═══════════════════════════════════════════════════════════════════════");
+    eprintln!();
+
+    if comparisons.is_empty() {
+        eprintln!("ripgrep not available — showing grepika-only metrics");
+        eprintln!();
+        eprintln!("{:<24} │ {:>12}", "Query", "grepika (B)");
+        eprintln!("─────────────────────────┼──────────────");
+        for (i, sample) in grepika_samples.iter().enumerate() {
+            let name = BENCHMARK_QUERIES.get(i).map(|q| q.0).unwrap_or("?");
+            eprintln!("{:<24} │ {:>10.0} B", name, sample);
+        }
+    } else {
+        let ripgrep_stats = BenchmarkStats::from_samples(ripgrep_samples);
+
+        eprintln!(
+            "{:<24} │ {:>12} │ {:>12} │ {:>10}",
+            "Query", "grepika", "ripgrep", "Savings"
+        );
+        eprintln!("─────────────────────────┼──────────────┼──────────────┼────────────");
+
+        for c in comparisons {
+            eprintln!(
+                "{:<24} │ {:>10} B │ {:>10} B │ {:>8.1}%",
+                c.query, c.grepika.output_bytes, c.ripgrep.output_bytes, c.savings_percent
+            );
+        }
+
+        eprintln!("─────────────────────────┼──────────────┼──────────────┼────────────");
+
+        let avg_savings: f64 =
+            comparisons.iter().map(|c| c.savings_percent).sum::<f64>() / comparisons.len() as f64;
+        eprintln!(
+            "{:<24} │ {:>10.0} B │ {:>10.0} B │ {:>8.1}%",
+            "AVERAGE", grepika_stats.mean, ripgrep_stats.mean, avg_savings
+        );
+
+        eprintln!();
+        eprintln!("Statistical Reliability (CV% < 50% is good):");
+        eprintln!(
+            "  grepika CV%: {:.1}% {}",
+            grepika_stats.cv_percent,
+            if grepika_stats.is_reliable(50.0) {
+                "✓"
+            } else {
+                "⚠"
+            }
+        );
+        eprintln!(
+            "  ripgrep CV%: {:.1}% {}",
+            ripgrep_stats.cv_percent,
+            if ripgrep_stats.is_reliable(50.0) {
+                "✓"
+            } else {
+                "⚠"
+            }
+        );
+
+        // Break-even analysis (only meaningful with rg comparison data)
+        let analysis = BreakEvenAnalysis::calculate(schema_bytes, comparisons);
+
+        eprintln!();
+        eprintln!("═══════════════════════════════════════════════════════════════════════");
+        eprintln!("                      BREAK-EVEN ANALYSIS                              ");
+        eprintln!("═══════════════════════════════════════════════════════════════════════");
+        eprintln!();
+        eprintln!(
+            "MCP Schema overhead:     {:>6} bytes ({} tokens)",
+            schema_bytes, analysis.schema_tokens
+        );
+        eprintln!(
+            "Per-query savings:       {:>6.0} bytes ({:.0} tokens avg)",
+            analysis.avg_savings_bytes, analysis.avg_savings_tokens
+        );
+        eprintln!(
+            "Break-even (raw):        {:>6} queries",
+            analysis.break_even_queries
+        );
+        eprintln!(
+            "Break-even (cached):     {:>6} queries  (90% prompt cache discount)",
+            analysis.cached_break_even_queries
+        );
+        eprintln!();
+
+        if analysis.break_even_queries < 20 {
+            eprintln!(
+                "✓ Sessions with {}+ searches → grepika is more efficient",
+                analysis.break_even_queries
+            );
+            eprintln!(
+                "  With prompt caching: {}+ searches",
+                analysis.cached_break_even_queries
+            );
+        } else if analysis.break_even_queries < usize::MAX {
+            eprintln!(
+                "⚠ High break-even point ({} queries) - consider for long sessions only",
+                analysis.break_even_queries
+            );
+        } else {
+            eprintln!("⚠ No token savings detected - ripgrep may be more efficient");
+        }
+    }
+
+    eprintln!();
+    eprintln!("═══════════════════════════════════════════════════════════════════════");
+}
+
+/// Prints a comparison of output sizes across CLI, JSON, and MCP formats.
+fn print_output_format_comparison(service: &SearchService) {
+    eprintln!();
+    eprintln!("═══════════════════════════════════════════════════════════════════════");
+    eprintln!("                  OUTPUT FORMAT COMPARISON                             ");
+    eprintln!("═══════════════════════════════════════════════════════════════════════");
+    eprintln!();
+    eprintln!(
+        "{:<24} │ {:>10} │ {:>10} │ {:>10} │ {:>10}",
+        "Query", "CLI fmt", "CLI JSON", "MCP JSON", "MCP overhead"
+    );
+    eprintln!("─────────────────────────┼────────────┼────────────┼────────────┼────────────");
+
+    for &(name, query, _intent) in BENCHMARK_QUERIES {
+        let (cli, json, mcp) = measure_output_formats(service, query, 20);
+        let overhead = if json > 0 {
+            ((mcp as f64 - json as f64) / json as f64) * 100.0
+        } else {
+            0.0
+        };
+        eprintln!(
+            "{:<24} │ {:>8} B │ {:>8} B │ {:>8} B │ {:>8.1}%",
+            name, cli, json, mcp, overhead
+        );
+    }
+
+    eprintln!();
+    eprintln!("═══════════════════════════════════════════════════════════════════════");
 }
 
 // ============================================================================

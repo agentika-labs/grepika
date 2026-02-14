@@ -23,6 +23,10 @@ pub struct TrigramIndex {
     index: AHashMap<Trigram, RoaringBitmap>,
     /// Trigrams modified since last `take_dirty_entries()` call
     dirty: AHashSet<Trigram>,
+    /// Reverse index: FileId -> trigrams in that file.
+    /// Enables O(trigrams_per_file) removal instead of O(total_trigrams).
+    /// Uses Vec over AHashSet for ~50-70% memory savings (3 bytes/entry vs ~32).
+    reverse: AHashMap<FileId, Vec<Trigram>>,
 }
 
 impl Default for TrigramIndex {
@@ -30,6 +34,7 @@ impl Default for TrigramIndex {
         Self {
             index: AHashMap::new(),
             dirty: AHashSet::new(),
+            reverse: AHashMap::new(),
         }
     }
 }
@@ -46,25 +51,30 @@ impl TrigramIndex {
 
     /// Adds a file's content to the index.
     pub fn add_file(&mut self, file_id: FileId, content: &str) {
+        let mut seen = AHashSet::new();
         for trigram in Trigram::extract(content) {
             self.index
                 .entry(trigram)
                 .or_default()
                 .insert(file_id.as_u32());
             self.dirty.insert(trigram);
+            seen.insert(trigram);
         }
+        self.reverse.insert(file_id, seen.into_iter().collect());
     }
 
     /// Removes a file from the index.
     ///
-    /// O(total_trigrams) — iterates all trigram bitmaps to remove the file ID.
-    /// Acceptable for few deletions per cycle; consider a reverse index
-    /// (FileId → Set<Trigram>) if bulk deletions become common.
+    /// O(trigrams_per_file) via reverse index lookup instead of O(total_trigrams).
     pub fn remove_file(&mut self, file_id: FileId) {
         let id = file_id.as_u32();
-        for (trigram, bitmap) in &mut self.index {
-            if bitmap.remove(id) {
-                self.dirty.insert(*trigram);
+        if let Some(trigrams) = self.reverse.remove(&file_id) {
+            for trigram in trigrams {
+                if let Some(bitmap) = self.index.get_mut(&trigram) {
+                    if bitmap.remove(id) {
+                        self.dirty.insert(trigram);
+                    }
+                }
             }
         }
     }
@@ -116,10 +126,11 @@ impl TrigramIndex {
         self.index.values().map(|b| b.len()).sum()
     }
 
-    /// Clears the index and dirty set.
+    /// Clears the index, dirty set, and reverse index.
     pub fn clear(&mut self) {
         self.index.clear();
         self.dirty.clear();
+        self.reverse.clear();
     }
 
     /// Returns the number of dirty (modified) trigrams since last persistence.
@@ -211,6 +222,7 @@ impl TrigramIndex {
         I: IntoIterator<Item = (Vec<u8>, Vec<u8>)>,
     {
         let mut index = AHashMap::new();
+        let mut reverse: AHashMap<FileId, Vec<Trigram>> = AHashMap::new();
 
         for (trigram_bytes, bitmap_bytes) in entries {
             // Trigram must be exactly 3 bytes
@@ -221,6 +233,13 @@ impl TrigramIndex {
             let trigram = Trigram([trigram_bytes[0], trigram_bytes[1], trigram_bytes[2]]);
 
             if let Some(bitmap) = Self::bitmap_from_bytes(&bitmap_bytes) {
+                // Build reverse index from the loaded bitmaps
+                for file_id_u32 in bitmap.iter() {
+                    reverse
+                        .entry(FileId::new(file_id_u32))
+                        .or_default()
+                        .push(trigram);
+                }
                 index.insert(trigram, bitmap);
             }
         }
@@ -228,6 +247,7 @@ impl TrigramIndex {
         Self {
             index,
             dirty: AHashSet::new(),
+            reverse,
         }
     }
 }

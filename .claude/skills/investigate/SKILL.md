@@ -4,9 +4,7 @@ context: fork
 agent: Explore
 allowed-tools:
   - mcp__grepika__search
-  - mcp__grepika__relevant
   - mcp__grepika__refs
-  - mcp__grepika__related
   - mcp__grepika__outline
   - mcp__grepika__context
   - mcp__grepika__get
@@ -41,8 +39,8 @@ If any tool returns "No active workspace", call `mcp__grepika__add_workspace` wi
    - Use `mcp__grepika__refs` to trace function calls
    - Build the call chain from entry point to error location
 
-4. **Discover related files**
-   - Use `mcp__grepika__related` to find connected modules
+4. **Discover connected files**
+   - Use `mcp__grepika__refs` to find connected modules via shared symbols
    - Look for related error handling, logging, or retry logic
 
 5. **Extract file structure**

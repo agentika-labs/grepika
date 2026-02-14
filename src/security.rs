@@ -488,6 +488,12 @@ fn is_blocked_system_path(canonical: &Path) -> bool {
             "/lib",
             "/lib64",
             "/opt",
+            // merged-/usr symlink targets (Ubuntu, Fedora, Arch, etc.)
+            "/usr/bin",
+            "/usr/sbin",
+            "/usr/lib",
+            "/usr/lib64",
+            "/usr/local",
             // macOS symlink targets
             "/private/etc",
             "/private/var",
@@ -511,7 +517,18 @@ const BLOCKED_USER_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".gpg", ".config"
 ///
 /// The `--root` CLI flag bypasses this since it's user-provided, not LLM-provided.
 pub fn validate_workspace_root(path: &Path) -> Result<PathBuf, String> {
-    // Canonicalize first to resolve symlinks (e.g., /tmp/innocent -> /etc)
+    // Pre-canonicalization check: reject blocked paths before symlink resolution.
+    // On merged-/usr distros (Ubuntu, Fedora), /bin -> /usr/bin. Checking the
+    // original path catches `/bin` even when canonicalize() would resolve it to
+    // `/usr/bin` (which has 3 components and might slip past the depth check).
+    if is_blocked_system_path(path) {
+        return Err(format!(
+            "Cannot use '{}' as workspace root: system-critical directory.",
+            path.display()
+        ));
+    }
+
+    // Canonicalize to resolve symlinks (e.g., /tmp/innocent -> /etc)
     let canonical = dunce::canonicalize(path).map_err(|e| {
         format!(
             "Cannot access '{}': {}. Ensure the path exists and is readable.",
@@ -1051,6 +1068,12 @@ mod tests {
         assert!(is_blocked_system_path(Path::new("/")));
         assert!(is_blocked_system_path(Path::new("/etc")));
         assert!(is_blocked_system_path(Path::new("/var")));
+        assert!(is_blocked_system_path(Path::new("/bin")));
+        assert!(is_blocked_system_path(Path::new("/sbin")));
+        assert!(is_blocked_system_path(Path::new("/usr/bin")));
+        assert!(is_blocked_system_path(Path::new("/usr/sbin")));
+        assert!(is_blocked_system_path(Path::new("/usr/lib")));
+        assert!(is_blocked_system_path(Path::new("/usr/local")));
         assert!(is_blocked_system_path(Path::new("/private/etc")));
         assert!(!is_blocked_system_path(Path::new("/home/user/project")));
         assert!(!is_blocked_system_path(Path::new("/Users/adam/code")));

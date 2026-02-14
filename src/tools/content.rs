@@ -52,8 +52,9 @@ pub struct GetOutput {
     pub path: String,
     /// File content (optionally line-bounded)
     pub content: String,
-    /// Total lines in file
-    pub total_lines: usize,
+    /// Total lines in file (None for large files read via streaming)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<usize>,
     /// Starting line returned
     pub start_line: usize,
     /// Ending line returned
@@ -114,7 +115,7 @@ pub struct OutlineOutput {
 pub struct Symbol {
     /// Symbol name
     pub name: String,
-    /// Symbol kind (function, class, struct, etc.)
+    /// Symbol kind (fn, class, struct, etc.)
     pub kind: String,
     /// Start line number
     pub line: usize,
@@ -122,7 +123,12 @@ pub struct Symbol {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<usize>,
     /// Indentation level
+    #[serde(skip_serializing_if = "is_zero")]
     pub level: usize,
+}
+
+const fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 /// Executes the outline tool.
@@ -305,11 +311,12 @@ pub fn execute_context(
 /// fewer syscalls.
 ///
 /// Returns `(content, total_lines, actual_start, actual_end)`.
+/// `total_lines` is `None` for large files (streaming path avoids reading to EOF).
 fn read_line_range(
     path: &Path,
     start_line: usize,
     end_line: usize,
-) -> Result<(String, usize, usize, usize), String> {
+) -> Result<(String, Option<usize>, usize, usize), String> {
     let metadata = fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {e}"))?;
 
     if metadata.len() > STREAMING_THRESHOLD {
@@ -320,36 +327,44 @@ fn read_line_range(
 }
 
 /// Streaming implementation for large files.
+///
+/// Stops reading as soon as the requested range is collected — does NOT
+/// iterate to EOF for a total line count (returns `None` instead).
 fn read_line_range_streaming(
     path: &Path,
     start_line: usize,
     end_line: usize,
-) -> Result<(String, usize, usize, usize), String> {
+) -> Result<(String, Option<usize>, usize, usize), String> {
     let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
     let reader = BufReader::new(file);
 
     let mut selected = Vec::new();
-    let mut total_lines = 0;
 
     // Convert to 0-indexed
     let start = start_line.saturating_sub(1);
     let end = if end_line == 0 { usize::MAX } else { end_line };
 
+    let mut last_line_seen = 0;
     for (i, line_result) in reader.lines().enumerate() {
-        total_lines = i + 1;
+        last_line_seen = i + 1;
         let line_num = i + 1; // 1-indexed
 
         if line_num > start && line_num <= end {
             let line = line_result.map_err(|e| format!("Failed to read line: {e}"))?;
             selected.push(line);
         }
-        // Continue iterating to get accurate total_lines count
+
+        // Stop once we've passed the requested range — no need to read to EOF
+        if line_num >= end {
+            break;
+        }
     }
 
-    let actual_start = start.min(total_lines.saturating_sub(1)) + 1;
-    let actual_end = end.min(total_lines);
+    let actual_start = start.min(last_line_seen.saturating_sub(1)) + 1;
+    let actual_end = end.min(last_line_seen);
 
-    Ok((selected.join("\n"), total_lines, actual_start, actual_end))
+    // Return None for total_lines — streaming avoids reading the entire file
+    Ok((selected.join("\n"), None, actual_start, actual_end))
 }
 
 /// Full-file read for small files (faster due to fewer syscalls).
@@ -357,7 +372,7 @@ fn read_line_range_full(
     path: &Path,
     start_line: usize,
     end_line: usize,
-) -> Result<(String, usize, usize, usize), String> {
+) -> Result<(String, Option<usize>, usize, usize), String> {
     let content = fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
 
     let lines: Vec<&str> = content.lines().collect();
@@ -372,7 +387,7 @@ fn read_line_range_full(
 
     let selected_content = lines[start..end].join("\n");
 
-    Ok((selected_content, total_lines, start + 1, end))
+    Ok((selected_content, Some(total_lines), start + 1, end))
 }
 
 /// Reads context around a line using streaming for large files.
@@ -556,7 +571,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             .to_string();
         return Some(Symbol {
             name,
-            kind: "function".to_string(),
+            kind: "fn".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -646,7 +661,7 @@ fn extract_rust_symbol(line: &str, line_num: usize, level: usize) -> Option<Symb
             .to_string();
         return Some(Symbol {
             name,
-            kind: "module".to_string(),
+            kind: "mod".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -665,7 +680,7 @@ fn extract_python_symbol(line: &str, line_num: usize, level: usize) -> Option<Sy
             .to_string();
         return Some(Symbol {
             name,
-            kind: "function".to_string(),
+            kind: "fn".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -697,7 +712,7 @@ fn extract_python_symbol(line: &str, line_num: usize, level: usize) -> Option<Sy
             .to_string();
         return Some(Symbol {
             name,
-            kind: "async_function".to_string(),
+            kind: "fn".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -721,7 +736,7 @@ fn extract_js_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             .to_string();
         return Some(Symbol {
             name,
-            kind: "function".to_string(),
+            kind: "fn".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -756,7 +771,7 @@ fn extract_js_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             .to_string();
         return Some(Symbol {
             name,
-            kind: "function".to_string(),
+            kind: "fn".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -782,7 +797,7 @@ fn extract_go_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
         };
         return Some(Symbol {
             name,
-            kind: "function".to_string(),
+            kind: "fn".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -812,7 +827,7 @@ fn extract_go_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
             .to_string();
         return Some(Symbol {
             name,
-            kind: "interface".to_string(),
+            kind: "iface".to_string(),
             line: line_num,
             end_line: None,
             level,
@@ -822,63 +837,56 @@ fn extract_go_symbol(line: &str, line_num: usize, level: usize) -> Option<Symbol
     None
 }
 
-/// Builds an indented text tree, writing directly into the output string.
+/// Builds an indented text tree using `ignore::WalkBuilder` to respect `.gitignore`.
 fn build_toc_text(
     path: &Path,
     max_depth: usize,
-    current_depth: usize,
+    _current_depth: usize,
     output: &mut String,
     total_files: &mut usize,
     total_dirs: &mut usize,
 ) -> Result<(), String> {
-    if current_depth >= max_depth || !path.is_dir() {
-        return Ok(());
-    }
+    use ignore::WalkBuilder;
 
-    let mut items: Vec<_> = fs::read_dir(path)
-        .map_err(|e| format!("Failed to read directory: {e}"))?
-        .filter_map(Result::ok)
-        .collect();
+    let walker = WalkBuilder::new(path)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true)
+        .hidden(false) // show dotfiles not in gitignore
+        .max_depth(Some(max_depth))
+        .sort_by_file_path(|a, b| {
+            // Directories first, then alphabetically
+            let a_is_dir = a.is_dir();
+            let b_is_dir = b.is_dir();
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.file_name().cmp(&b.file_name()),
+            }
+        })
+        .build();
 
-    // Sort: directories first, then alphabetically
-    items.sort_by(|a, b| {
-        let a_is_dir = a.path().is_dir();
-        let b_is_dir = b.path().is_dir();
-        match (a_is_dir, b_is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.file_name().cmp(&b.file_name()),
-        }
-    });
-
-    let indent = "  ".repeat(current_depth);
-
-    for item in items {
-        let item_path = item.path();
-        let name = item.file_name().to_string_lossy().to_string();
-
-        // Skip hidden files
-        if name.starts_with('.') {
+    for entry in walker.filter_map(Result::ok) {
+        let depth = entry.depth();
+        // Skip the root directory itself
+        if depth == 0 {
             continue;
         }
 
-        if item_path.is_dir() {
+        let name = entry.file_name().to_str().unwrap_or_default();
+
+        let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
+        let indent = "  ".repeat(depth - 1);
+
+        if is_dir {
             *total_dirs += 1;
             output.push_str(&indent);
-            output.push_str(&name);
+            output.push_str(name);
             output.push_str("/\n");
-            build_toc_text(
-                &item_path,
-                max_depth,
-                current_depth + 1,
-                output,
-                total_files,
-                total_dirs,
-            )?;
         } else {
             *total_files += 1;
             output.push_str(&indent);
-            output.push_str(&name);
+            output.push_str(name);
             output.push('\n');
         }
     }

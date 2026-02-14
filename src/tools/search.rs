@@ -103,6 +103,10 @@ const fn is_zero(v: &usize) -> bool {
     *v == 0
 }
 
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
 /// Output for the search tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchOutput {
@@ -119,8 +123,8 @@ pub struct SearchResultItem {
     pub path: String,
     /// Relevance score (0.0 - 1.0)
     pub score: f64,
-    /// Search sources that matched
-    pub sources: Vec<String>,
+    /// Search sources that matched (f=fts, g=grep, t=trigram)
+    pub sources: String,
     /// Matching line snippets (up to 3) showing why this file matched
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<MatchSnippetOutput>,
@@ -160,13 +164,8 @@ pub fn execute_search(
         .filter(|r| security::is_sensitive_file(&r.path).is_none())
         .map(|r| SearchResultItem {
             path: relativize_path(&r.path, root),
-            score: r.score.as_f64(),
-            sources: r
-                .sources
-                .to_labels()
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            score: round2(r.score.as_f64()),
+            sources: r.sources.to_compact(),
             snippets: map_snippets(&r.snippets),
         })
         .collect();
@@ -175,128 +174,4 @@ pub fn execute_search(
         results: items,
         has_more,
     })
-}
-
-/// Input for the relevant tool (finds most relevant files for a topic).
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RelevantInput {
-    /// Topic or concept to find relevant files for
-    pub topic: String,
-    /// Maximum files to return (default: 10)
-    #[serde(default = "default_relevant_limit")]
-    pub limit: usize,
-}
-
-const fn default_relevant_limit() -> usize {
-    10
-}
-
-/// Output for the relevant tool.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RelevantOutput {
-    /// Most relevant files
-    pub files: Vec<RelevantFile>,
-    /// Whether more results exist
-    pub has_more: bool,
-}
-
-/// A relevant file result.
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct RelevantFile {
-    /// File path
-    pub path: String,
-    /// Relevance score
-    pub score: f64,
-    /// Brief explanation of relevance
-    pub reason: String,
-    /// Matching line snippets showing why this file is relevant
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub snippets: Vec<MatchSnippetOutput>,
-}
-
-/// Executes the relevant tool.
-///
-/// # Errors
-///
-/// Returns a `ServerError` if the search operation fails.
-pub fn execute_relevant(
-    service: &Arc<SearchService>,
-    input: RelevantInput,
-) -> crate::error::Result<RelevantOutput> {
-    // Overcollect by 1 for has_more detection
-    let request_limit = input.limit + 1;
-
-    // Use combined search for best relevance
-    let results = service.search(&input.topic, request_limit)?;
-
-    let has_more = results.len() > input.limit;
-    let root = service.root();
-
-    // Extract query keywords for reason generation
-    let query_words: Vec<&str> = input.topic.split_whitespace().collect();
-
-    let files: Vec<_> = results
-        .iter()
-        .take(input.limit)
-        .filter(|r| security::is_sensitive_file(&r.path).is_none())
-        .map(|r| {
-            let relative_path = relativize_path(&r.path, root);
-            let reason = generate_relevant_reason(r, &query_words, &relative_path);
-
-            RelevantFile {
-                path: relative_path,
-                score: r.score.as_f64(),
-                reason,
-                snippets: map_snippets(&r.snippets),
-            }
-        })
-        .collect();
-
-    Ok(RelevantOutput { files, has_more })
-}
-
-/// Generates a human-readable relevance reason based on matched keywords.
-fn generate_relevant_reason(
-    result: &crate::services::SearchHit,
-    query_words: &[&str],
-    path: &str,
-) -> String {
-    // Check which query words appear in the path or snippets
-    let mut matched_keywords: Vec<String> = Vec::new();
-
-    for &word in query_words {
-        if word.len() < 3 {
-            continue;
-        }
-        let word_lower = word.to_lowercase();
-
-        // Check path
-        if path.to_lowercase().contains(&word_lower) {
-            if !matched_keywords.contains(&word.to_string()) {
-                matched_keywords.push(word.to_string());
-            }
-            continue;
-        }
-
-        // Check snippets
-        for snippet in &result.snippets {
-            if snippet.line_content.to_lowercase().contains(&word_lower)
-                && !matched_keywords.contains(&word.to_string())
-            {
-                matched_keywords.push(word.to_string());
-                break;
-            }
-        }
-    }
-
-    if !matched_keywords.is_empty() {
-        format!("Matches keywords: {}", matched_keywords.join(", "))
-    } else {
-        // Fallback to source-based reason
-        match result.sources.count() {
-            3 => "Strong match across all search backends".to_string(),
-            2 => "Good match across multiple search backends".to_string(),
-            _ => "Match found".to_string(),
-        }
-    }
 }

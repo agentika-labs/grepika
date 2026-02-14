@@ -39,7 +39,6 @@ r2d2_sqlite = "0.26"
 # Fast hashing and bitmaps
 ahash = "0.8"
 roaring = "0.10"
-sha2 = "0.10"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Platform-specific directories
@@ -49,19 +48,21 @@ dirs = "5"
 dunce = "1"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
 schemars = { version = "1", features = ["derive"] }
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+owo-colors = "4"
 
 # Error handling
 thiserror = "2"
 anyhow = "1"
 
 # Logging (MUST go to stderr for MCP)
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Regex for symbol escaping
@@ -79,6 +80,10 @@ harness = false
 name = "token_efficiency"
 harness = false
 
+[[bench]]
+name = "cli_comparison"
+harness = false
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/grepika-{ target }.tar.gz"
 pkg-fmt = "tgz"
@@ -89,9 +94,15 @@ pkg-url = "{ repo }/releases/download/v{ version }/grepika-{ target }.zip"
 pkg-fmt = "zip"
 
 [profile.release]
+opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"
+
+[profile.dist]
+inherits = "release"
+lto = "fat"
 
 [[bin]]
 name = "grepika"

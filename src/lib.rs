@@ -39,6 +39,7 @@
 pub mod bench_utils;
 pub mod db;
 pub mod error;
+pub mod fmt;
 pub mod profiling;
 pub mod security;
 pub mod server;
@@ -49,13 +50,12 @@ pub mod types;
 pub use error::{Result, ServerError};
 pub use types::{FileId, Score, Trigram};
 
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Computes the default database path for a given root directory.
 ///
-/// The path is `~/.cache/grepika/<hash>.db` where `<hash>` is the first
-/// 16 hex characters of the SHA256 hash of the canonical root path.
+/// The path is `~/.cache/grepika/<hash>.db` where `<hash>` is the
+/// 16 hex characters of the xxh3_64 hash of the canonical root path.
 ///
 /// This decouples index storage from the indexed directory, preventing:
 /// - Pollution of git repositories with index files
@@ -67,11 +67,8 @@ use std::path::{Path, PathBuf};
 /// Panics if the cache directory cannot be created.
 #[must_use]
 pub fn default_db_path(root: &Path) -> PathBuf {
-    let mut hasher = Sha256::new();
-    hasher.update(root.to_string_lossy().as_bytes());
-    let result = hasher.finalize();
-    // Use first 8 bytes = 16 hex characters for uniqueness
-    let hash: String = result[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let hash = xxhash_rust::xxh3::xxh3_64(root.to_string_lossy().as_bytes());
+    let hash = format!("{hash:016x}");
 
     let cache_dir = dirs::cache_dir()
         .unwrap_or_else(std::env::temp_dir)

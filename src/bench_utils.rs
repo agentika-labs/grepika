@@ -5,7 +5,27 @@
 
 use serde::Serialize;
 
+/// Anthropic prompt caching reduces schema token cost by ~90% after first turn.
+/// Source: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+const PROMPT_CACHE_DISCOUNT: f64 = 0.10;
+
+/// Estimates token count from byte length.
+///
+/// Uses `(bytes + 2) / 4` (rounding-to-nearest) to match the production
+/// formula in `profiling.rs`.
+///
+/// Note: The bytes/4 approximation is standard for Claude but imprecise —
+/// JSON structural characters ({, ", :) tokenize differently than code keywords.
+/// Results are reliable for *relative* comparisons but not absolute token counts.
+fn estimate_tokens(bytes: usize) -> usize {
+    (bytes + 2) / 4
+}
+
 /// Token metrics for benchmark comparison.
+///
+/// Note: The bytes/4 approximation is standard for Claude but imprecise —
+/// JSON structural characters ({, ", :) tokenize differently than code keywords.
+/// Results are reliable for *relative* comparisons but not absolute token counts.
 #[derive(Debug, Clone, Default)]
 pub struct TokenMetrics {
     /// Raw output size in bytes
@@ -25,7 +45,7 @@ impl TokenMetrics {
         let output_bytes = json.len();
         Self {
             output_bytes,
-            estimated_tokens: output_bytes / 4, // Claude tokenization approximation
+            estimated_tokens: estimate_tokens(output_bytes),
             result_count,
             files_found,
         }
@@ -36,7 +56,7 @@ impl TokenMetrics {
         let output_bytes = json.len();
         Self {
             output_bytes,
-            estimated_tokens: output_bytes / 4,
+            estimated_tokens: estimate_tokens(output_bytes),
             result_count,
             files_found,
         }
@@ -49,7 +69,7 @@ impl TokenMetrics {
         let output_bytes = output.len();
         Self {
             output_bytes,
-            estimated_tokens: output_bytes / 4,
+            estimated_tokens: estimate_tokens(output_bytes),
             result_count,
             files_found,
         }
@@ -113,13 +133,15 @@ pub struct BreakEvenAnalysis {
     pub avg_savings_bytes: f64,
     /// Average per-query savings in tokens
     pub avg_savings_tokens: f64,
-    /// Number of queries needed to break even
+    /// Number of queries needed to break even (raw schema cost)
     pub break_even_queries: usize,
+    /// Number of queries needed to break even (with ~90% prompt cache discount)
+    pub cached_break_even_queries: usize,
 }
 
 impl BreakEvenAnalysis {
     pub fn calculate(schema_bytes: usize, comparisons: &[ComparisonResult]) -> Self {
-        let schema_tokens = schema_bytes / 4;
+        let schema_tokens = estimate_tokens(schema_bytes);
 
         if comparisons.is_empty() {
             return Self {
@@ -128,6 +150,7 @@ impl BreakEvenAnalysis {
                 avg_savings_bytes: 0.0,
                 avg_savings_tokens: 0.0,
                 break_even_queries: usize::MAX,
+                cached_break_even_queries: usize::MAX,
             };
         }
 
@@ -147,12 +170,22 @@ impl BreakEvenAnalysis {
             usize::MAX
         };
 
+        // Cached break-even: prompt caching reduces schema cost by ~90%
+        let effective_schema_tokens =
+            (schema_tokens as f64 * PROMPT_CACHE_DISCOUNT).ceil() as usize;
+        let cached_break_even_queries = if avg_savings_tokens > 0.0 {
+            (effective_schema_tokens as f64 / avg_savings_tokens).ceil() as usize
+        } else {
+            usize::MAX
+        };
+
         Self {
             schema_bytes,
             schema_tokens,
             avg_savings_bytes,
             avg_savings_tokens,
             break_even_queries,
+            cached_break_even_queries,
         }
     }
 }
@@ -234,9 +267,22 @@ mod tests {
         let metrics = TokenMetrics::from_json(json, 1, 1);
 
         assert_eq!(metrics.output_bytes, json.len());
-        assert_eq!(metrics.estimated_tokens, json.len() / 4);
+        assert_eq!(metrics.estimated_tokens, estimate_tokens(json.len()));
         assert_eq!(metrics.result_count, 1);
         assert_eq!(metrics.files_found, 1);
+    }
+
+    #[test]
+    fn test_token_estimation_rounding() {
+        // (bytes + 2) / 4 rounds to nearest instead of truncating
+        assert_eq!(estimate_tokens(0), 0); // (0+2)/4 = 0
+        assert_eq!(estimate_tokens(1), 0); // (1+2)/4 = 0
+        assert_eq!(estimate_tokens(2), 1); // (2+2)/4 = 1
+        assert_eq!(estimate_tokens(3), 1); // (3+2)/4 = 1
+        assert_eq!(estimate_tokens(4), 1); // (4+2)/4 = 1
+        assert_eq!(estimate_tokens(5), 1); // (5+2)/4 = 1
+        assert_eq!(estimate_tokens(6), 2); // (6+2)/4 = 2
+        assert_eq!(estimate_tokens(100), 25); // (100+2)/4 = 25
     }
 
     #[test]
@@ -296,12 +342,15 @@ mod tests {
 
         let analysis = BreakEvenAnalysis::calculate(2000, &comparisons);
 
-        // Schema: 2000 bytes = 500 tokens
+        // Schema: 2000 bytes = (2000+2)/4 = 500 tokens
         // Avg savings: ((400-100) + (600-200)) / 2 = 350 bytes = 87.5 tokens
         // Break-even: 500 / 87.5 ≈ 6 queries
         assert_eq!(analysis.schema_tokens, 500);
         assert!((analysis.avg_savings_bytes - 350.0).abs() < 0.01);
         assert!(analysis.break_even_queries <= 6);
+
+        // Cached break-even: (500 * 0.10).ceil() = 50 tokens / 87.5 ≈ 1 query
+        assert!(analysis.cached_break_even_queries <= 1);
     }
 
     #[test]
