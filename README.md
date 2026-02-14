@@ -57,11 +57,10 @@ For other platforms, download the binary from [GitHub Releases](https://github.c
 
 ## MCP Server Setup
 
-### Global Mode (Recommended)
+By default, grepika runs in **global mode** — the server starts without `--root`, and the LLM calls `add_workspace` with its working directory automatically.
 
-In global mode, the server starts without `--root`. The LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
-
-**Claude Code:**
+<details>
+<summary><b>Claude Code</b></summary>
 
 ```bash
 # For all your projects (user-level)
@@ -71,7 +70,14 @@ claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
 claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 ```
 
-**Other editors** — add the following to your MCP config file:
+See [docs/claude-code-setup.md](docs/claude-code-setup.md) for tool preference config and permissions.
+
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 
 ```json
 {
@@ -84,11 +90,49 @@ claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 }
 ```
 
-| Editor | Config file |
-|--------|-------------|
-| Claude Code | `~/.claude.json` (user) or `.mcp.json` (project) |
-| Cursor | `~/.cursor/mcp.json` or `.cursor/mcp.json` |
-| OpenCode | `opencode.json` (uses `"mcp"` key instead of `"mcpServers"`, and `"command": ["npx", ...]` array syntax) |
+See [docs/cursor-setup.md](docs/cursor-setup.md) for rules snippet and full setup.
+
+</details>
+
+<details>
+<summary><b>OpenCode</b></summary>
+
+Add to `opencode.json` in your project root:
+
+```json
+{
+  "mcp": {
+    "grepika": {
+      "type": "local",
+      "command": ["npx", "-y", "@agentika/grepika", "--mcp"]
+    }
+  }
+}
+```
+
+> **Note:** OpenCode uses the `"mcp"` key (not `"mcpServers"`), and the command is an array.
+
+See [docs/opencode-setup.md](docs/opencode-setup.md) for full setup and optional fields.
+
+</details>
+
+<details>
+<summary><b>Other Editors</b></summary>
+
+For any MCP-compatible editor, add to its config file:
+
+```json
+{
+  "mcpServers": {
+    "grepika": {
+      "command": "npx",
+      "args": ["-y", "@agentika/grepika", "--mcp"]
+    }
+  }
+}
+```
+
+</details>
 
 <details>
 <summary>Single Project Mode</summary>
@@ -259,51 +303,13 @@ grepika --mcp --root /path/to/project --db /custom/path/index.db
 - **Gitignore**: Patterns in `.gitignore` are respected during indexing
 - **Logging**: All logs go to stderr (stdout is reserved for JSON-RPC in MCP mode)
 
-## Development
+## Contributing
 
-```bash
-# Debug build
-cargo build
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, benchmark, and profiling instructions.
 
-# Release build
-cargo build --release
+## Star History
 
-# Run tests
-cargo test
-
-# Run all benchmarks
-cargo bench
-
-# Run real-repo benchmarks (indexes and searches this repo)
-cargo bench --bench hot_paths -- real_repo
-
-# Run real-repo benchmarks against a different repository
-BENCH_REPO_PATH=/path/to/repo cargo bench --bench hot_paths -- real_repo
-```
-
-### Profiling
-
-Pass `--log-file` to enable timing and memory logging for each tool invocation:
-
-```json
-{
-  "mcpServers": {
-    "grepika": {
-      "command": "grepika",
-      "args": ["--mcp", "--log-file", "/tmp/grepika.log"]
-    }
-  }
-}
-```
-
-Then: `tail -f /tmp/grepika.log`
-
-```
-[search] 42ms | mem: 128.5MB (+2.1MB) | ~91 tokens (0.4KB)
-[index] 1.2s | mem: 256.0MB (+127.5MB) | ~150 tokens (0.6KB)
-```
-
-When `--log-file` is not provided, profiling is disabled with negligible overhead (~20ns per tool call).
+[![Star History Chart](https://api.star-history.com/svg?repos=agentika-labs/grepika&type=Date)](https://www.star-history.com/#agentika-labs/grepika&Date)
 
 ## License
 
