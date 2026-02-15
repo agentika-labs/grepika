@@ -112,13 +112,14 @@ ranked results with snippets vs unranked matching lines.
 
 ### MCP schema overhead
 
-grepika's 11 tools add ~1,915 tokens (7,661 bytes) to the tool definitions.
-Claude Code uses prompt caching — tool definitions are cached after
-the first API call. Cached cost: ~192 tokens/turn (90% discount).
-Tool call results in conversation history are also cached on subsequent turns.
+grepika's 11 tools total ~1,915 tokens (7,661 bytes) if loaded all at once.
+In practice, Claude Code lazy-loads MCP tools on demand — only the tools
+actually invoked add schema tokens to the context. Loaded schemas are
+prompt-cached after the first API call (~90% discount on subsequent turns).
+Tool call results in conversation history are also cached.
 
-Break-even: ~1 search query per session. Average per-query savings (~10,173 bytes)
-exceed the full schema overhead on the first query.
+Schema overhead is minimal in real sessions — far less than the per-query
+savings from ranked, compact results.
 
 ### Methodology
 

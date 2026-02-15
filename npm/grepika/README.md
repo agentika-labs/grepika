@@ -4,13 +4,26 @@ Token-efficient MCP server for code search. Combines FTS5, parallel grep, and tr
 
 ## Setup
 
-**Claude Code:**
+### Claude Code — Plugin (recommended)
+
+The plugin bundles the MCP server with an exploration agent, skills, and commands:
+
+```bash
+/plugin marketplace add agentika-labs/agentika-plugin-marketplace
+/plugin install grepika@agentika-labs-agentika-plugin-marketplace
+```
+
+Adds `/learn-codebase`, `/investigate`, `/impact`, `/index-status` skills and an Explorer agent. See the [full documentation](https://github.com/agentika-labs/grepika#claude-code-plugin) for details.
+
+### Claude Code — MCP-only
+
+If you'd rather use just the MCP server without the plugin:
 
 ```bash
 claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
 ```
 
-**Cursor / other MCP clients:**
+### Cursor / other MCP clients
 
 ```json
 {
@@ -33,17 +46,6 @@ claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
 | `toc` | Directory tree |
 | `refs` | Find all references to a symbol |
 | `index` | Update search index |
-
-## Claude Code Plugin
-
-Install the optional plugin for codebase exploration skills:
-
-```bash
-/plugin marketplace add agentika-labs/agentika-plugin-marketplace
-/plugin install grepika@agentika-labs-agentika-plugin-marketplace
-```
-
-Adds `/learn-codebase`, `/investigate`, `/impact`, `/index-status` skills and an Explorer agent. See the [full documentation](https://github.com/agentika-labs/grepika#claude-code-plugin) for details.
 
 ## Platforms
 

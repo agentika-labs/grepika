@@ -1,6 +1,37 @@
 # Claude Code Setup
 
-## MCP Server Setup
+## Plugin (recommended)
+
+The grepika plugin bundles the MCP server with an exploration agent, skills, and commands — no manual configuration needed.
+
+**Add the marketplace:**
+
+```bash
+/plugin marketplace add agentika-labs/agentika-plugin-marketplace
+```
+
+**Install the plugin:**
+
+```bash
+/plugin install grepika@agentika-labs-agentika-plugin-marketplace
+```
+
+### What it adds
+
+| Type | Name | Description |
+|------|------|-------------|
+| Agent | Explorer | Codebase exploration agent that orchestrates grepika's search tools |
+| Skill | `/learn-codebase` | Architecture overview, key modules, and suggested reading order |
+| Skill | `/investigate` | Bug/error investigation — traces call chains and finds error origins |
+| Skill | `/impact` | Change impact analysis — blast radius, test coverage gaps, refactoring steps |
+| Skill | `/index-status` | Index health diagnostics |
+| Command | `/index` | Build or refresh the search index |
+
+The plugin is optional. The MCP tools work fine on their own.
+
+## MCP-only setup
+
+If you'd rather use just the MCP server without the plugin:
 
 ```bash
 # For all your projects (user-level — recommended)
@@ -14,11 +45,11 @@ claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 
 For other editors: [Cursor setup](cursor-setup.md) · [OpenCode setup](opencode-setup.md)
 
-## CLAUDE.md Snippet
+## Tool preference
 
-Copy this section into your project's `CLAUDE.md` file to instruct Claude Code to prefer grepika for code search operations.
+> **Note:** Plugin users can skip this — the plugin configures tool preferences automatically.
 
----
+Add this to your project's `CLAUDE.md` so Claude Code reaches for grepika instead of its built-in search tools.
 
 ## Code Search
 
@@ -50,9 +81,8 @@ Prefer grepika MCP tools over built-in Grep/Glob for code search:
 - `Bash` for git operations, builds, and running commands
 - `Edit`/`Write` for modifying files (grepika is read-only)
 
----
-
-## Minimal Version
+<details>
+<summary>Minimal version</summary>
 
 If you prefer a shorter snippet:
 
@@ -69,13 +99,13 @@ Prefer grepika MCP tools over built-in Grep/Glob for code search:
 These provide ranked results with FTS5+trigram indexing for better search quality.
 ```
 
----
+</details>
 
-## Pre-authorizing Permissions
+## Pre-authorizing permissions
 
-To avoid permission prompts for grepika tools:
+To skip the permission prompt on every tool call, allowlist grepika in your settings:
 
-**Project-Level (Recommended)** - Add to `.claude/settings.local.json`:
+**Project-level (recommended)** — add to `.claude/settings.local.json`:
 
 ```json
 {
@@ -87,7 +117,7 @@ To avoid permission prompts for grepika tools:
 }
 ```
 
-**Global (All Projects)** - Add to `~/.claude/settings.json`:
+**Global (all projects)** — add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -125,33 +155,4 @@ If you prefer explicit permissions instead of the wildcard:
 
 </details>
 
-**Verify** - Run `/permissions` in Claude Code to see active permissions, or `/doctor` to check for issues.
-
-## Claude Code Plugin
-
-The optional [grepika plugin](https://github.com/agentika-labs/agentika-plugin-marketplace/tree/main/plugins/grepika) adds skills, an exploration agent, and a slash command on top of the base MCP tools.
-
-**Add the marketplace:**
-
-```bash
-/plugin marketplace add agentika-labs/agentika-plugin-marketplace
-```
-
-**Install the plugin:**
-
-```bash
-/plugin install grepika@agentika-labs-agentika-plugin-marketplace
-```
-
-### What it adds
-
-| Type | Name | Description |
-|------|------|-------------|
-| Agent | Explorer | Codebase exploration agent that orchestrates grepika's search tools |
-| Skill | `/learn-codebase` | Architecture overview, key modules, and suggested reading order |
-| Skill | `/investigate` | Bug/error investigation — traces call chains and finds error origins |
-| Skill | `/impact` | Change impact analysis — blast radius, test coverage gaps, refactoring steps |
-| Skill | `/index-status` | Index health diagnostics |
-| Command | `/index` | Build or refresh the search index |
-
-The plugin is optional — all MCP tools work standalone without it.
+**Verify** — run `/permissions` in Claude Code to see active permissions, or `/doctor` to check for issues.

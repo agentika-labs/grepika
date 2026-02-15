@@ -32,6 +32,32 @@ Criterion benchmarks against ripgrep (Claude Code's Grep backend) on the grepika
 
 ~80% fewer bytes on aggregate vs ripgrep content mode, with ranked results and snippets. Savings are largest on high-match queries (e.g. `fn` saves 94%); natural language queries where ripgrep finds few literal matches can be larger with grepika. See [full analysis](docs/token-efficiency-analysis.md).
 
+### Token Efficiency
+
+Compared to ripgrep content output (matching lines), indexed search returns fewer tokens per query. The bigger win is search quality — ranking, NLP queries, and reference classification reduce follow-up reads.
+
+Criterion benchmarks on the grepika codebase (~25 Rust files), 9 queries across all intent categories:
+
+```
+Query             │  grepika │  ripgrep (content) │ Savings
+──────────────────┼──────────┼────────────────────┼────────
+SearchService     │  3,375 B │         8,610 B    │  ~61%
+Score             │  2,789 B │         5,574 B    │  ~50%
+Database          │  2,156 B │        10,174 B    │  ~79%
+fn                │  1,832 B │        31,469 B    │  ~94%
+use               │  1,963 B │        23,308 B    │  ~92%
+search service    │  3,797 B │         1,632 B    │ -133%
+error handling    │  2,666 B │           986 B    │ -170%
+fn\s+\w+          │    385 B │        29,501 B    │  ~99%
+impl.*for         │  3,214 B │         2,480 B    │  -30%
+```
+
+Savings are largest on high-match queries where ripgrep returns many unranked lines. Natural language queries (e.g. "error handling") route to FTS5 concept search in grepika but match few literals in ripgrep, making grepika's output larger.
+
+Claude Code lazy-loads MCP tools on demand, so grepika's 11 tool schemas are not loaded all at once. Loaded schemas are prompt-cached after the first call (~90% discount on subsequent turns). In practice, schema overhead is minimal.
+
+See [docs/token-efficiency-analysis.md](docs/token-efficiency-analysis.md) for the full comparison including Grep file-list mode and workflow analysis.
+
 ### How it works
 
 - Three search backends (FTS5 + grep + trigram) with weighted score merging
@@ -39,28 +65,34 @@ Criterion benchmarks against ripgrep (Claude Code's Grep backend) on the grepika
 - Query intent detection — classifies regex vs natural language vs exact symbol
 - 190 tests, zero clippy warnings, Criterion benchmarks
 
-## Installation
-
-### npm (recommended for MCP users)
-
-```bash
-npx -y @agentika/grepika --mcp
-```
-
-### Shell script (macOS Apple Silicon)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/agentika-labs/grepika/main/install.sh | bash
-```
-
-For other platforms, download the binary from [GitHub Releases](https://github.com/agentika-labs/grepika/releases).
-
 ## MCP Server Setup
 
 By default, grepika runs in **global mode** — the server starts without `--root`, and the LLM calls `add_workspace` with its working directory automatically.
 
 <details>
 <summary><b>Claude Code</b></summary>
+
+#### Plugin (recommended)
+
+The grepika plugin bundles the MCP server with an exploration agent, skills, and commands.
+
+```bash
+/plugin marketplace add agentika-labs/agentika-plugin-marketplace
+/plugin install grepika@agentika-labs-agentika-plugin-marketplace
+```
+
+| Type | Name | Description |
+|------|------|-------------|
+| Agent | Explorer | Codebase exploration agent that orchestrates grepika's search tools |
+| Skill | `/learn-codebase` | Architecture overview, key modules, and suggested reading order |
+| Skill | `/investigate` | Bug/error investigation — traces call chains and finds error origins |
+| Skill | `/impact` | Change impact analysis — blast radius, test coverage gaps, refactoring steps |
+| Skill | `/index-status` | Index health diagnostics |
+| Command | `/index` | Build or refresh the search index |
+
+#### MCP-only setup
+
+If you prefer the MCP server without the plugin:
 
 ```bash
 # For all your projects (user-level)
@@ -70,7 +102,40 @@ claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
 claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 ```
 
-See [docs/claude-code-setup.md](docs/claude-code-setup.md) for tool preference config and permissions.
+#### Tool preference
+
+> **Note:** Plugin users can skip this — the plugin configures tool preferences automatically.
+
+Claude Code has built-in Grep and Glob tools. To make it prefer grepika, add to your project's `CLAUDE.md`:
+
+````markdown
+## Code Search
+
+Prefer grepika MCP tools over built-in Grep/Glob for code search:
+- `mcp__grepika__index` - Build/update search index (run first!)
+- `mcp__grepika__search` - Pattern/regex search (replaces Grep)
+- `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
+- `mcp__grepika__outline` - File structure extraction
+- `mcp__grepika__refs` - Symbol references
+
+These provide ranked results with FTS5+trigram indexing for better search quality.
+````
+
+See [docs/claude-code-setup.md](docs/claude-code-setup.md) for the full version with a tool mapping table.
+
+#### Pre-authorizing permissions
+
+To avoid permission prompts, add to `.claude/settings.local.json` (project) or `~/.claude/settings.json` (global):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "mcp__grepika__*"
+    ]
+  }
+}
+```
 
 </details>
 
@@ -160,64 +225,21 @@ Or in your editor's MCP config:
 
 > **Tip:** Add `"--db", "/path/to/index.db"` to `args` to control where the index is stored.
 
-## Claude Code Integration
+## CLI Setup
 
-### Tool Preference
-
-Claude Code has built-in Grep and Glob tools. To make it prefer grepika, add to your project's `CLAUDE.md`:
-
-```markdown
-## Code Search
-
-Prefer grepika MCP tools over built-in Grep/Glob for code search:
-- `mcp__grepika__index` - Build/update search index (run first!)
-- `mcp__grepika__search` - Pattern/regex search (replaces Grep)
-- `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
-- `mcp__grepika__outline` - File structure extraction
-- `mcp__grepika__refs` - Symbol references
-
-These provide ranked results with FTS5+trigram indexing for better search quality.
-```
-
-See [docs/claude-code-setup.md](docs/claude-code-setup.md) for the full version with a tool mapping table.
-
-Editor-specific guides: [Claude Code](docs/claude-code-setup.md) · [Cursor](docs/cursor-setup.md) · [OpenCode](docs/opencode-setup.md)
-
-### Claude Code Plugin
-
-The optional [grepika plugin](https://github.com/agentika-labs/agentika-plugin-marketplace/tree/main/plugins/grepika) adds skills, an exploration agent, and a slash command on top of the base MCP tools.
-
-Add the marketplace and install:
+### npm
 
 ```bash
-/plugin marketplace add agentika-labs/agentika-plugin-marketplace
-/plugin install grepika@agentika-labs-agentika-plugin-marketplace
+npx -y @agentika/grepika <command>
 ```
 
-| Type | Name | Description |
-|------|------|-------------|
-| Agent | Explorer | Codebase exploration agent that orchestrates grepika's search tools |
-| Skill | `/learn-codebase` | Architecture overview, key modules, and suggested reading order |
-| Skill | `/investigate` | Bug/error investigation — traces call chains and finds error origins |
-| Skill | `/impact` | Change impact analysis — blast radius, test coverage gaps, refactoring steps |
-| Skill | `/index-status` | Index health diagnostics |
-| Command | `/index` | Build or refresh the search index |
+### Shell script (macOS Apple Silicon)
 
-The plugin is optional — all MCP tools work standalone without it.
-
-### Pre-authorizing Permissions
-
-To avoid permission prompts, add to `.claude/settings.local.json` (project) or `~/.claude/settings.json` (global):
-
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__grepika__*"
-    ]
-  }
-}
+```bash
+curl -fsSL https://raw.githubusercontent.com/agentika-labs/grepika/main/install.sh | bash
 ```
+
+For other platforms, download the binary from [GitHub Releases](https://github.com/agentika-labs/grepika/releases).
 
 ## Usage
 
@@ -273,32 +295,6 @@ grepika --mcp --root /path/to/project
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
 | `add_workspace` | Load a project workspace (global mode) |
-
-## Token Efficiency
-
-Compared to ripgrep content output (matching lines), indexed search returns fewer tokens per query. The bigger win is search quality — ranking, NLP queries, and reference classification reduce follow-up reads.
-
-Criterion benchmarks on the grepika codebase (~25 Rust files), 9 queries across all intent categories:
-
-```
-Query             │  grepika │  ripgrep (content) │ Savings
-──────────────────┼──────────┼────────────────────┼────────
-SearchService     │  3,375 B │         8,610 B    │  ~61%
-Score             │  2,789 B │         5,574 B    │  ~50%
-Database          │  2,156 B │        10,174 B    │  ~79%
-fn                │  1,832 B │        31,469 B    │  ~94%
-use               │  1,963 B │        23,308 B    │  ~92%
-search service    │  3,797 B │         1,632 B    │ -133%
-error handling    │  2,666 B │           986 B    │ -170%
-fn\s+\w+          │    385 B │        29,501 B    │  ~99%
-impl.*for         │  3,214 B │         2,480 B    │  -30%
-```
-
-Savings are largest on high-match queries where ripgrep returns many unranked lines. Natural language queries (e.g. "error handling") route to FTS5 concept search in grepika but match few literals in ripgrep, making grepika's output larger.
-
-The MCP schema adds ~1,915 tokens (7,661 bytes) of one-time overhead. Claude Code caches tool definitions after the first call (~192 tokens/turn with 90% discount). Break-even: ~1 query per session.
-
-See [docs/token-efficiency-analysis.md](docs/token-efficiency-analysis.md) for the full comparison including Grep file-list mode and workflow analysis.
 
 ## Configuration
 
