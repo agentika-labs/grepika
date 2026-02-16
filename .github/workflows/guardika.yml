@@ -1,0 +1,10 @@
+name: Guardika
+on: [pull_request]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: agentika-labs/guardika@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
