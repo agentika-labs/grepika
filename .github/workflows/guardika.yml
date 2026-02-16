@@ -8,3 +8,4 @@ jobs:
       - uses: agentika-labs/guardika@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          exempt-author-association: ""
