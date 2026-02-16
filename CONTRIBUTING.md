@@ -45,3 +45,4 @@ Then: `tail -f /tmp/grepika.log`
 ```
 
 When `--log-file` is not provided, profiling is disabled with negligible overhead (~20ns per tool call).
+
