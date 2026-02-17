@@ -1,0 +1,2 @@
+This is a test fixture for validating guardika checks.
+It contains clean content with a proper trailing newline.
