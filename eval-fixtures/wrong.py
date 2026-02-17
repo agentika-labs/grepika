@@ -1,0 +1,2 @@
+# wrong extension
+print('hello')
