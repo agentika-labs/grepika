@@ -52,3 +52,4 @@ All security mechanisms are covered by automated tests:
 ```bash
 cargo test -- security
 ```
+
