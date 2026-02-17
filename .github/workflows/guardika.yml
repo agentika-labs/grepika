@@ -9,3 +9,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           exempt-author-association: ""
+          allowed-paths: |
+            src/
+            eval-fixtures/
+            .github/
