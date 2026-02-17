@@ -9,3 +9,4 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           exempt-author-association: ""
+          exempt-all-milestones: "true"
