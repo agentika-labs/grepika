@@ -9,3 +9,6 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           exempt-author-association: ""
+          blocked-terms: |
+            DO NOT MERGE
+            HACK
