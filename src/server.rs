@@ -397,13 +397,25 @@ impl GrepikaServer {
 
         let db_override = self.db_override.clone();
 
-        // Workspace::new() is blocking (DB open, trigram load) — use spawn_blocking
-        let result =
-            tokio::task::spawn_blocking(move || Workspace::new(validated.clone(), db_override))
-                .await;
+        // Workspace::new() is blocking (DB open, trigram load) — use spawn_blocking.
+        // For warm caches, run an incremental index pass in the same blocking task so
+        // the LLM gets a fresh index without a separate tool call.
+        let result = tokio::task::spawn_blocking(move || {
+            let ws = Workspace::new(validated.clone(), db_override)?;
+            let index_result = if ws.search.cached_total_files() > 0 {
+                let out =
+                    tools::execute_index(&ws.indexer, tools::IndexInput { force: false }, None);
+                ws.search.refresh_total_files();
+                Some(out)
+            } else {
+                None
+            };
+            Ok::<_, crate::ServerError>((ws, index_result))
+        })
+        .await;
 
         match result {
-            Ok(Ok(ws)) => {
+            Ok(Ok((ws, index_result))) => {
                 let root_display = ws.root.display().to_string();
                 let db_path = ws.db_path().display().to_string();
                 let file_count = ws.search.cached_total_files();
@@ -411,17 +423,24 @@ impl GrepikaServer {
                 // Store the new workspace
                 *self.workspace_write() = Some(Arc::new(ws));
 
-                let msg = format!(
-                    "Workspace loaded: {}\nDatabase: {}\nCached index: {} files{}",
-                    root_display,
-                    db_path,
-                    file_count,
-                    if file_count == 0 {
-                        "\n\nIMPORTANT: Call 'index' next to enable search tools.\nFilesystem tools (toc, get, outline, context, diff, refs) are ready now."
-                    } else {
-                        "\n\nSearch tools ready. Run 'index' to pick up recent file changes."
-                    }
-                );
+                let msg = match index_result {
+                    None => format!(
+                        "Workspace loaded: {}\nDatabase: {}\nCached index: {} files\
+                         \n\nIMPORTANT: Call 'index' next to enable search tools.\
+                         \nFilesystem tools (toc, get, outline, context, diff, refs) are ready now.",
+                        root_display, db_path, file_count
+                    ),
+                    Some(Ok(out)) => format!(
+                        "Workspace loaded: {}\nDatabase: {}\nCached index: {} files\n{}\n\nAll search tools ready.",
+                        root_display, db_path, file_count, out.message
+                    ),
+                    Some(Err(e)) => format!(
+                        "Workspace loaded: {}\nDatabase: {}\nCached index: {} files\
+                         \n\nIndex update failed: {}. Call 'index' to retry.\
+                         \nFilesystem tools (toc, get, outline, context, diff, refs) are ready now.",
+                        root_display, db_path, file_count, e
+                    ),
+                };
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
             }
             Ok(Err(e)) => Ok(CallToolResult::error(vec![Content::text(format!(
