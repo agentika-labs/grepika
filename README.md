@@ -330,6 +330,11 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for build, test, benchmark, and profiling
 
 [![Star History Chart](https://api.star-history.com/svg?repos=agentika-labs/grepika&type=Date)](https://www.star-history.com/#agentika-labs/grepika&Date)
 
+## Built by
+
+[Agentika](https://agentika.uk) — we help teams configure and adopt AI tools. If you need help setting up grepika or other AI dev tools for your team, [get in
+touch](https://agentika.uk).
+
 ## License
 
 MIT
