@@ -170,18 +170,18 @@ impl Workspace {
         // Load trigram index from database (if previously persisted)
         let trigram = match db.load_all_trigrams() {
             Ok(entries) if !entries.is_empty() => {
-                tracing::info!("Loaded {} trigrams from database", entries.len());
+                tracing::debug!(
+                    trigram_count = entries.len(),
+                    "loaded trigrams from database"
+                );
                 Arc::new(RwLock::new(TrigramIndex::from_db_entries(entries)))
             }
             Ok(_) => {
-                tracing::info!("No persisted trigrams found, starting with empty index");
+                tracing::debug!("no persisted trigrams found, starting with empty index");
                 Arc::new(RwLock::new(TrigramIndex::new()))
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to load trigrams from database: {}, starting fresh",
-                    e
-                );
+                tracing::warn!(error = %e, "failed to load trigrams from database, starting fresh");
                 Arc::new(RwLock::new(TrigramIndex::new()))
             }
         };
@@ -417,7 +417,7 @@ impl GrepikaServer {
         match result {
             Ok(Ok((ws, index_result))) => {
                 let root_display = ws.root.display().to_string();
-                let db_path = ws.db_path().display().to_string();
+                let db_path = ws.db_path();
                 let file_count = ws.search.cached_total_files();
 
                 // Store the new workspace
@@ -425,20 +425,24 @@ impl GrepikaServer {
 
                 let msg = match index_result {
                     None => format!(
-                        "Workspace loaded: {}\nDatabase: {}\nCached index: {} files\
-                         \n\nIMPORTANT: Call 'index' next to enable search tools.\
-                         \nFilesystem tools (toc, get, outline, context, diff, refs) are ready now.",
-                        root_display, db_path, file_count
+                        "Workspace: {} ({} files, run 'index' for search)\nDB: {}",
+                        root_display,
+                        file_count,
+                        db_path.display()
                     ),
                     Some(Ok(out)) => format!(
-                        "Workspace loaded: {}\nDatabase: {}\nCached index: {} files\n{}\n\nAll search tools ready.",
-                        root_display, db_path, file_count, out.message
+                        "Workspace: {} ({} files, indexed)\nDB: {}\n{}",
+                        root_display,
+                        file_count,
+                        db_path.display(),
+                        out.message
                     ),
                     Some(Err(e)) => format!(
-                        "Workspace loaded: {}\nDatabase: {}\nCached index: {} files\
-                         \n\nIndex update failed: {}. Call 'index' to retry.\
-                         \nFilesystem tools (toc, get, outline, context, diff, refs) are ready now.",
-                        root_display, db_path, file_count, e
+                        "Workspace: {} ({} files, index failed: {})\nDB: {}",
+                        root_display,
+                        file_count,
+                        e,
+                        db_path.display()
                     ),
                 };
                 Ok(CallToolResult::success(vec![Content::text(msg)]))
@@ -452,7 +456,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Search for code patterns. Supports regex and natural language queries.\n\nExamples: 'fn\\s+process_', 'authentication flow', 'SearchService'\nModes: combined (default, best quality), fts (natural language), grep (regex)\n\nTip: Use 'refs' for symbol reference analysis, 'get' to read matched files.\nRequires index.",
+        description = "Search for code patterns (regex or natural language). Modes: combined (default), fts, grep.",
         annotations(
             title = "Search Code",
             read_only_hint = true,
@@ -476,7 +480,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Get file content. Supports line range selection.\n\nExamples: path='src/main.rs', start_line=10, end_line=50\n\nTip: Use 'outline' first to find symbol locations, then 'get' to read them.\nWorks without index.",
+        description = "Get file content with optional line range.",
         annotations(
             title = "Read File",
             read_only_hint = true,
@@ -500,7 +504,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Extract file structure (functions, classes, structs, etc.)\n\nSupported languages: Rust, Python, JavaScript/TypeScript, Go\n\nTip: Use 'get' or 'context' to read the code at specific symbol locations.\nWorks without index.",
+        description = "Extract file structure (functions, classes, structs). Supports Rust, Python, JS/TS, Go.",
         annotations(
             title = "File Outline",
             read_only_hint = true,
@@ -520,7 +524,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Get directory tree structure.\n\nExamples: path='src', depth=2\n\nTip: Use 'search' or 'relevant' to find specific files by content.\nWorks without index.",
+        description = "Get directory tree structure.",
         annotations(
             title = "Directory Tree",
             read_only_hint = true,
@@ -543,7 +547,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Get surrounding context for a line.\n\nExamples: path='src/lib.rs', line=42, context_lines=15\n\nTip: Use after 'search' or 'refs' to see code around a match.\nWorks without index.",
+        description = "Get surrounding context for a specific line number.",
         annotations(
             title = "Code Context",
             read_only_hint = true,
@@ -567,7 +571,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Get index statistics and file type breakdown.\n\nUse detailed=true for per-filetype counts. Useful for checking index health.\nRequires index.",
+        description = "Get index statistics and file type breakdown.",
         annotations(
             title = "Index Statistics",
             read_only_hint = true,
@@ -590,7 +594,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Find all references to a symbol/identifier.\n\nExamples: symbol='SearchService', symbol='authenticate'\nClassifies each reference as: definition, import, type_usage, or usage.\n\nTip: Use 'context' to see surrounding code at each reference location.\nWorks without index.",
+        description = "Find all references to a symbol. Classifies as definition, import, type_usage, or usage.",
         annotations(
             title = "Find References",
             read_only_hint = true,
@@ -613,7 +617,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Update the search index (incremental by default).\n\nUse force=true to rebuild from scratch if results seem stale.\nSubsequent runs are incremental and fast.",
+        description = "Update the search index. Incremental by default; use force=true for full rebuild.",
         annotations(
             title = "Update Index",
             read_only_hint = false,
@@ -661,9 +665,11 @@ impl GrepikaServer {
                     if let Some(ref tx) = tx {
                         let _ = tx.send((p.files_processed, p.files_total));
                     }
-                    eprintln!(
-                        "[INDEX] {}/{} files processed, {} indexed",
-                        p.files_processed, p.files_total, p.files_indexed
+                    tracing::debug!(
+                        files_processed = p.files_processed,
+                        files_total = p.files_total,
+                        files_indexed = p.files_indexed,
+                        "indexing progress"
                     );
                 });
 
@@ -699,7 +705,7 @@ impl GrepikaServer {
     }
 
     #[tool(
-        description = "Show differences between two files.\n\nExamples: file1='src/old.rs', file2='src/new.rs', context=5\nReturns unified diff with addition/deletion statistics.\nWorks without index.",
+        description = "Show unified diff between two files.",
         annotations(
             title = "Compare Files",
             read_only_hint = true,

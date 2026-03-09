@@ -1,11 +1,3 @@
-//! grepika: Token-efficient MCP server for code search.
-//!
-//! Usage:
-//!   grepika --mcp --root <path>   # Start MCP server (single workspace)
-//!   grepika --mcp                 # Start MCP server (global mode, LLM calls add_workspace)
-//!   grepika search <query>        # CLI search mode
-//!   grepika index                 # Index the codebase
-
 use clap::{Parser, Subcommand, ValueEnum};
 use grepika::fmt;
 use grepika::server::GrepikaServer;
@@ -168,8 +160,13 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // CRITICAL: Log to stderr only (stdout is JSON-RPC for MCP)
+    // Default to info level; RUST_LOG can override (e.g., RUST_LOG=grepika=debug)
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("grepika=info".parse()?))
+        .with_env_filter(
+            EnvFilter::builder()
+                .with_default_directive("grepika=info".parse()?)
+                .from_env_lossy(),
+        )
         .with_writer(std::io::stderr)
         .init();
 
@@ -203,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_mcp_server(root: PathBuf, db: Option<PathBuf>) -> anyhow::Result<()> {
-    tracing::info!("Starting MCP server for root: {}", root.display());
+    tracing::debug!("Starting MCP server for root: {}", root.display());
 
     let server = GrepikaServer::new(root, db)?;
 
@@ -215,7 +212,7 @@ async fn run_mcp_server(root: PathBuf, db: Option<PathBuf>) -> anyhow::Result<()
 }
 
 async fn run_mcp_server_global(db: Option<PathBuf>) -> anyhow::Result<()> {
-    tracing::info!("Starting MCP server in global mode (no workspace pre-loaded)");
+    tracing::debug!("Starting MCP server in global mode (no workspace pre-loaded)");
 
     let server = GrepikaServer::new_empty(db);
 
@@ -274,7 +271,10 @@ async fn run_cli(
     let trigram = if needs_trigram {
         match database.load_all_trigrams() {
             Ok(entries) if !entries.is_empty() => {
-                tracing::info!("Loaded {} trigrams from database", entries.len());
+                tracing::debug!(
+                    trigram_count = entries.len(),
+                    "loaded trigrams from database"
+                );
                 Arc::new(RwLock::new(TrigramIndex::from_db_entries(entries)))
             }
             _ => Arc::new(RwLock::new(TrigramIndex::new())),
@@ -315,8 +315,19 @@ async fn run_cli(
         }
 
         Commands::Index { force } => {
+            // CLI mode: show progress on stderr (MCP mode uses tracing::debug instead)
+            let progress_cb: grepika::services::indexer::ProgressCallback =
+                Box::new(|p: grepika::services::indexer::IndexProgress| {
+                    eprint!(
+                        "\r[INDEX] {}/{} files processed, {} indexed",
+                        p.files_processed, p.files_total, p.files_indexed
+                    );
+                    if p.files_processed == p.files_total {
+                        eprintln!(); // newline at end
+                    }
+                });
             let input = grepika::tools::IndexInput { force };
-            let result = grepika::tools::execute_index(&indexer, input, None)
+            let result = grepika::tools::execute_index(&indexer, input, Some(progress_cb))
                 .map_err(|e| anyhow::anyhow!(e))?;
             if json {
                 output_json!(result);

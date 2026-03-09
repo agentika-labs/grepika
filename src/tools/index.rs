@@ -49,12 +49,14 @@ pub fn execute_index(
     input: IndexInput,
     progress_cb: Option<crate::services::indexer::ProgressCallback>,
 ) -> crate::error::Result<IndexOutput> {
-    // Use provided callback, or fall back to default stderr logger
+    // Use provided callback, or fall back to default debug logger
     let cb = progress_cb.or_else(|| {
         Some(Box::new(|p: crate::services::indexer::IndexProgress| {
-            eprintln!(
-                "[INDEX] {}/{} files processed, {} indexed",
-                p.files_processed, p.files_total, p.files_indexed
+            tracing::debug!(
+                files_processed = p.files_processed,
+                files_total = p.files_total,
+                files_indexed = p.files_indexed,
+                "indexing progress"
             );
         }))
     });
@@ -63,14 +65,11 @@ pub fn execute_index(
 
     let message = if progress.files_indexed > 0 || progress.files_deleted > 0 {
         format!(
-            "Index updated: {} new/modified, {} deleted (of {} files)",
+            "indexed: {} new, {} deleted, {} total",
             progress.files_indexed, progress.files_deleted, progress.files_processed
         )
     } else {
-        format!(
-            "Index is up to date ({} files verified, 0 changes)",
-            progress.files_processed
-        )
+        format!("up to date ({} files)", progress.files_processed)
     };
 
     Ok(IndexOutput {
