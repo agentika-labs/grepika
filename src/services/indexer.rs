@@ -180,6 +180,15 @@ impl Indexer {
         };
         let existing_paths: HashSet<String> = existing_hashes.keys().cloned().collect();
 
+        // Try git-based fast path for incremental indexing
+        if !force {
+            if let Some(result) =
+                self.try_git_fast_path(&existing_hashes, &existing_paths, &progress)?
+            {
+                return Ok(result);
+            }
+        }
+
         let files: Vec<PathBuf> = self.collect_files()?;
         let total = files.len();
 
@@ -238,6 +247,13 @@ impl Indexer {
 
         if let Some(ref cb) = progress {
             cb(state.clone());
+        }
+
+        // Store HEAD commit for future git-based fast path
+        if let Some(oid) = super::git_diff::head_oid(&self.root) {
+            if let Err(e) = self.db.set_last_indexed_commit(&oid) {
+                tracing::warn!("Failed to store HEAD commit for git fast path: {e}");
+            }
         }
 
         Ok(state)
@@ -378,6 +394,28 @@ impl Indexer {
         Ok(file_id)
     }
 
+    /// Checks whether a file path should be indexed based on extension and sensitivity filters.
+    fn should_index_path(&self, path: &Path) -> bool {
+        if !self.extension_set.is_empty() {
+            let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let ext_matched = match ascii_lower_check(ext_str, &self.extension_set) {
+                Some(matched) => matched,
+                None => self.extension_set.contains(&ext_str.to_lowercase()),
+            };
+            if !ext_matched {
+                let filename_str = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let filename_matched = match ascii_lower_check(filename_str, &self.extension_set) {
+                    Some(matched) => matched,
+                    None => self.extension_set.contains(&filename_str.to_lowercase()),
+                };
+                if !filename_matched {
+                    return false;
+                }
+            }
+        }
+        security::is_sensitive_file(path).is_none()
+    }
+
     /// Collects files to index.
     fn collect_files(&self) -> Result<Vec<PathBuf>, ServerError> {
         let mut files = Vec::new();
@@ -398,37 +436,7 @@ impl Indexer {
 
             let path = entry.path();
 
-            // Check extension using pre-built HashSet (P7: O(1) vs O(n))
-            // Uses stack-buffer ASCII lowercase to avoid heap allocation per file
-            if !self.extension_set.is_empty() {
-                let ext_str = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-                let ext_matched = match ascii_lower_check(ext_str, &self.extension_set) {
-                    Some(matched) => matched,
-                    None => {
-                        // Fallback for non-ASCII or very long extensions
-                        self.extension_set.contains(&ext_str.to_lowercase())
-                    }
-                };
-
-                if !ext_matched {
-                    // Check for extensionless files like Makefile, Dockerfile
-                    let filename_str = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-
-                    let filename_matched =
-                        match ascii_lower_check(filename_str, &self.extension_set) {
-                            Some(matched) => matched,
-                            None => self.extension_set.contains(&filename_str.to_lowercase()),
-                        };
-
-                    if !filename_matched {
-                        continue;
-                    }
-                }
-            }
-
-            // Skip sensitive files (defense-in-depth: prevents .env, credentials, etc. from entering the index)
-            if security::is_sensitive_file(path).is_some() {
+            if !self.should_index_path(path) {
                 continue;
             }
 
@@ -442,6 +450,122 @@ impl Indexer {
     fn index_trigrams(&self, file_id: FileId, content: &str) {
         let mut trigram = self.trigram.write().unwrap_or_else(|e| e.into_inner());
         trigram.add_file(file_id, content);
+    }
+
+    /// Attempts git-based fast path for incremental indexing.
+    ///
+    /// Uses `git diff` to detect only changed files since the last indexed
+    /// commit, avoiding the need to read and hash every file on disk.
+    /// Returns `Some(progress)` if the fast path succeeds, `None` to fall
+    /// through to the full walk.
+    fn try_git_fast_path(
+        &self,
+        existing_hashes: &HashMap<String, u64>,
+        existing_paths: &HashSet<String>,
+        progress: &Option<ProgressCallback>,
+    ) -> Result<Option<IndexProgress>, ServerError> {
+        let last_commit = match self.db.get_last_indexed_commit()? {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let diff = match super::git_diff::detect_changes(&self.root, &last_commit) {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        tracing::debug!(
+            changed = diff.changed.len(),
+            deleted = diff.deleted.len(),
+            "Git fast path: detected changes"
+        );
+
+        if diff.changed.is_empty() && diff.deleted.is_empty() {
+            let total = existing_paths.len();
+            let state = IndexProgress {
+                files_processed: total,
+                files_total: total,
+                files_indexed: 0,
+                files_unchanged: total,
+                files_deleted: 0,
+                current_file: None,
+            };
+            self.db.set_last_indexed_commit(&diff.head_oid)?;
+            if let Some(ref cb) = progress {
+                cb(state.clone());
+            }
+            return Ok(Some(state));
+        }
+
+        let changed_files: Vec<PathBuf> = diff
+            .changed
+            .iter()
+            .map(|p| self.root.join(p))
+            .filter(|p| p.exists() && self.should_index_path(p))
+            .collect();
+
+        let (file_data, _) = self.phase1_read_and_hash(&changed_files, existing_hashes);
+
+        let total = existing_paths.len();
+        let mut state = IndexProgress {
+            files_processed: 0,
+            files_total: total,
+            files_indexed: 0,
+            files_unchanged: total.saturating_sub(file_data.len() + diff.deleted.len()),
+            files_deleted: 0,
+            current_file: None,
+        };
+
+        let indexing_conn = self.db.enter_indexing_mode()?;
+
+        let result = (|| -> Result<IndexProgress, ServerError> {
+            {
+                let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+
+                self.phase2_batch_write(
+                    &file_data,
+                    &indexing_conn,
+                    &mut trigram_guard,
+                    progress,
+                    &mut state,
+                )?;
+
+                for deleted_rel in &diff.deleted {
+                    let abs_path = self.root.join(deleted_rel).to_string_lossy().to_string();
+                    if existing_paths.contains(&abs_path) {
+                        match Database::get_file_id_on(&indexing_conn, &abs_path) {
+                            Ok(Some(file_id)) => trigram_guard.remove_file(file_id),
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!("Failed to look up file_id for {abs_path}: {e}")
+                            }
+                        }
+                        if Database::delete_file_on(&indexing_conn, &abs_path)? {
+                            state.files_deleted += 1;
+                        }
+                    }
+                }
+            }
+
+            self.persist_trigrams(&indexing_conn, &state, false)?;
+            Database::set_last_indexed_commit_on(&indexing_conn, &diff.head_oid)?;
+
+            Ok(state)
+        })();
+
+        if let Err(e) = self.db.exit_indexing_mode(&indexing_conn) {
+            tracing::error!("Failed to restore normal pragmas after git fast path: {e}");
+        }
+
+        let mut state = result?;
+        state.files_processed = state.files_indexed + state.files_unchanged + state.files_deleted;
+        state.current_file = None;
+
+        if let Some(ref cb) = progress {
+            cb(state.clone());
+        }
+
+        Ok(Some(state))
     }
 
     /// Gets indexing statistics.

@@ -591,6 +591,36 @@ impl Database {
         let rows = conn.execute("DELETE FROM files WHERE path = ?1", rusqlite::params![path])?;
         Ok(rows > 0)
     }
+
+    /// Gets the last indexed git commit OID, if any.
+    pub fn get_last_indexed_commit(&self) -> DbResult<Option<String>> {
+        let conn = self.conn()?;
+        query_row_optional(
+            &conn,
+            "SELECT value FROM schema_info WHERE key = 'last_indexed_commit'",
+            [],
+            |row| row.get(0),
+        )
+    }
+
+    /// Sets the last indexed git commit OID.
+    pub fn set_last_indexed_commit(&self, oid: &str) -> DbResult<()> {
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_info (key, value) VALUES ('last_indexed_commit', ?1)",
+            [oid],
+        )?;
+        Ok(())
+    }
+
+    /// Sets the last indexed git commit OID on a specific connection.
+    pub fn set_last_indexed_commit_on(conn: &rusqlite::Connection, oid: &str) -> DbResult<()> {
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_info (key, value) VALUES ('last_indexed_commit', ?1)",
+            [oid],
+        )?;
+        Ok(())
+    }
 }
 
 // Compile-time assertion for thread safety.

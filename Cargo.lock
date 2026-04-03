@@ -713,6 +713,7 @@ dependencies = [
  "r2d2_sqlite",
  "rayon",
  "regex",
+ "regex-syntax",
  "rmcp",
  "roaring",
  "rusqlite",
