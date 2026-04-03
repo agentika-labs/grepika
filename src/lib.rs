@@ -48,7 +48,7 @@ pub mod tools;
 pub mod types;
 
 pub use error::{Result, ServerError};
-pub use types::{FileId, Score, Trigram};
+pub use types::{FileId, NgramKey, Score, Trigram};
 
 use std::path::{Path, PathBuf};
 

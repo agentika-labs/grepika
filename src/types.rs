@@ -110,63 +110,53 @@ impl fmt::Display for Score {
     }
 }
 
-/// Three-byte trigram for substring indexing.
+/// N-gram key for sparse substring indexing.
 ///
-/// Trigrams enable fast substring search by decomposing strings
-/// into overlapping 3-character sequences. For example:
-/// "auth" → ["aut", "uth"]
+/// Represents the xxh3_64 hash of a variable-length n-gram byte slice.
+/// Sparse n-grams are selected by bigram frequency weights, producing
+/// more selective posting lists than dense 3-byte trigrams.
 ///
-/// Finding files containing "auth" means finding files that
-/// contain ALL of its trigrams.
+/// Hash collisions only cause false positives (more files to grep),
+/// never false negatives — grep verifies actual content.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Trigram(pub [u8; 3]);
+pub struct NgramKey(pub u64);
 
-impl Trigram {
+/// Backward compatibility alias.
+pub type Trigram = NgramKey;
+
+impl NgramKey {
     #[must_use]
-    pub const fn new(bytes: [u8; 3]) -> Self {
-        Self(bytes)
+    pub const fn new(hash: u64) -> Self {
+        Self(hash)
     }
 
     #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 3] {
-        &self.0
+    pub const fn as_u64(self) -> u64 {
+        self.0
     }
 
-    /// Extracts all trigrams from a string.
-    ///
-    /// Returns an iterator over trigrams. Short strings (< 3 bytes)
-    /// yield no trigrams.
-    pub fn extract(s: &str) -> impl Iterator<Item = Trigram> + '_ {
-        let bytes = s.as_bytes();
-        bytes.windows(3).map(|w| Trigram([w[0], w[1], w[2]]))
+    /// Serializes to little-endian bytes for database storage.
+    #[must_use]
+    pub const fn to_le_bytes(self) -> [u8; 8] {
+        self.0.to_le_bytes()
     }
 
-    /// Extracts trigrams from bytes.
-    pub fn from_bytes(bytes: &[u8]) -> impl Iterator<Item = Trigram> + '_ {
-        bytes.windows(3).map(|w| Trigram([w[0], w[1], w[2]]))
+    /// Deserializes from little-endian bytes.
+    #[must_use]
+    pub const fn from_le_bytes(bytes: [u8; 8]) -> Self {
+        Self(u64::from_le_bytes(bytes))
     }
 }
 
-impl fmt::Debug for Trigram {
+impl fmt::Debug for NgramKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Try to display as UTF-8 string if valid
-        if let Ok(s) = std::str::from_utf8(&self.0) {
-            write!(f, "Trigram({s:?})")
-        } else {
-            let [a, b, c] = self.0;
-            write!(f, "Trigram({a:02x}{b:02x}{c:02x})")
-        }
+        write!(f, "NgramKey({:016x})", self.0)
     }
 }
 
-impl fmt::Display for Trigram {
+impl fmt::Display for NgramKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Ok(s) = std::str::from_utf8(&self.0) {
-            write!(f, "{s}")
-        } else {
-            let [a, b, c] = self.0;
-            write!(f, "{a:02x}{b:02x}{c:02x}")
-        }
+        write!(f, "{:016x}", self.0)
     }
 }
 
@@ -179,7 +169,7 @@ const _: () = {
     // Core newtypes
     assert_send_sync::<FileId>();
     assert_send_sync::<Score>();
-    assert_send_sync::<Trigram>();
+    assert_send_sync::<NgramKey>();
 };
 
 #[cfg(test)]
@@ -201,17 +191,17 @@ mod tests {
     }
 
     #[test]
-    fn test_trigram_extraction() {
-        let trigrams: Vec<_> = Trigram::extract("auth").collect();
-        assert_eq!(trigrams.len(), 2);
-        assert_eq!(trigrams[0].0, *b"aut");
-        assert_eq!(trigrams[1].0, *b"uth");
+    fn test_ngram_key_roundtrip() {
+        let key = NgramKey::new(0x1234567890abcdef);
+        let bytes = key.to_le_bytes();
+        let restored = NgramKey::from_le_bytes(bytes);
+        assert_eq!(key, restored);
     }
 
     #[test]
-    fn test_trigram_short_string() {
-        let trigrams: Vec<_> = Trigram::extract("ab").collect();
-        assert!(trigrams.is_empty());
+    fn test_ngram_key_display() {
+        let key = NgramKey::new(0xff);
+        assert_eq!(format!("{key}"), "00000000000000ff");
     }
 
     #[test]

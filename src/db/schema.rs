@@ -5,7 +5,8 @@ use rusqlite::Connection;
 
 /// Current schema version for migrations.
 /// v2: Changed hash from TEXT (SHA256 hex) to INTEGER (xxHash u64)
-pub const SCHEMA_VERSION: u32 = 2;
+/// v3: Replaced 3-byte trigram keys with u64 sparse n-gram keys
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Initializes the database schema.
 ///
@@ -104,7 +105,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         ) WITHOUT ROWID;
 
         INSERT OR REPLACE INTO schema_info (key, value)
-        VALUES ('version', '2');
+        VALUES ('version', '3');
         "#,
     )?;
 
@@ -134,5 +135,26 @@ mod tests {
         assert!(tables.contains(&"files".to_string()));
         assert!(tables.contains(&"trigrams".to_string()));
         assert!(tables.contains(&"files_fts".to_string()));
+    }
+
+    /// 6e: Verify SCHEMA_VERSION constant matches the value written to SQL.
+    #[test]
+    fn test_schema_version_consistency() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pragmas(&conn).unwrap();
+        init_schema(&conn).unwrap();
+
+        let db_version: u32 = conn
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM schema_info WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            db_version, SCHEMA_VERSION,
+            "SCHEMA_VERSION constant ({SCHEMA_VERSION}) does not match SQL-embedded version ({db_version})"
+        );
     }
 }

@@ -7,7 +7,7 @@ mod common;
 use grepika::db::Database;
 use grepika::services::{GrepService, Indexer, SearchService, TrigramIndex};
 use grepika::tools::*;
-use grepika::types::{FileId, Score, Trigram};
+use grepika::types::{FileId, NgramKey, Score};
 use std::fs;
 use std::sync::{Arc, RwLock};
 use tempfile::TempDir;
@@ -433,26 +433,20 @@ fn test_file_id_display() {
 // ============================================================================
 
 #[test]
-fn test_trigram_extraction_empty() {
-    let trigrams: Vec<_> = Trigram::extract("").collect();
-    assert!(trigrams.is_empty());
-
-    let trigrams: Vec<_> = Trigram::extract("ab").collect();
-    assert!(trigrams.is_empty());
+fn test_ngram_key_roundtrip() {
+    let key = NgramKey::new(0x1234567890abcdef);
+    let bytes = key.to_le_bytes();
+    let restored = NgramKey::from_le_bytes(bytes);
+    assert_eq!(key, restored);
 }
 
 #[test]
-fn test_trigram_extraction_exact() {
-    let trigrams: Vec<_> = Trigram::extract("abc").collect();
-    assert_eq!(trigrams.len(), 1);
-    assert_eq!(trigrams[0].as_bytes(), b"abc");
-}
-
-#[test]
-fn test_trigram_debug_display() {
-    let trigram = Trigram::new(*b"abc");
-    let debug = format!("{:?}", trigram);
-    assert!(debug.contains("abc"));
+fn test_ngram_key_debug_display() {
+    let key = NgramKey::new(0xdeadbeef);
+    let debug = format!("{:?}", key);
+    assert!(debug.contains("deadbeef"));
+    let display = format!("{}", key);
+    assert!(display.contains("deadbeef"));
 }
 
 // ============================================================================

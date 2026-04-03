@@ -847,14 +847,13 @@ mod tests {
     fn test_trigram_storage() {
         let db = Database::in_memory().unwrap();
 
-        let trigram = b"aut";
+        // Use 8-byte NgramKey format (production format since schema v3)
+        let key = 0x1234567890abcdef_u64.to_le_bytes();
         let file_ids: Vec<u8> = vec![1, 2, 3, 4];
 
-        // Store trigram
-        db.upsert_trigrams(trigram, &file_ids).unwrap();
+        db.upsert_trigrams(&key, &file_ids).unwrap();
 
-        // Retrieve it
-        let result = db.get_trigram_files(trigram).unwrap();
+        let result = db.get_trigram_files(&key).unwrap();
         assert_eq!(result, Some(file_ids));
     }
 
@@ -862,15 +861,12 @@ mod tests {
     fn test_trigram_upsert_updates() {
         let db = Database::in_memory().unwrap();
 
-        let trigram = b"aut";
+        let key = 0xdeadbeef_u64.to_le_bytes();
 
-        // Initial insert
-        db.upsert_trigrams(trigram, &[1, 2]).unwrap();
+        db.upsert_trigrams(&key, &[1, 2]).unwrap();
+        db.upsert_trigrams(&key, &[1, 2, 3, 4]).unwrap();
 
-        // Update
-        db.upsert_trigrams(trigram, &[1, 2, 3, 4]).unwrap();
-
-        let result = db.get_trigram_files(trigram).unwrap().unwrap();
+        let result = db.get_trigram_files(&key).unwrap().unwrap();
         assert_eq!(result, vec![1, 2, 3, 4]);
     }
 
