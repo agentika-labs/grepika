@@ -364,7 +364,31 @@ impl SearchService {
         // to a path set and restrict grep to only those files.
         let trigram_results = {
             let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
-            trigram.search(query)
+            if intent == QueryIntent::Regex {
+                // Extract literal segments from regex pattern for smarter trigram filtering
+                let literals = super::regex_literals::extract_literals(query);
+                if literals.is_empty() {
+                    None
+                } else {
+                    // AND-intersect bitmaps from all literals
+                    let mut combined: Option<roaring::RoaringBitmap> = None;
+                    for literal in &literals {
+                        if let Some(bitmap) = trigram.search(literal) {
+                            combined = Some(match combined {
+                                Some(existing) => existing & bitmap,
+                                None => bitmap,
+                            });
+                            // Early exit if intersection is already empty
+                            if combined.as_ref().is_some_and(|b| b.is_empty()) {
+                                break;
+                            }
+                        }
+                    }
+                    combined
+                }
+            } else {
+                trigram.search(query)
+            }
         };
 
         let file_filter = self.build_trigram_filter(&trigram_results);
