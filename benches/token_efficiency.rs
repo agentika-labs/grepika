@@ -125,6 +125,7 @@ fn measure_grepika_search(service: &SearchService, query: &str, limit: usize) ->
     let output = SearchOutput {
         results: items,
         has_more: false,
+        hint: None,
     };
 
     TokenMetrics::from_output(&output, result_count, result_count)
@@ -253,6 +254,7 @@ fn measure_output_formats(
     let search_output = SearchOutput {
         results: items,
         has_more: false,
+        hint: None,
     };
 
     // 1. CLI formatted output (via grepika::fmt::fmt_search)
