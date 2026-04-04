@@ -114,6 +114,9 @@ pub struct SearchOutput {
     pub results: Vec<SearchResultItem>,
     /// Whether more results exist beyond the limit
     pub has_more: bool,
+    /// Agent guidance when results are empty or may be incomplete
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
 }
 
 /// A single search result.
@@ -170,8 +173,20 @@ pub fn execute_search(
         })
         .collect();
 
+    let hint = if items.is_empty() {
+        let suggestion = match input.mode {
+            SearchMode::Grep => "Try mode=fts for natural language or mode=combined for broader matching.",
+            SearchMode::Fts => "Try mode=grep for exact regex or mode=combined for broader matching.",
+            SearchMode::Combined => "Try a broader query, different keywords, or check 'stats' to verify index coverage.",
+        };
+        Some(format!("No results found. {suggestion}"))
+    } else {
+        None
+    };
+
     Ok(SearchOutput {
         results: items,
         has_more,
+        hint,
     })
 }
