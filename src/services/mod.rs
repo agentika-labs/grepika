@@ -1,5 +1,6 @@
 //! Core services for search, indexing, and file operations.
 
+pub mod ast;
 mod fts;
 mod git_diff;
 pub mod grep;
