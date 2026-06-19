@@ -144,16 +144,14 @@ fn normalize_path(path: &Path) -> PathBuf {
             Component::CurDir => {
                 // Skip "." components
             }
-            Component::ParentDir => {
-                // Pop the last component if possible, otherwise keep ".."
+            // Pop the last component if possible; if there's nothing poppable
+            // (empty or a leading ".."), fall through to push and keep "..".
+            Component::ParentDir
                 if components
                     .last()
-                    .is_some_and(|c| !matches!(c, Component::ParentDir))
-                {
-                    components.pop();
-                } else {
-                    components.push(component);
-                }
+                    .is_some_and(|c| !matches!(c, Component::ParentDir)) =>
+            {
+                components.pop();
             }
             _ => {
                 components.push(component);
