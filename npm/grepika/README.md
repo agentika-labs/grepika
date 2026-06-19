@@ -10,7 +10,7 @@ The plugin bundles the MCP server with an exploration agent, skills, and command
 
 ```bash
 /plugin marketplace add agentika-labs/agentika-plugin-marketplace
-/plugin install grepika@agentika-labs-agentika-plugin-marketplace
+/plugin install grepika@agentika-marketplace
 ```
 
 Adds `/learn-codebase`, `/investigate`, `/impact`, `/index-status` skills and an Explorer agent. See the [full documentation](https://github.com/agentika-labs/grepika#claude-code-plugin) for details.
