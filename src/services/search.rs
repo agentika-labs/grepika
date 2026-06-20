@@ -179,6 +179,9 @@ pub struct SearchService {
     cached_total_files: AtomicU64,
     /// Bidirectional path↔FileId cache. Read-heavy (searches), write-rare (after indexing).
     path_cache: RwLock<PathCache>,
+    /// Embedding model for semantic re-ranking. `None` without the `semantic`
+    /// feature (or if the model failed to load), making the blend a no-op.
+    embedder: Option<std::sync::Mutex<crate::services::semantic::Embedder>>,
 }
 
 impl SearchService {
@@ -208,6 +211,7 @@ impl SearchService {
             config: SearchConfig::default(),
             cached_total_files: AtomicU64::new(total),
             path_cache: RwLock::new(path_cache),
+            embedder: crate::services::semantic::load_shared(),
         })
     }
 
@@ -428,14 +432,76 @@ impl SearchService {
             QueryIntent::ExactSymbol | QueryIntent::ShortToken => &self.config,
         };
 
-        self.merge_results(
+        let mut results = self.merge_results(
             fts_results,
             grep_results,
             grep_matches,
             trigram_results,
             limit,
             config_ref,
-        )
+        )?;
+
+        // Semantic re-ranking (only active under the `semantic` feature with a
+        // loaded model). Natural-language queries benefit most.
+        if self.embedder.is_some() && intent == QueryIntent::NaturalLanguage {
+            self.blend_semantic(query, &mut results);
+        }
+
+        Ok(results)
+    }
+
+    /// Boosts the scores of already-found results by cosine similarity between
+    /// the query embedding and each file's symbol embeddings, then re-sorts.
+    ///
+    /// ponytail: boost-only — it re-ranks existing lexical hits but does not
+    /// surface files the lexical backends missed. Add candidate injection
+    /// (with path/snippet enrichment) if recall on semantic-only matches
+    /// matters. No-op when the embedder is absent.
+    fn blend_semantic(&self, query: &str, results: &mut [SearchResult]) {
+        use crate::services::semantic::cosine;
+        const SEMANTIC_WEIGHT: f64 = 0.3;
+
+        let Some(embedder) = &self.embedder else {
+            return;
+        };
+        let query_vec = {
+            let model = embedder.lock().unwrap_or_else(|e| e.into_inner());
+            match model.embed(vec![query.to_string()]) {
+                Ok(mut v) if !v.is_empty() => v.swap_remove(0),
+                _ => return,
+            }
+        };
+
+        let embeddings = match self.db.all_embeddings() {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        if embeddings.is_empty() {
+            return;
+        }
+
+        // Best cosine per file (a file has many symbol embeddings).
+        let mut best: HashMap<u32, f32> = HashMap::new();
+        for (_sym, file_id, vec) in &embeddings {
+            let sim = cosine(&query_vec, vec).max(0.0);
+            let e = best.entry(*file_id).or_insert(0.0);
+            if sim > *e {
+                *e = sim;
+            }
+        }
+
+        for r in results.iter_mut() {
+            if let Some(sim) = best.get(&r.file_id.as_u32()) {
+                let blended = r.score.as_f64() + SEMANTIC_WEIGHT * f64::from(*sim);
+                r.score = Score::new(blended);
+            }
+        }
+        results.sort_by(|a, b| {
+            b.score
+                .as_f64()
+                .partial_cmp(&a.score.as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Performs FTS-only search.

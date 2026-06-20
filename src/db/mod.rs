@@ -6,8 +6,11 @@
 //! - `DbError::Pool` if no pooled connection is available within the timeout
 //! - `DbError::Sqlite` if the underlying SQL operation fails
 
+mod graph;
 mod pragmas;
 mod schema;
+
+pub use graph::{GraphSymbol, SymbolRow};
 
 pub use pragmas::{apply_indexing_pragmas, restore_normal_pragmas};
 pub use pragmas::{apply_pragmas, apply_pragmas_raw};

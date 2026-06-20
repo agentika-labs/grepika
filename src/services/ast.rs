@@ -111,6 +111,77 @@ pub fn extract(content: &str, file_type: &str) -> Vec<AstSymbol> {
     raw
 }
 
+/// A call site: the callee identifier and its byte offset (used to attribute
+/// the call to its enclosing symbol).
+pub struct RawCall {
+    pub name: String,
+    pub byte: usize,
+}
+
+/// Extracts call sites and imported module names from `content`.
+/// Returns `(calls, imports)`. Empty for unsupported languages.
+pub fn extract_edges(content: &str, file_type: &str) -> (Vec<RawCall>, Vec<String>) {
+    let Some((lang, _)) = lang_for(file_type) else {
+        return (Vec::new(), Vec::new());
+    };
+    let (call_q, import_q) = match file_type {
+        "rs" => (RUST_CALL_QUERY, RUST_IMPORT_QUERY),
+        "py" => (PY_CALL_QUERY, PY_IMPORT_QUERY),
+        "go" => (GO_CALL_QUERY, GO_IMPORT_QUERY),
+        "js" | "jsx" => (JS_CALL_QUERY, JS_IMPORT_QUERY),
+        "ts" | "tsx" => (JS_CALL_QUERY, JS_IMPORT_QUERY),
+        _ => return (Vec::new(), Vec::new()),
+    };
+
+    let mut parser = Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return (Vec::new(), Vec::new());
+    }
+    let Some(tree) = parser.parse(content, None) else {
+        return (Vec::new(), Vec::new());
+    };
+    let src = content.as_bytes();
+
+    let mut calls = Vec::new();
+    if let Ok(q) = Query::new(&lang, call_q) {
+        if let Some(idx) = q.capture_index_for_name("callee") {
+            let mut cursor = QueryCursor::new();
+            let mut it = cursor.matches(&q, tree.root_node(), src);
+            while let Some(m) = it.next() {
+                for cap in m.captures {
+                    if cap.index == idx {
+                        if let Ok(name) = cap.node.utf8_text(src) {
+                            calls.push(RawCall {
+                                name: name.to_string(),
+                                byte: cap.node.start_byte(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut imports = Vec::new();
+    if let Ok(q) = Query::new(&lang, import_q) {
+        if let Some(idx) = q.capture_index_for_name("mod") {
+            let mut cursor = QueryCursor::new();
+            let mut it = cursor.matches(&q, tree.root_node(), src);
+            while let Some(m) = it.next() {
+                for cap in m.captures {
+                    if cap.index == idx {
+                        if let Ok(name) = cap.node.utf8_text(src) {
+                            imports.push(name.trim_matches(['"', '`', '\'']).to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (calls, imports)
+}
+
 /// Maps a tree-sitter node kind to a short, stable label for output.
 fn friendly_kind(node_kind: &str) -> String {
     let mapped = match node_kind {
@@ -181,6 +252,49 @@ const TS_QUERY: &str = r"
   value: [(arrow_function) (function_expression)]) @def
 ";
 
+// --- Call queries: capture the callee identifier as @callee ---
+
+const RUST_CALL_QUERY: &str = r"
+(call_expression function: (identifier) @callee)
+(call_expression function: (scoped_identifier name: (identifier) @callee))
+(call_expression function: (field_expression field: (field_identifier) @callee))
+(macro_invocation macro: (identifier) @callee)
+";
+
+const PY_CALL_QUERY: &str = r"
+(call function: (identifier) @callee)
+(call function: (attribute attribute: (identifier) @callee))
+";
+
+const GO_CALL_QUERY: &str = r"
+(call_expression function: (identifier) @callee)
+(call_expression function: (selector_expression field: (field_identifier) @callee))
+";
+
+const JS_CALL_QUERY: &str = r"
+(call_expression function: (identifier) @callee)
+(call_expression function: (member_expression property: (property_identifier) @callee))
+";
+
+// --- Import queries: capture the module/path as @mod ---
+
+const RUST_IMPORT_QUERY: &str = r"
+(use_declaration argument: (_) @mod)
+";
+
+const PY_IMPORT_QUERY: &str = r"
+(import_statement name: (dotted_name) @mod)
+(import_from_statement module_name: (dotted_name) @mod)
+";
+
+const GO_IMPORT_QUERY: &str = r"
+(import_spec path: (interpreted_string_literal) @mod)
+";
+
+const JS_IMPORT_QUERY: &str = r"
+(import_statement source: (string (string_fragment) @mod))
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +327,30 @@ mod tests {
     #[test]
     fn unsupported_returns_empty() {
         assert!(extract("whatever", "txt").is_empty());
+    }
+
+    #[test]
+    fn rust_edges() {
+        let src = "use foo::bar;\nfn a() { b(); helper(); }\nfn b() {}\n";
+        let (calls, imports) = extract_edges(src, "rs");
+        let callees: Vec<_> = calls.iter().map(|c| c.name.as_str()).collect();
+        assert!(callees.contains(&"b"));
+        assert!(callees.contains(&"helper"));
+        assert!(imports.iter().any(|i| i.contains("bar")));
+
+        // Attribute the `b()` call to its enclosing fn `a` by byte range.
+        let syms = extract(src, "rs");
+        let a = syms.iter().find(|s| s.name == "a").unwrap();
+        let b_call = calls.iter().find(|c| c.name == "b").unwrap();
+        assert!(b_call.byte >= a.start_byte && b_call.byte < a.end_byte);
+    }
+
+    #[test]
+    fn py_imports() {
+        let src = "import os\nfrom collections import deque\n";
+        let (_calls, imports) = extract_edges(src, "py");
+        assert!(imports.iter().any(|i| i == "os"));
+        assert!(imports.iter().any(|i| i == "collections"));
     }
 
     #[test]

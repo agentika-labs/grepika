@@ -6,7 +6,8 @@ use rusqlite::Connection;
 /// Current schema version for migrations.
 /// v2: Changed hash from TEXT (SHA256 hex) to INTEGER (xxHash u64)
 /// v3: Replaced 3-byte trigram keys with u64 sparse n-gram keys
-pub const SCHEMA_VERSION: u32 = 3;
+/// v4: Added symbols + edges tables (tree-sitter code graph) and embeddings
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Initializes the database schema.
 ///
@@ -35,6 +36,9 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
                 DROP TABLE IF EXISTS files;
                 DROP TABLE IF EXISTS files_fts;
                 DROP TABLE IF EXISTS trigrams;
+                DROP TABLE IF EXISTS symbols;
+                DROP TABLE IF EXISTS edges;
+                DROP TABLE IF EXISTS embeddings;
                 DROP TABLE IF EXISTS schema_info;
                 ",
             )?;
@@ -98,6 +102,41 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
             file_ids BLOB NOT NULL
         ) WITHOUT ROWID;
 
+        -- Code graph: definitions extracted via tree-sitter.
+        CREATE TABLE IF NOT EXISTS symbols (
+            symbol_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            start_byte INTEGER NOT NULL,
+            end_byte INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file_id);
+        CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
+
+        -- Code graph edges. dst is stored by name and resolved at query time
+        -- (name-based; no type scoping). src_symbol is NULL for file-level
+        -- import edges. kind is 'CALLS' or 'IMPORTS'.
+        CREATE TABLE IF NOT EXISTS edges (
+            src_symbol INTEGER,
+            dst_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            file_id INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_symbol);
+        CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_name);
+        CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file_id);
+
+        -- Semantic embeddings (one row per symbol chunk). Populated only when
+        -- the `semantic` feature is built; otherwise the table stays empty.
+        CREATE TABLE IF NOT EXISTS embeddings (
+            symbol_id INTEGER PRIMARY KEY,
+            file_id INTEGER NOT NULL,
+            vec BLOB NOT NULL
+        );
+
         -- Schema version tracking
         CREATE TABLE IF NOT EXISTS schema_info (
             key TEXT PRIMARY KEY,
@@ -105,7 +144,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         ) WITHOUT ROWID;
 
         INSERT OR REPLACE INTO schema_info (key, value)
-        VALUES ('version', '3');
+        VALUES ('version', '4');
         "#,
     )?;
 
