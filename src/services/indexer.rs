@@ -22,6 +22,109 @@ use xxhash_rust::xxh3::xxh3_64;
 /// Larger batches reduce transaction overhead but increase memory usage.
 const BATCH_SIZE: usize = 500;
 
+/// Parses a file with tree-sitter and persists its symbols + edges.
+/// Best-effort: parse/DB failures are logged, not propagated (the lexical
+/// index must succeed even if graph extraction does not).
+fn index_graph(
+    conn: &rusqlite::Connection,
+    file_id: FileId,
+    path: &str,
+    content: &str,
+    embedder: Option<&std::sync::Mutex<crate::services::semantic::Embedder>>,
+) {
+    use crate::db::SymbolRow;
+    use crate::services::ast;
+
+    let file_type = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+
+    if !ast::is_supported(&file_type) {
+        return;
+    }
+
+    let symbols: Vec<SymbolRow> = ast::extract(content, &file_type)
+        .into_iter()
+        .map(|s| SymbolRow {
+            name: s.name,
+            kind: s.kind,
+            start_line: s.line,
+            end_line: s.end_line,
+            start_byte: s.start_byte,
+            end_byte: s.end_byte,
+        })
+        .collect();
+    let (calls, imports) = ast::extract_edges(content, &file_type);
+
+    if let Err(e) = Database::replace_file_graph_on(conn, file_id, &symbols, &calls, &imports) {
+        tracing::warn!("graph index failed for {path}: {e}");
+        return;
+    }
+
+    if let Some(emb) = embedder {
+        embed_symbols(conn, file_id, content, &symbols, emb);
+    }
+}
+
+/// Embeds each symbol's source chunk and stores the vector. Best-effort:
+/// failures are logged, never propagated. Only invoked under the `semantic`
+/// feature (embedder is `None` otherwise).
+fn embed_symbols(
+    conn: &rusqlite::Connection,
+    file_id: FileId,
+    content: &str,
+    symbols: &[crate::db::SymbolRow],
+    embedder: &std::sync::Mutex<crate::services::semantic::Embedder>,
+) {
+    use crate::services::semantic::encode;
+
+    // Symbols were inserted in order, so ids ascend in the same order.
+    let ids: Vec<i64> = match conn
+        .prepare("SELECT symbol_id FROM symbols WHERE file_id = ?1 ORDER BY symbol_id")
+        .and_then(|mut s| {
+            s.query_map([file_id.as_u32()], |r| r.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()
+        }) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("embed: failed to read symbol ids: {e}");
+            return;
+        }
+    };
+    if ids.len() != symbols.len() {
+        return;
+    }
+
+    // Chunk text = the symbol's source span, prefixed with its name/kind so the
+    // embedding captures the identifier as well as the body.
+    let texts: Vec<String> = symbols
+        .iter()
+        .map(|s| {
+            let body = content.get(s.start_byte..s.end_byte).unwrap_or("");
+            format!("{} {}\n{}", s.kind, s.name, body)
+        })
+        .collect();
+
+    let vectors = {
+        let model = embedder.lock().unwrap_or_else(|e| e.into_inner());
+        match model.embed(texts) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("embed failed: {e}");
+                return;
+            }
+        }
+    };
+
+    for (id, vec) in ids.iter().zip(&vectors) {
+        if let Err(e) = Database::upsert_embedding_on(conn, *id, file_id, &encode(vec)) {
+            tracing::warn!("embed: store failed: {e}");
+        }
+    }
+}
+
 /// Progress callback type.
 pub type ProgressCallback = Box<dyn Fn(IndexProgress) + Send + Sync>;
 
@@ -121,6 +224,10 @@ pub struct Indexer {
     config: IndexConfig,
     /// Pre-built HashSet of lowercased extensions for O(1) lookup (P7)
     extension_set: HashSet<String>,
+    /// Embedding model, loaded once when the `semantic` feature is enabled.
+    /// `None` when disabled or when model load failed (logged). Mutex makes
+    /// the indexer `Sync` despite the model's non-`Sync` ORT session.
+    embedder: Option<std::sync::Mutex<crate::services::semantic::Embedder>>,
 }
 
 impl Indexer {
@@ -134,6 +241,7 @@ impl Indexer {
             root,
             config,
             extension_set,
+            embedder: crate::services::semantic::load_shared(),
         }
     }
 
@@ -151,6 +259,7 @@ impl Indexer {
             root,
             config,
             extension_set,
+            embedder: crate::services::semantic::load_shared(),
         }
     }
 
@@ -317,6 +426,13 @@ impl Indexer {
 
             for (data, file_id) in batch.iter().zip(file_ids) {
                 trigram_guard.add_file(file_id, &data.content);
+                index_graph(
+                    conn,
+                    file_id,
+                    &data.path,
+                    &data.content,
+                    self.embedder.as_ref(),
+                );
             }
 
             state.files_indexed += batch.len();
@@ -337,6 +453,7 @@ impl Indexer {
         for path in existing_paths.difference(seen_paths) {
             if let Ok(Some(file_id)) = Database::get_file_id_on(conn, path) {
                 trigram_guard.remove_file(file_id);
+                Database::delete_file_graph_on(conn, file_id);
             }
             if Database::delete_file_on(conn, path)? {
                 state.files_deleted += 1;
@@ -390,6 +507,9 @@ impl Indexer {
 
         let file_id = self.db.upsert_file(&path_str, &content, hash)?;
         self.index_trigrams(file_id, &content);
+        if let Ok(conn) = self.db.conn() {
+            index_graph(&conn, file_id, &path_str, &content, self.embedder.as_ref());
+        }
 
         Ok(file_id)
     }

@@ -77,6 +77,14 @@ tree-sitter-javascript = "0.25.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-python = "0.25.0"
 
+# Local semantic embeddings (optional; CPU-only ONNX, model downloads to cache
+# on first use). Gated to keep the default binary lean.
+fastembed = { version = "4", optional = true }
+
+[features]
+default = []
+semantic = ["dep:fastembed"]
+
 [dev-dependencies]
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }

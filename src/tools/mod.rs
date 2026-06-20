@@ -2,8 +2,12 @@
 
 mod analysis;
 mod content;
+mod graph;
 mod index;
 mod search;
+
+// graph
+pub use graph::{execute_graph, GraphInput, GraphOutput, SymbolHit};
 
 // analysis
 pub use analysis::{
