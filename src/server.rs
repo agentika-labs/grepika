@@ -281,6 +281,19 @@ pub struct IndexParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct GraphParams {
+    /// Relation: callers | callees | call_chain | imports | dependents
+    pub relation: String,
+    /// Symbol name (callers/callees/call_chain), file path (imports),
+    /// or module substring (dependents)
+    pub name: String,
+    /// Max depth for call_chain (default 5, max 25)
+    pub depth: Option<usize>,
+    /// Maximum results to return (default 100, max 500)
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct DiffParams {
     /// First file path relative to workspace root
     pub file1: String,
@@ -761,6 +774,36 @@ impl GrepikaServer {
         };
         let search = Arc::clone(&ws.search);
         spawn_tool(move || tools::execute_diff(&search, input)).await
+    }
+
+    #[tool(
+        description = "Navigate the code graph (tree-sitter symbols + call/import edges). \
+        Set relation to one of: 'callers' (who calls NAME), 'callees' (what NAME calls), \
+        'call_chain' (transitive callees up to depth), 'imports' (modules a file imports — \
+        NAME is a file path), 'dependents' (files importing a module — NAME is a module substring).\n\n\
+        Requires 'index' first. Resolution is name-based (no type scoping). \
+        Use to answer 'what calls this?' and 'what does this touch?' without reading files.",
+        annotations(
+            title = "Code Graph",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn graph(
+        &self,
+        Parameters(params): Parameters<GraphParams>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let ws = require_workspace!(self);
+        let input = tools::GraphInput {
+            relation: params.relation,
+            name: params.name,
+            depth: params.depth.unwrap_or(5).min(25),
+            limit: params.limit.unwrap_or(100).min(500),
+        };
+        let search = Arc::clone(&ws.search);
+        spawn_tool(move || tools::execute_graph(&search, input)).await
     }
 }
 
