@@ -92,6 +92,7 @@ SQLite + r2d2 pool         ← .grepika/index.db
 | `context` | Surrounding lines around a specific line |
 | `stats` | Index statistics |
 | `refs` | Find all references to a symbol |
+| `structural_search` | Syntax-aware AST pattern/kind search via ast-grep (no index required) |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
 | `add_workspace` | Load a project workspace (global mode) |

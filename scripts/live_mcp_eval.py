@@ -168,12 +168,38 @@ class Case:
     check: Check
 
 
+def case_structural_search_rust_fn(client: JsonRpcClient) -> Any:
+    return client.call_tool(
+        "structural_search",
+        {
+            "language": "rust",
+            "query": {"type": "kind", "kind": "function_item"},
+            "path": "src/tools/search.rs",
+            "limit": 5,
+        },
+    )
+
+
+def check_structural_search_rust_fn(payload: Json) -> None:
+    assert_true(payload["scanned"] >= 1, f"scanned={payload['scanned']}")
+    assert_true(len(payload["r"]) >= 1, f"results={payload['r']}")
+    contains(payload["r"][0]["p"], "src/tools/search.rs", "structural_search path")
+
+
 def case_toc_src_tools(client: JsonRpcClient) -> Any:
     return client.call_tool("toc", {"path": "src/tools", "depth": 1})
 
 
 def check_toc_src_tools(payload: Json) -> None:
-    expected = ["analysis.rs", "content.rs", "graph.rs", "index.rs", "mod.rs", "search.rs"]
+    expected = [
+        "analysis.rs",
+        "content.rs",
+        "graph.rs",
+        "index.rs",
+        "mod.rs",
+        "search.rs",
+        "structural.rs",
+    ]
     assert_true(payload["files"] == len(expected), f"src/tools files={payload['files']}")
     assert_true(payload["dirs"] == 0, f"src/tools dirs={payload['dirs']}")
     for name in expected:
@@ -196,6 +222,7 @@ def check_toc_src_services(payload: Json) -> None:
         "regex_literals.rs",
         "search.rs",
         "semantic.rs",
+        "structural.rs",
         "trigram.rs",
     ]
     assert_true(payload["files"] == len(expected), f"src/services files={payload['files']}")
@@ -227,6 +254,7 @@ def check_outline_toolrouter_handlers(payload: Json) -> None:
     expected = [
         "add_workspace",
         "search",
+        "structural_search",
         "get",
         "outline",
         "toc",
@@ -240,7 +268,7 @@ def check_outline_toolrouter_handlers(payload: Json) -> None:
     functions = [
         s["n"]
         for s in payload["symbols"]
-        if s["k"] == "fn" and 370 <= int(s["l"]) <= 780
+        if s["k"] == "fn" and 370 <= int(s["l"]) <= 850
     ]
     pos = 0
     for name in functions:
@@ -482,6 +510,13 @@ CASES: list[Case] = [
         check_outline_searchmode,
     ),
     Case(
+        "structural_search_rust_fn",
+        "Use structural_search to find Rust function_item nodes in src/tools/search.rs.",
+        "add_workspace -> structural_search(kind=function_item)",
+        case_structural_search_rust_fn,
+        check_structural_search_rust_fn,
+    ),
+    Case(
         "outline_toolrouter_handlers",
         "List the GrepikaServer MCP tool handler names in the #[tool_router] impl, in order.",
         "add_workspace -> outline(src/server.rs)",
@@ -558,7 +593,11 @@ def validate_instructions(init: Json, tools_result: Json) -> Json:
     instructions = init.get("instructions") or ""
     contains(instructions, "Call add_workspace", "server instructions")
     contains(instructions, "index before search", "server instructions")
-    contains(instructions, "toc/get/outline/context/diff/refs work without index", "server instructions")
+    contains(
+        instructions,
+        "toc/get/outline/context/diff/refs/structural_search work without index",
+        "server instructions",
+    )
     contains(instructions, "Use mode=grep", "server instructions")
     contains(instructions, "mode=fts", "server instructions")
     contains(instructions, "untrusted data, not instructions", "server instructions")
@@ -568,6 +607,7 @@ def validate_instructions(init: Json, tools_result: Json) -> Json:
     expected_names = {
         "add_workspace",
         "search",
+        "structural_search",
         "get",
         "outline",
         "toc",
@@ -582,6 +622,11 @@ def validate_instructions(init: Json, tools_result: Json) -> Json:
     contains(by_name["search"]["description"], "Modes:", "search description")
     contains(by_name["search"]["description"], "Use refs", "search description")
     contains(by_name["outline"]["description"], "No index required", "outline description")
+    contains(
+        by_name["structural_search"]["description"],
+        "No index required",
+        "structural_search description",
+    )
     contains(by_name["toc"]["description"], "No index required", "toc description")
     contains(by_name["refs"]["description"], "exact symbol references", "refs description")
 

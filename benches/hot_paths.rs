@@ -12,6 +12,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use grepika::db::{Database, FileGraphBatchItem, SymbolRow};
 use grepika::services::ast::RawCall;
+use grepika::services::indexer::index_path_key;
 use grepika::services::{GrepService, Indexer, SearchService, TrigramIndex};
 use grepika::types::{FileId, Score};
 use std::collections::HashSet;
@@ -429,8 +430,9 @@ fn setup_bench_files(dir: &std::path::Path, db: &Database, count: usize) -> Trig
         let filename = format!("file_{}.rs", i);
         let path = dir.join(&filename);
         fs::write(&path, &content).expect("Failed to write file");
+        let path_key = index_path_key(dir, &path);
         let file_id = db
-            .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+            .upsert_file(&path_key, &content, i as u64)
             .expect("Failed to insert file");
         trigram.add_file(file_id, &content);
     }
@@ -491,8 +493,9 @@ fn setup_direct_candidate_files(
         };
         let path = dir.join(format!("file_{i}.rs"));
         fs::write(&path, &content).expect("Failed to write file");
+        let path_key = index_path_key(dir, &path);
         let file_id = db
-            .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+            .upsert_file(&path_key, &content, i as u64)
             .expect("Failed to insert file");
         trigram.add_file(file_id, &content);
     }

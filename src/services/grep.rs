@@ -214,9 +214,13 @@ impl GrepService {
 
                 let path = entry.path();
 
+                if security::is_sensitive_file(path).is_some() {
+                    return WalkState::Continue;
+                }
+
                 // Trigram pre-filter: skip files not in the filter set
                 if let Some(filter) = file_filter {
-                    if !filter.contains(path) {
+                    if !path_matches_filter(path, filter) {
                         return WalkState::Continue;
                     }
                 }
@@ -421,8 +425,12 @@ impl GrepService {
 
                 let path = entry.path();
 
+                if security::is_sensitive_file(path).is_some() {
+                    return WalkState::Continue;
+                }
+
                 if let Some(filter) = file_filter {
-                    if !filter.contains(path) {
+                    if !path_matches_filter(path, filter) {
                         return WalkState::Continue;
                     }
                 }
@@ -570,6 +578,17 @@ impl GrepService {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// Returns true when `path` matches a canonicalized trigram prefilter entry.
+fn path_matches_filter(path: &Path, filter: &HashSet<Arc<Path>>) -> bool {
+    if filter.contains(path) {
+        return true;
+    }
+    let Ok(canon) = dunce::canonicalize(path) else {
+        return false;
+    };
+    filter.contains(canon.as_path())
 }
 
 #[inline]
@@ -970,6 +989,28 @@ mod tests {
 
         assert!(results.is_empty());
         assert!(matches_by_file.is_empty());
+    }
+
+    #[test]
+    fn test_candidate_search_accepts_canonical_absolute_paths() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("src/file_31.rs");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(
+            &file,
+            "pub fn zero_repeat() { let without_zero_marker = true; }\n",
+        )
+        .unwrap();
+        let canonical = dunce::canonicalize(&file).unwrap();
+
+        let service = GrepService::new(dir.path().to_path_buf()).unwrap();
+        let candidates = [Arc::<Path>::from(canonical.as_path())];
+        let (results, matches_by_file) = service
+            .search_files_with_matches_candidates(r"(token)*without_zero_marker", 10, &candidates)
+            .unwrap();
+
+        assert_eq!(results.len(), 1, "canonical candidate path should match");
+        assert!(matches_by_file.contains_key(canonical.as_path()));
     }
 
     #[test]

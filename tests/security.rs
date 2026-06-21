@@ -640,6 +640,72 @@ fn test_edge_cases() {
 }
 
 // =============================================================================
+// Structural Search Security Tests
+// =============================================================================
+
+#[test]
+fn test_structural_search_blocks_path_traversal() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    let result = execute_structural_search(
+        &service,
+        StructuralSearchInput {
+            language: StructuralLanguage::Rust,
+            query: StructuralQuery::Kind {
+                kind: "function_item".to_string(),
+            },
+            path: "../etc/passwd".to_string(),
+            globs: Vec::new(),
+            limit: 10,
+            include_meta: false,
+            strictness: None,
+            timeout_ms: STRUCTURAL_DEFAULT_TIMEOUT_MS,
+        },
+    );
+    assert!(result.is_err(), "Should block path traversal");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("traversal"),
+        "Error should mention traversal, got: {err}"
+    );
+}
+
+#[test]
+fn test_structural_search_excludes_sensitive_files() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    let result = execute_structural_search(
+        &service,
+        StructuralSearchInput {
+            language: StructuralLanguage::Rust,
+            query: StructuralQuery::Kind {
+                kind: "function_item".to_string(),
+            },
+            path: ".".to_string(),
+            globs: Vec::new(),
+            limit: 50,
+            include_meta: false,
+            strictness: None,
+            timeout_ms: STRUCTURAL_DEFAULT_TIMEOUT_MS,
+        },
+    )
+    .unwrap();
+
+    for hit in &result.results {
+        assert!(
+            !hit.path.contains(".env"),
+            "Structural search should not include sensitive files, got: {}",
+            hit.path
+        );
+        assert!(
+            !hit.path.contains("credentials.json"),
+            "Structural search should not include sensitive files, got: {}",
+            hit.path
+        );
+    }
+}
+
+// =============================================================================
 // Workspace Root Validation Tests (integration)
 // =============================================================================
 

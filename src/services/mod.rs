@@ -13,6 +13,7 @@ pub mod structural;
 mod trigram;
 
 pub use fts::FtsService;
+pub use git_diff::{detect_changes, head_oid};
 pub use grep::{GrepMatch, GrepService};
 pub use indexer::Indexer;
 pub use search::{MatchSnippet, SearchResult as SearchHit, SearchService, SearchSources};

@@ -26,7 +26,10 @@ pub fn extract_literals(pattern: &str) -> Vec<String> {
     segments
 }
 
-/// Flushes accumulated literal bytes into a segment if >= 3 bytes and valid UTF-8.
+/// Flushes accumulated literal bytes into a segment if long enough for the
+/// search layer's `MIN_REGEX_PREFILTER_LITERAL_LEN` gate (currently 5 bytes)
+/// and valid UTF-8. Extraction still keeps segments >= 3 bytes here so shorter
+/// literals remain available for other callers/tests.
 fn flush(buf: &mut Vec<u8>, segments: &mut Vec<String>) {
     if buf.len() >= 3 {
         if let Ok(s) = std::str::from_utf8(buf) {

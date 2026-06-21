@@ -96,6 +96,7 @@ SQLite + r2d2 pool         ← .grepika/index.db
 | `stats` | Index statistics |
 | `refs` | Find all references to a symbol |
 | `graph` | Navigate the code graph: callers, callees, call_chain, imports, dependents |
+| `structural_search` | Syntax-aware AST pattern/kind search via ast-grep (no index required) |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
 | `add_workspace` | Load a project workspace (global mode) |

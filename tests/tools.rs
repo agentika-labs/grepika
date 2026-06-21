@@ -928,3 +928,42 @@ fn test_search_results_exclude_sensitive_files() {
         );
     }
 }
+
+// ============================================================================
+// Structural Search Tool Tests
+// ============================================================================
+
+#[test]
+fn test_structural_search_happy_path() {
+    let (_dir, search, _indexer) = setup_test_services();
+
+    let input = StructuralSearchInput {
+        language: StructuralLanguage::Rust,
+        query: StructuralQuery::Pattern {
+            pattern: "pub fn authenticate($$$ARGS) -> $RET { $$$BODY }".to_string(),
+            selector: None,
+        },
+        path: ".".to_string(),
+        globs: Vec::new(),
+        limit: 10,
+        include_meta: false,
+        strictness: None,
+        timeout_ms: STRUCTURAL_DEFAULT_TIMEOUT_MS,
+    };
+
+    let result = execute_structural_search(&search, input).unwrap();
+
+    assert!(
+        !result.results.is_empty(),
+        "Should find authenticate via structural pattern search"
+    );
+    assert!(
+        result.results.iter().any(|hit| hit.path.contains("auth")),
+        "Should match auth.rs, got: {:?}",
+        result
+            .results
+            .iter()
+            .map(|hit| &hit.path)
+            .collect::<Vec<_>>()
+    );
+}

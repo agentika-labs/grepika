@@ -36,7 +36,7 @@ fn classify_query(query: &str) -> QueryIntent {
     }
 
     // Check for regex metacharacters (beyond simple wildcards)
-    let regex_chars = ['\\', '+', '?', '{', '}', '|', '^', '$', '[', ']'];
+    let regex_chars = ['\\', '(', ')', '+', '?', '{', '}', '|', '^', '$', '[', ']'];
     let has_regex = trimmed.chars().any(|c| regex_chars.contains(&c));
     // Standalone . and * are common in natural language, but combined patterns are regex
     let has_regex_combo =
@@ -417,7 +417,9 @@ impl SearchService {
         for (file_id, path) in entries {
             let arc: Arc<str> = Arc::from(path);
             id_to_path.insert(file_id, Arc::clone(&arc));
-            path_to_id.insert(arc, file_id);
+            for key in Self::path_lookup_keys(Path::new(&*arc)) {
+                path_to_id.entry(Arc::from(key)).or_insert(file_id);
+            }
         }
         PathCache {
             id_to_path,
@@ -717,31 +719,32 @@ impl SearchService {
         let (results, matches_by_file) = self.grep.search_files_with_matches(query, limit)?;
 
         let mut file_ids = vec![FileId::new(0); results.len()];
-        let mut miss_indices = Vec::new();
+        let mut misses = Vec::new();
         let mut miss_paths = Vec::new();
 
         if let Ok(cache) = self.path_cache.read() {
             for (idx, (path, _)) in results.iter().enumerate() {
-                let path_str = path.to_string_lossy();
-                if let Some(&file_id) = cache.path_to_id.get(path_str.as_ref()) {
+                if let Some(file_id) = Self::lookup_file_id_in_cache(&cache, path) {
                     file_ids[idx] = file_id;
                 } else {
-                    miss_indices.push(idx);
-                    miss_paths.push(path_str.into_owned());
+                    let keys = Self::path_lookup_keys(path);
+                    miss_paths.extend(keys.iter().cloned());
+                    misses.push((idx, keys));
                 }
             }
         } else {
             for (idx, (path, _)) in results.iter().enumerate() {
-                miss_indices.push(idx);
-                miss_paths.push(path.to_string_lossy().to_string());
+                let keys = Self::path_lookup_keys(path);
+                miss_paths.extend(keys.iter().cloned());
+                misses.push((idx, keys));
             }
         }
 
         if !miss_paths.is_empty() {
             let miss_ids = self.db.get_file_ids_batch(&miss_paths).unwrap_or_default();
-            for (idx, path) in miss_indices.into_iter().zip(miss_paths) {
-                if let Some(&file_id) = miss_ids.get(&path) {
-                    file_ids[idx] = file_id;
+            for (idx, keys) in misses {
+                if let Some(file_id) = keys.iter().find_map(|key| miss_ids.get(key)) {
+                    file_ids[idx] = *file_id;
                 }
             }
         }
@@ -821,6 +824,19 @@ impl SearchService {
     /// Uses `HashSet<Arc<Path>>` to avoid per-path heap allocations that
     /// `HashSet<PathBuf>` would incur. The grep walker's `entry.path()`
     /// returns `&Path`, which can look up via `Borrow<Path>` — zero-copy.
+    ///
+    /// Candidate paths are canonicalized so DB keys (`/private/var/...` on macOS)
+    /// match walker paths after `canonicalize`.
+    fn grep_plan_path(stored: &str, root: &Path) -> Arc<Path> {
+        let path = Path::new(stored);
+        let resolved = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        Arc::from(dunce::canonicalize(&resolved).unwrap_or(resolved))
+    }
+
     fn build_trigram_grep_plan(
         &self,
         trigram: &Option<roaring::RoaringBitmap>,
@@ -842,14 +858,15 @@ impl SearchService {
         let file_ids: Vec<FileId> = bitmap.iter().map(FileId::new).collect();
         let path_map = self.get_paths_cached(&file_ids);
 
+        let root = self.grep.root();
         let paths: Vec<Arc<Path>> = file_ids
             .iter()
             .filter_map(|file_id| path_map.get(file_id))
-            .map(|s| Arc::from(Path::new(s.as_ref())))
+            .map(|s| Self::grep_plan_path(s.as_ref(), root))
             .collect();
 
         if paths.is_empty() {
-            return Some(TrigramGrepPlan::Direct(Vec::new()));
+            return None;
         }
 
         if paths.len() <= TRIGRAM_DIRECT_CANDIDATE_MAX {
@@ -857,6 +874,44 @@ impl SearchService {
         } else {
             Some(TrigramGrepPlan::WalkFilter(paths.into_iter().collect()))
         }
+    }
+
+    /// Pushes a path string and its macOS `/private` symlink alias when applicable.
+    fn push_path_lookup_key(keys: &mut Vec<String>, path: &str) {
+        if keys.iter().any(|existing| existing == path) {
+            return;
+        }
+        keys.push(path.to_owned());
+        if path.strip_prefix("/private").is_some() {
+            let alias = path.replacen("/private", "", 1);
+            if !keys.iter().any(|existing| existing == &alias) {
+                keys.push(alias);
+            }
+        } else if path.starts_with("/var/") {
+            let alias = format!("/private{path}");
+            if !keys.iter().any(|existing| existing == &alias) {
+                keys.push(alias);
+            }
+        }
+    }
+
+    /// Canonicalizes a filesystem path for cache/DB lookups.
+    fn path_lookup_keys(path: &Path) -> Vec<String> {
+        let mut keys = Vec::with_capacity(4);
+        Self::push_path_lookup_key(&mut keys, &path.to_string_lossy());
+        if let Ok(canon) = dunce::canonicalize(path) {
+            Self::push_path_lookup_key(&mut keys, &canon.to_string_lossy());
+        }
+        keys
+    }
+
+    fn lookup_file_id_in_cache(cache: &PathCache, path: &Path) -> Option<FileId> {
+        for key in Self::path_lookup_keys(path) {
+            if let Some(&file_id) = cache.path_to_id.get(key.as_str()) {
+                return Some(file_id);
+            }
+        }
+        None
     }
 
     /// Merges results from multiple search methods.
@@ -909,8 +964,7 @@ impl SearchService {
 
         if let Ok(cache) = self.path_cache.read() {
             for (path, score) in grep {
-                let path_str = path.to_string_lossy();
-                if let Some(&file_id) = cache.path_to_id.get(path_str.as_ref()) {
+                if let Some(file_id) = Self::lookup_file_id_in_cache(&cache, &path) {
                     let entry = score_accum
                         .entry(file_id)
                         .or_insert_with(|| (0.0, 0.0, SearchSources::default(), path));
@@ -918,7 +972,7 @@ impl SearchService {
                     entry.1 += config.grep_weight;
                     entry.2.grep = true;
                 } else {
-                    grep_misses.push(path_str.into_owned());
+                    grep_misses.extend(Self::path_lookup_keys(&path));
                     grep_pending.push((path, score));
                 }
             }
@@ -933,15 +987,19 @@ impl SearchService {
         if !grep_misses.is_empty() {
             let miss_ids = self.db.get_file_ids_batch(&grep_misses).unwrap_or_default();
             for (path, score) in grep_pending {
-                let path_str = path.to_string_lossy();
-                if let Some(&file_id) = miss_ids.get(path_str.as_ref()) {
-                    let entry = score_accum
-                        .entry(file_id)
-                        .or_insert_with(|| (0.0, 0.0, SearchSources::default(), path));
-                    entry.0 += score.as_f64() * config.grep_weight;
-                    entry.1 += config.grep_weight;
-                    entry.2.grep = true;
-                }
+                let Some(file_id) = Self::path_lookup_keys(&path)
+                    .iter()
+                    .find_map(|key| miss_ids.get(key))
+                    .copied()
+                else {
+                    continue;
+                };
+                let entry = score_accum
+                    .entry(file_id)
+                    .or_insert_with(|| (0.0, 0.0, SearchSources::default(), path));
+                entry.0 += score.as_f64() * config.grep_weight;
+                entry.1 += config.grep_weight;
+                entry.2.grep = true;
             }
         }
 
@@ -1109,6 +1167,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::Indexer;
     use std::fs;
     use tempfile::TempDir;
 
@@ -1172,6 +1231,15 @@ mod tests {
         (dir, db, service)
     }
 
+    fn canonical_plan_path(root: &Path, path: &Path) -> PathBuf {
+        dunce::canonicalize(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        })
+        .unwrap_or_else(|_| root.join(path))
+    }
+
     // ========================================================================
     // classify_query unit tests
     // ========================================================================
@@ -1231,6 +1299,15 @@ mod tests {
     fn test_classify_regex_quantifier() {
         assert_eq!(classify_query("a+b"), QueryIntent::Regex);
         assert_eq!(classify_query("x?y"), QueryIntent::Regex);
+    }
+
+    #[test]
+    fn test_classify_regex_grouping() {
+        assert_eq!(
+            classify_query(r"(token)*without_zero_marker"),
+            QueryIntent::Regex
+        );
+        assert_eq!(classify_query("foo(bar)"), QueryIntent::Regex);
     }
 
     #[test]
@@ -1515,11 +1592,11 @@ mod tests {
         // Cache should be populated after construction (3 files)
         let cache = service.path_cache.read().unwrap();
         assert_eq!(cache.id_to_path.len(), 3);
-        assert_eq!(cache.path_to_id.len(), 3);
+        assert!(cache.path_to_id.len() >= 3);
 
         // Round-trip: FileId → path → FileId
         for (&file_id, path) in &cache.id_to_path {
-            let resolved_id = cache.path_to_id.get(path).copied();
+            let resolved_id = cache.path_to_id.get(path.as_ref()).copied();
             assert_eq!(resolved_id, Some(file_id));
         }
     }
@@ -1547,6 +1624,35 @@ mod tests {
     }
 
     #[test]
+    fn test_search_grep_resolves_partial_path_cache_misses() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let cached_path = dir.path().join("cached.rs");
+        let late_path = dir.path().join("late.rs");
+        let cached_content: String = (0..20).map(|i| format!("needle cached_{i}\n")).collect();
+        let late_content = "needle late\n";
+
+        fs::write(&cached_path, &cached_content).unwrap();
+        db.upsert_file(cached_path.to_string_lossy().as_ref(), &cached_content, 0x1)
+            .unwrap();
+
+        let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap();
+
+        fs::write(&late_path, late_content).unwrap();
+        let late_file_id = db
+            .upsert_file(late_path.to_string_lossy().as_ref(), late_content, 0x2)
+            .unwrap();
+
+        let results = service.search_grep("needle", 10).unwrap();
+        let late_result = results
+            .iter()
+            .find(|result| result.path == late_path)
+            .expect("late file should be returned by grep");
+
+        assert_eq!(late_result.file_id, late_file_id);
+    }
+
+    #[test]
     fn test_cache_after_refresh() {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::in_memory().unwrap());
@@ -1563,7 +1669,7 @@ mod tests {
         // Cache should now have 2 entries
         let cache = service.path_cache.read().unwrap();
         assert_eq!(cache.id_to_path.len(), 2);
-        assert_eq!(cache.path_to_id.len(), 2);
+        assert!(cache.path_to_id.len() >= 2);
     }
 
     #[test]
@@ -1572,15 +1678,15 @@ mod tests {
 
         let cache = service.path_cache.read().unwrap();
 
-        // Verify Arc<str> pointers are shared between both maps
+        // Primary DB paths should round-trip through alias-aware lookups.
         for (&file_id, path_arc) in &cache.id_to_path {
-            // Look up the same path in path_to_id
-            let (key_arc, _) = cache.path_to_id.get_key_value(path_arc.as_ref()).unwrap();
-            // Both should point to the same allocation
-            assert!(
-                Arc::ptr_eq(path_arc, key_arc),
-                "Arc<str> for FileId {:?} should be shared between both maps",
-                file_id
+            let resolved_id = cache.path_to_id.get(path_arc.as_ref()).copied();
+            assert_eq!(
+                resolved_id,
+                Some(file_id),
+                "FileId {:?} should resolve for path {:?}",
+                file_id,
+                path_arc
             );
         }
     }
@@ -1623,7 +1729,10 @@ mod tests {
         match service.build_trigram_grep_plan(&Some(bitmap)) {
             Some(TrigramGrepPlan::Direct(paths)) => {
                 assert_eq!(paths.len(), 1);
-                assert_eq!(paths[0].as_ref(), target_path.as_path());
+                assert_eq!(
+                    paths[0].as_ref(),
+                    canonical_plan_path(dir.path(), &target_path).as_path()
+                );
             }
             _ => panic!("expected direct candidate grep plan"),
         }
@@ -1667,7 +1776,9 @@ mod tests {
             Some(TrigramGrepPlan::Direct(paths)) => {
                 let expected: Vec<PathBuf> = target_indices
                     .iter()
-                    .map(|i| dir.path().join(format!("file_{i}.rs")))
+                    .map(|i| {
+                        canonical_plan_path(dir.path(), &dir.path().join(format!("file_{i}.rs")))
+                    })
                     .collect();
                 let actual: Vec<&Path> = paths.iter().map(|p| p.as_ref()).collect();
                 let expected: Vec<&Path> = expected.iter().map(PathBuf::as_path).collect();
@@ -1720,7 +1831,7 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_trigram_bitmap_builds_empty_direct_plan() {
+    fn test_empty_trigram_bitmap_falls_back_to_full_grep() {
         let dir = TempDir::new().unwrap();
         let db = Arc::new(Database::in_memory().unwrap());
         let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap();
@@ -1728,47 +1839,107 @@ mod tests {
             .cached_total_files
             .store(TRIGRAM_PREFILTER_MIN_FILES, Ordering::Relaxed);
 
-        match service.build_trigram_grep_plan(&Some(roaring::RoaringBitmap::new())) {
-            Some(TrigramGrepPlan::Direct(paths)) => assert!(paths.is_empty()),
-            _ => panic!("expected empty direct candidate plan"),
+        assert!(
+            service
+                .build_trigram_grep_plan(&Some(roaring::RoaringBitmap::new()))
+                .is_none(),
+            "empty bitmap should skip prefilter and fall back to full grep walk"
+        );
+    }
+
+    #[test]
+    fn test_zero_or_more_regex_combined_search_with_prefilter() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("grepika.db");
+        let db = Arc::new(Database::open(&db_path).expect("open file db"));
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+
+        const EVAL_FILE_COUNT: usize = 700;
+        for i in 0..EVAL_FILE_COUNT {
+            let path = src.join(format!("file_{i}.rs"));
+            let content = if i == 31 {
+                "pub fn zero_repeat() { let without_zero_marker = true; }\n".to_string()
+            } else {
+                format!("pub fn regex_distractor_{i}() {{ let common_regex_noise = {i}; }}\n")
+            };
+            fs::write(&path, &content).unwrap();
         }
+
+        let indexer = Indexer::new(
+            Arc::clone(&db),
+            Arc::clone(&trigram),
+            dir.path().to_path_buf(),
+        );
+        indexer.index(None, false).unwrap();
+
+        let entries = db.load_all_trigrams().expect("load persisted trigrams");
+        let reloaded_trigram = Arc::new(RwLock::new(TrigramIndex::from_db_entries(entries)));
+        let service = SearchService::with_trigram(
+            Arc::clone(&db),
+            dir.path().to_path_buf(),
+            reloaded_trigram,
+        )
+        .unwrap();
+        service.refresh_total_files();
+
+        let results = service.search(r"(token)*without_zero_marker", 10).unwrap();
+
+        assert!(
+            results
+                .iter()
+                .any(|result| { result.path.to_string_lossy().contains("file_31.rs") }),
+            "combined search should find zero-or-more regex match via trigram prefilter"
+        );
     }
 
     #[test]
     fn test_optional_regex_literal_does_not_filter_valid_matches() {
         let dir = TempDir::new().unwrap();
-        let db = Arc::new(Database::in_memory().unwrap());
+        let db_path = dir.path().join("grepika.db");
+        let db = Arc::new(Database::open(&db_path).expect("open file db"));
         let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
         let target_path = dir.path().join("password_only.rs");
 
-        {
-            let mut trigram_guard = trigram.write().unwrap();
-            for i in 0..TRIGRAM_PREFILTER_MIN_FILES as usize {
-                let path = if i == 0 {
-                    target_path.clone()
-                } else {
-                    dir.path().join(format!("file_{i}.rs"))
-                };
-                let content = match i {
-                    0 => "fn password_only() { let password = true; }\n".to_string(),
-                    1 => "fn password_reset() { let passwordreset = true; }\n".to_string(),
-                    _ => format!("fn file_{i}() {{ let common_value = {i}; }}\n"),
-                };
-                fs::write(&path, &content).unwrap();
-                let file_id = db
-                    .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
-                    .unwrap();
-                trigram_guard.add_file(file_id, &content);
-            }
+        fs::write(
+            &target_path,
+            "fn password_only() { let password = true; }\n",
+        )
+        .unwrap();
+
+        for i in 1..TRIGRAM_PREFILTER_MIN_FILES as usize {
+            let path = dir.path().join(format!("file_{i}.rs"));
+            let content = match i {
+                1 => "fn password_reset() { let passwordreset = true; }\n".to_string(),
+                _ => format!("fn file_{i}() {{ let common_value = {i}; }}\n"),
+            };
+            fs::write(&path, &content).unwrap();
         }
 
-        let service =
-            SearchService::with_trigram(Arc::clone(&db), dir.path().to_path_buf(), trigram)
-                .unwrap();
+        let indexer = Indexer::new(
+            Arc::clone(&db),
+            Arc::clone(&trigram),
+            dir.path().to_path_buf(),
+        );
+        indexer.index(None, false).unwrap();
+
+        let entries = db.load_all_trigrams().expect("load persisted trigrams");
+        let reloaded_trigram = Arc::new(RwLock::new(TrigramIndex::from_db_entries(entries)));
+        let service = SearchService::with_trigram(
+            Arc::clone(&db),
+            dir.path().to_path_buf(),
+            reloaded_trigram,
+        )
+        .unwrap();
+        service.refresh_total_files();
+
         let results = service.search(r"password(reset)?", 20).unwrap();
 
         assert!(
-            results.iter().any(|result| result.path == target_path),
+            results
+                .iter()
+                .any(|result| { result.path.to_string_lossy().contains("password_only.rs") }),
             "optional regex suffix must not be treated as a mandatory trigram"
         );
     }

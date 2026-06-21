@@ -23,6 +23,33 @@ use xxhash_rust::xxh3::xxh3_64;
 /// Larger batches reduce transaction overhead but increase memory usage.
 const BATCH_SIZE: usize = 500;
 
+/// Produces a consistent DB path key matching the ignore walker format.
+///
+/// Resolves relative paths against a canonical workspace root so git fast-path
+/// deletions and full-walk indexing share the same key space even when the
+/// final path component no longer exists on disk.
+pub fn index_path_key(root: &Path, path: &Path) -> String {
+    let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+
+    let relative = if path.is_absolute() {
+        path.strip_prefix(&canonical_root)
+            .or_else(|_| path.strip_prefix(root))
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+
+    if relative.is_absolute() {
+        dunce::canonicalize(&relative)
+            .unwrap_or(relative)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        canonical_root.join(relative).to_string_lossy().into_owned()
+    }
+}
+
 struct ExtractedGraph<'a> {
     file_id: FileId,
     path: &'a str,
@@ -444,7 +471,7 @@ impl Indexer {
             .filter_map(|path| {
                 let content = fs::read_to_string(path).ok()?;
                 let hash = compute_hash(&content);
-                let path_str = path.to_string_lossy().to_string();
+                let path_str = index_path_key(&self.root, path);
 
                 if existing_hashes.get(&path_str) == Some(&hash) {
                     return None; // Skip unchanged files
@@ -463,7 +490,7 @@ impl Indexer {
         // not CPU-bound work — rayon overhead exceeds benefit here.
         let seen_paths: HashSet<String> = files
             .iter()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| index_path_key(&self.root, p))
             .collect();
 
         (file_data, seen_paths)
@@ -577,7 +604,7 @@ impl Indexer {
         })?;
 
         let hash = compute_hash(&content);
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = index_path_key(&self.root, path);
 
         let file_id = self.db.upsert_file(&path_str, &content, hash)?;
         self.index_trigrams(file_id, &content);
@@ -699,7 +726,7 @@ impl Indexer {
             .collect();
         let changed_paths: Vec<String> = changed_files
             .iter()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| index_path_key(&self.root, p))
             .collect();
         let existing_hashes = self.db.get_hashes_batch(&changed_paths)?;
 
@@ -708,7 +735,7 @@ impl Indexer {
         let deleted_paths: Vec<String> = diff
             .deleted
             .iter()
-            .map(|p| self.root.join(p).to_string_lossy().to_string())
+            .map(|p| index_path_key(&self.root, Path::new(p)))
             .collect();
         let deleted_file_ids = self.db.get_file_ids_batch(&deleted_paths)?;
 
