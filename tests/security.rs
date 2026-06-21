@@ -609,13 +609,17 @@ fn test_workspace_new_creates_services() {
 
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
+    let db_path = dir.path().join("grepika.db");
 
-    let ws = Workspace::new(dir.path().to_path_buf(), None);
-    assert!(ws.is_ok(), "Workspace::new should succeed");
+    let ws = Workspace::new(dir.path().to_path_buf(), Some(db_path));
+    if let Err(e) = &ws {
+        panic!("Workspace::new should succeed: {e:?}");
+    }
 
     let ws = ws.unwrap();
     // Workspace stores the root as-is (caller is responsible for canonicalization)
     assert_eq!(ws.root, dir.path().to_path_buf());
+    assert_eq!(ws.db_path(), dir.path().join("grepika.db"));
 }
 
 #[test]
@@ -631,8 +635,11 @@ fn test_empty_server_tools_return_error() {
     // Verify Workspace::new works for the backward-compat path
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
-    let result = GrepikaServer::new(dir.path().to_path_buf(), None);
-    assert!(result.is_ok(), "Server::new should succeed");
+    let db_path = dir.path().join("grepika.db");
+    let result = GrepikaServer::new(dir.path().to_path_buf(), Some(db_path));
+    if let Err(e) = &result {
+        panic!("Server::new should succeed: {e:?}");
+    }
 
     // Ensure new_empty doesn't panic
     drop(server);

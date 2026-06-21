@@ -584,8 +584,8 @@ fn bench_real_repo(c: &mut Criterion) {
     let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
     indexer.index(None, false).expect("Failed to index");
 
-    let search =
-        SearchService::new(Arc::clone(&db), root).expect("Failed to create search service");
+    let search = SearchService::with_trigram(Arc::clone(&db), root, Arc::clone(&trigram))
+        .expect("Failed to create search service");
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("combined_search", |b| {

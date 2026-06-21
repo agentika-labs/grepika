@@ -11,7 +11,6 @@ use crate::security;
 use crate::services::{Indexer, SearchService};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// Input for the index tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -24,15 +23,20 @@ pub struct IndexInput {
 /// Output for the index tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct IndexOutput {
-    /// Files processed
+    /// Files processed.
+    #[serde(rename = "processed")]
     pub files_processed: usize,
-    /// Files newly indexed
+    /// Files newly indexed.
+    #[serde(rename = "indexed")]
     pub files_indexed: usize,
-    /// Files unchanged
+    /// Files unchanged.
+    #[serde(rename = "unchanged")]
     pub files_unchanged: usize,
-    /// Files deleted from index
+    /// Files deleted from index.
+    #[serde(rename = "deleted")]
     pub files_deleted: usize,
-    /// Status message
+    /// Status message.
+    #[serde(rename = "msg")]
     pub message: String,
 }
 
@@ -107,28 +111,39 @@ const fn default_diff_context() -> usize {
 /// Output for the diff tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiffOutput {
-    /// Diff hunks
+    /// Diff hunks.
+    #[serde(rename = "hunks")]
     pub hunks: Vec<DiffHunk>,
-    /// Summary statistics (always reflects full diff, even when truncated)
+    /// Full diff stats.
+    #[serde(rename = "stats")]
     pub stats: DiffStats,
-    /// Whether output was truncated due to max_lines limit
+    /// True when output was truncated.
+    #[serde(rename = "truncated")]
+    #[serde(skip_serializing_if = "is_false")]
     pub truncated: bool,
 }
 
 /// A diff hunk (includes @@ header in content).
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiffHunk {
-    /// Hunk content with @@ header and +/- prefixes
+    /// Hunk content with @@ header and +/- prefixes.
+    #[serde(rename = "c")]
     pub content: String,
 }
 
 /// Diff statistics.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DiffStats {
-    /// Lines added
+    /// Lines added.
+    #[serde(rename = "add")]
     pub additions: usize,
-    /// Lines removed
+    /// Lines removed.
+    #[serde(rename = "del")]
     pub deletions: usize,
+}
+
+const fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// Executes the diff tool.
@@ -141,10 +156,7 @@ pub struct DiffStats {
 /// # Errors
 ///
 /// Returns a `ServerError` if path traversal is detected, either file is sensitive, or either file cannot be read.
-pub fn execute_diff(
-    service: &Arc<SearchService>,
-    input: DiffInput,
-) -> crate::error::Result<DiffOutput> {
+pub fn execute_diff(service: &SearchService, input: DiffInput) -> crate::error::Result<DiffOutput> {
     use std::fs;
 
     // Security: validate both paths and check for sensitive files

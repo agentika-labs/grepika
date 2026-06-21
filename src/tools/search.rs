@@ -5,7 +5,6 @@ use crate::services::SearchService;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use std::sync::Arc;
 
 /// Relativizes a path against the workspace root.
 fn relativize_path(path: &Path, root: &Path) -> String {
@@ -87,20 +86,28 @@ const fn default_limit() -> usize {
 /// A matching snippet showing where a result matched.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MatchSnippetOutput {
-    /// Line number (1-indexed)
+    /// Line number.
+    #[serde(rename = "l")]
     pub line: u64,
-    /// Content of the matching line (trimmed)
+    /// Matching line text.
+    #[serde(rename = "t")]
     pub text: String,
-    /// Byte offset where the match starts within the line
+    /// Match start byte offset.
+    #[serde(rename = "hs")]
     #[serde(skip_serializing_if = "is_zero")]
     pub highlight_start: usize,
-    /// Byte offset where the match ends within the line
+    /// Match end byte offset.
+    #[serde(rename = "he")]
     #[serde(skip_serializing_if = "is_zero")]
     pub highlight_end: usize,
 }
 
 const fn is_zero(v: &usize) -> bool {
     *v == 0
+}
+
+const fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 fn round2(v: f64) -> f64 {
@@ -110,11 +117,15 @@ fn round2(v: f64) -> f64 {
 /// Output for the search tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchOutput {
-    /// Search results
+    /// Ranked results.
+    #[serde(rename = "r")]
     pub results: Vec<SearchResultItem>,
-    /// Whether more results exist beyond the limit
+    /// True when more results exist.
+    #[serde(rename = "more")]
+    #[serde(skip_serializing_if = "is_false")]
     pub has_more: bool,
-    /// Agent guidance when results are empty or may be incomplete
+    /// Guidance for empty/incomplete results.
+    #[serde(rename = "hint")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
 }
@@ -122,13 +133,17 @@ pub struct SearchOutput {
 /// A single search result.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchResultItem {
-    /// File path relative to root
+    /// File path relative to root.
+    #[serde(rename = "p")]
     pub path: String,
-    /// Relevance score (0.0 - 1.0)
+    /// Relevance score.
+    #[serde(rename = "s")]
     pub score: f64,
-    /// Search sources that matched (f=fts, g=grep, t=trigram)
+    /// Match sources: f=fts, g=grep, t=trigram.
+    #[serde(rename = "src")]
     pub sources: String,
-    /// Matching line snippets (up to 3) showing why this file matched
+    /// Matching line snippets.
+    #[serde(rename = "m")]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub snippets: Vec<MatchSnippetOutput>,
 }
@@ -139,7 +154,7 @@ pub struct SearchResultItem {
 ///
 /// Returns a `ServerError` if the search operation fails.
 pub fn execute_search(
-    service: &Arc<SearchService>,
+    service: &SearchService,
     input: SearchInput,
 ) -> crate::error::Result<SearchOutput> {
     // Check for empty index before searching (uses cached AtomicU64, no DB round-trip)
@@ -151,7 +166,7 @@ pub fn execute_search(
     }
 
     // Overcollect by 1 to detect if more results exist
-    let request_limit = input.limit + 1;
+    let request_limit = input.limit.saturating_add(1);
 
     let results = match input.mode {
         SearchMode::Fts => service.search_fts(&input.query, request_limit)?,

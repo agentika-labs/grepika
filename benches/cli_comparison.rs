@@ -48,8 +48,10 @@ fn setup_real_codebase() -> (PathBuf, Arc<Database>, Arc<SearchService>) {
     let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
     indexer.index(None, false).expect("index");
 
-    let search =
-        Arc::new(SearchService::new(Arc::clone(&db), root.clone()).expect("search service"));
+    let search = Arc::new(
+        SearchService::with_trigram(Arc::clone(&db), root.clone(), Arc::clone(&trigram))
+            .expect("search service"),
+    );
     (root, db, search)
 }
 
@@ -288,7 +290,7 @@ fn bench_incremental_index(c: &mut Criterion) {
     group.sample_size(20); // Indexing touches disk
 
     let (root, db, trigram) = setup_indexed_repo();
-    let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
+    let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root);
 
     // Benchmark: no-op re-index (all files unchanged, xxHash match)
     group.bench_function("no_changes", |b| {

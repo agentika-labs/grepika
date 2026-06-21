@@ -429,7 +429,7 @@ mod tests {
             b.insert(99);
             b
         });
-        let mut mixed = valid_entries.clone();
+        let mut mixed = valid_entries;
         mixed.push((b"aut".to_vec(), bitmap_bytes.clone())); // old 3-byte key
         mixed.push((b"x".to_vec(), bitmap_bytes.clone())); // 1-byte garbage
         mixed.push((vec![0u8; 16], bitmap_bytes)); // 16-byte garbage

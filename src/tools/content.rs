@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Arc;
 
 /// Wraps file content in boundary markers to help LLM consumers distinguish
 /// tool metadata from untrusted file content (prompt injection defense).
@@ -48,16 +47,21 @@ const fn default_start_line() -> usize {
 /// Output for the get tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GetOutput {
-    /// File path
+    /// File path.
+    #[serde(rename = "p")]
     pub path: String,
-    /// File content (optionally line-bounded)
+    /// File content.
+    #[serde(rename = "c")]
     pub content: String,
-    /// Total lines in file (None for large files read via streaming)
+    /// Total lines, omitted for streamed large files.
+    #[serde(rename = "total")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_lines: Option<usize>,
-    /// Starting line returned
+    /// First returned line.
+    #[serde(rename = "start")]
     pub start_line: usize,
-    /// Ending line returned
+    /// Last returned line.
+    #[serde(rename = "end")]
     pub end_line: usize,
 }
 
@@ -71,21 +75,25 @@ pub struct GetOutput {
 /// # Errors
 ///
 /// Returns a `ServerError` if path traversal is detected, file is sensitive, or file cannot be read.
-pub fn execute_get(
-    service: &Arc<SearchService>,
-    input: GetInput,
-) -> crate::error::Result<GetOutput> {
+pub fn execute_get(service: &SearchService, input: GetInput) -> crate::error::Result<GetOutput> {
+    let GetInput {
+        path,
+        start_line,
+        end_line,
+    } = input;
+
     // Security: validate path and check for sensitive files
-    let full_path = security::validate_read_access(service.root(), &input.path)?;
+    let full_path = security::validate_read_access(service.root(), &path)?;
 
     // Use streaming for large files to avoid loading entire file into memory
     let (content, total_lines, start_line, end_line) =
-        read_line_range(&full_path, input.start_line, input.end_line)
+        read_line_range(&full_path, start_line, end_line)
             .map_err(crate::error::ServerError::Tool)?;
+    let content = mark_content_boundary(&content, &path);
 
     Ok(GetOutput {
-        path: input.path.clone(),
-        content: mark_content_boundary(&content, &input.path),
+        path,
+        content,
         total_lines,
         start_line,
         end_line,
@@ -102,27 +110,35 @@ pub struct OutlineInput {
 /// Output for the outline tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct OutlineOutput {
-    /// File path
+    /// File path.
+    #[serde(rename = "p")]
     pub path: String,
-    /// Extracted symbols/structure
+    /// Extracted symbols.
+    #[serde(rename = "symbols")]
     pub symbols: Vec<Symbol>,
-    /// File type detected
+    /// Detected file type.
+    #[serde(rename = "type")]
     pub file_type: String,
 }
 
 /// A symbol extracted from the file.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Symbol {
-    /// Symbol name
+    /// Symbol name.
+    #[serde(rename = "n")]
     pub name: String,
-    /// Symbol kind (fn, class, struct, etc.)
+    /// Symbol kind.
+    #[serde(rename = "k")]
     pub kind: String,
-    /// Start line number
+    /// Start line.
+    #[serde(rename = "l")]
     pub line: usize,
-    /// End line number (if detectable)
+    /// End line.
+    #[serde(rename = "end")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_line: Option<usize>,
-    /// Indentation level
+    /// Indentation level.
+    #[serde(rename = "depth")]
     #[serde(skip_serializing_if = "is_zero")]
     pub level: usize,
 }
@@ -142,7 +158,7 @@ const fn is_zero(v: &usize) -> bool {
 ///
 /// Returns a `ServerError` if path traversal is detected, file is sensitive, or file cannot be read.
 pub fn execute_outline(
-    service: &Arc<SearchService>,
+    service: &SearchService,
     input: OutlineInput,
 ) -> crate::error::Result<OutlineOutput> {
     // Security: validate path and check for sensitive files
@@ -182,11 +198,13 @@ const fn default_toc_depth() -> usize {
 /// Output for the toc tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TocOutput {
-    /// Indented directory tree (like `tree` command output)
+    /// Indented directory tree.
     pub tree: String,
-    /// Total files
+    /// Total files.
+    #[serde(rename = "files")]
     pub total_files: usize,
-    /// Total directories
+    /// Total directories.
+    #[serde(rename = "dirs")]
     pub total_dirs: usize,
 }
 
@@ -199,10 +217,7 @@ pub struct TocOutput {
 /// # Errors
 ///
 /// Returns a `ServerError` if path traversal is detected or directory cannot be read.
-pub fn execute_toc(
-    service: &Arc<SearchService>,
-    input: TocInput,
-) -> crate::error::Result<TocOutput> {
+pub fn execute_toc(service: &SearchService, input: TocInput) -> crate::error::Result<TocOutput> {
     // Security: validate path (toc reads directories, so we use validate_path not validate_read_access)
     let full_path = security::validate_path(service.root(), &input.path)?;
 
@@ -246,15 +261,20 @@ const fn default_context_lines() -> usize {
 /// Output for the context tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct ContextOutput {
-    /// File path
+    /// File path.
+    #[serde(rename = "p")]
     pub path: String,
-    /// Context content with line numbers
+    /// Numbered context content.
+    #[serde(rename = "c")]
     pub content: String,
-    /// Start line
+    /// First returned line.
+    #[serde(rename = "start")]
     pub start_line: usize,
-    /// End line
+    /// Last returned line.
+    #[serde(rename = "end")]
     pub end_line: usize,
-    /// Center line
+    /// Center line.
+    #[serde(rename = "center")]
     pub center_line: usize,
 }
 
@@ -269,15 +289,21 @@ pub struct ContextOutput {
 ///
 /// Returns a `ServerError` if path traversal is detected, file is sensitive, or file cannot be read.
 pub fn execute_context(
-    service: &Arc<SearchService>,
+    service: &SearchService,
     input: ContextInput,
 ) -> crate::error::Result<ContextOutput> {
+    let ContextInput {
+        path,
+        line: center_line,
+        context_lines,
+    } = input;
+
     // Security: validate path and check for sensitive files
-    let full_path = security::validate_read_access(service.root(), &input.path)?;
+    let full_path = security::validate_read_access(service.root(), &path)?;
 
     // Use streaming for large files to avoid loading entire file into memory
     let (lines, _total, start, end) =
-        read_context_streaming(&full_path, input.line, input.context_lines)
+        read_context_streaming(&full_path, center_line, context_lines)
             .map_err(crate::error::ServerError::Tool)?;
 
     // Format with line numbers
@@ -286,18 +312,19 @@ pub fn execute_context(
         .enumerate()
         .map(|(i, line)| {
             let line_num = start + i + 1;
-            let marker = if line_num == input.line { ">" } else { " " };
+            let marker = if line_num == center_line { ">" } else { " " };
             format!("{marker}{line_num:4} | {line}")
         })
         .collect();
 
     let content = formatted.join("\n");
+    let content = mark_content_boundary(&content, &path);
     Ok(ContextOutput {
-        path: input.path.clone(),
-        content: mark_content_boundary(&content, &input.path),
+        path,
+        content,
         start_line: start + 1,
         end_line: end,
-        center_line: input.line,
+        center_line,
     })
 }
 

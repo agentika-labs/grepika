@@ -202,6 +202,10 @@ fn test_search_tool_fts_mode() {
             "FTS mode results should have 'f' source"
         );
     }
+    assert!(
+        result.results.iter().any(|item| !item.snippets.is_empty()),
+        "FTS mode should return proof snippets so agents do not need follow-up reads"
+    );
 }
 
 #[test]
@@ -224,6 +228,10 @@ fn test_search_tool_grep_mode() {
             "Grep mode results should have 'g' source"
         );
     }
+    assert!(
+        result.results.iter().any(|item| !item.snippets.is_empty()),
+        "Grep mode should return proof snippets so agents do not need to read full files"
+    );
 }
 
 #[test]

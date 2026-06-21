@@ -24,6 +24,10 @@ use std::sync::{Arc, Mutex};
 /// Scored files with their matching line snippets.
 pub type GrepSearchResult = (Vec<(PathBuf, Score)>, HashMap<Arc<Path>, Vec<GrepMatch>>);
 
+/// Search results only need one proof snippet per file; callers can use
+/// `context` for deeper reading.
+const MAX_SNIPPETS_PER_FILE: usize = 1;
+
 /// Match found by grep.
 #[derive(Debug, Clone)]
 pub struct GrepMatch {
@@ -284,7 +288,7 @@ impl GrepService {
     /// Searches and returns file-level results with scores plus top matches per file.
     ///
     /// Returns `(scored_files, matches_by_file)` where `matches_by_file` contains
-    /// the top 3 `GrepMatch`es per file for snippet generation.
+    /// compact proof snippets per file for result output.
     ///
     /// # Errors
     ///
@@ -310,16 +314,16 @@ impl GrepService {
 
         // 2A: Single HashMap holding stats + snippets. Arc<Path> key =
         // cheap clone (atomic increment) instead of PathBuf heap alloc.
-        // Each entry: (match_count, max_line_number, top_3_snippets)
+        // Each entry: (match_count, max_line_number, proof snippets)
         let mut file_agg: HashMap<Arc<Path>, (usize, u64, Vec<GrepMatch>)> = HashMap::new();
 
         for m in matches {
             let entry = file_agg
                 .entry(Arc::clone(&m.path))
-                .or_insert_with(|| (0, 0, Vec::with_capacity(3)));
+                .or_insert_with(|| (0, 0, Vec::with_capacity(MAX_SNIPPETS_PER_FILE)));
             entry.0 += 1;
             entry.1 = entry.1.max(m.line_number);
-            if entry.2.len() < 3 {
+            if entry.2.len() < MAX_SNIPPETS_PER_FILE {
                 entry.2.push(m);
             }
         }

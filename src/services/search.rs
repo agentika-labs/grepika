@@ -82,7 +82,7 @@ pub struct SearchResult {
     pub score: Score,
     /// Which search methods contributed to this result
     pub sources: SearchSources,
-    /// Top matching snippets from this file (up to 3)
+    /// Top matching snippets from this file.
     pub snippets: Vec<MatchSnippet>,
 }
 
@@ -124,8 +124,102 @@ const SHORT_TOKEN_MAX_LEN: usize = 4;
 /// is not selective enough to be useful as a grep pre-filter.
 const TRIGRAM_SELECTIVITY_THRESHOLD: u64 = 80;
 
+/// Minimum indexed files before trigram prefiltering is worth its overhead.
+/// Small repositories are faster with FTS + grep directly.
+const TRIGRAM_PREFILTER_MIN_FILES: u64 = 512;
+
+/// Minimum regex literal length used for trigram prefiltering.
+/// Short regex literals such as "for" and "impl" are common in code and
+/// usually cost more to prefilter than they save.
+const MIN_REGEX_PREFILTER_LITERAL_LEN: usize = 5;
+
+/// Search results include one proof snippet per file; use `context` for
+/// wider local code.
+const MAX_SNIPPETS_PER_RESULT: usize = 1;
+
+/// Scores below this serialize as `0.00`, adding output without useful signal.
+const MIN_SERIALIZED_SCORE: f64 = 0.005;
+
+/// Natural-language FTS can match broad low-signal tails. Keep rows that are
+/// meaningfully close to the top score, while preserving a small minimum set.
+const NATURAL_LANGUAGE_RELATIVE_SCORE_FLOOR: f64 = 0.5;
+const NATURAL_LANGUAGE_ABSOLUTE_SCORE_FLOOR: f64 = 0.05;
+const NATURAL_LANGUAGE_MIN_RESULTS: usize = 3;
+
 /// Default limit when callers pass 0 (i.e. "no preference").
 const DEFAULT_SEARCH_LIMIT: usize = 50;
+
+fn snippets_from_matches(matches: &[GrepMatch]) -> Vec<MatchSnippet> {
+    let mut last_line = None;
+    matches
+        .iter()
+        .filter(|m| {
+            let dominated = last_line == Some(m.line_number);
+            last_line = Some(m.line_number);
+            !dominated
+        })
+        .take(MAX_SNIPPETS_PER_RESULT)
+        .map(|m| MatchSnippet {
+            line_number: m.line_number,
+            line_content: m.line_content.clone(),
+            match_start: m.match_start,
+            match_end: m.match_end,
+        })
+        .collect()
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !(!c.is_ascii() || c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|term| !term.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn snippet_from_content(content: &str, query: &str) -> Vec<MatchSnippet> {
+    let terms = query_terms(query);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut best: Option<(usize, u64, &str, usize, usize)> = None;
+    for (idx, line) in content.lines().enumerate() {
+        let lower = line.to_lowercase();
+        let mut hits = 0;
+        let mut first_match: Option<(usize, usize)> = None;
+
+        for term in &terms {
+            if let Some(start) = lower.find(term) {
+                hits += 1;
+                first_match.get_or_insert((start, start + term.len()));
+            }
+        }
+
+        if hits == 0 {
+            continue;
+        }
+
+        let (start, end) = first_match.unwrap_or((0, 0));
+        let line_number = idx as u64 + 1;
+        let replace = best.as_ref().is_none_or(|(best_hits, best_line, _, _, _)| {
+            hits > *best_hits || (hits == *best_hits && line_number < *best_line)
+        });
+        if replace {
+            best = Some((hits, line_number, line, start, end));
+        }
+    }
+
+    best.map(
+        |(_, line_number, line, match_start, match_end)| MatchSnippet {
+            line_number,
+            line_content: line.trim().to_string(),
+            match_start,
+            match_end,
+        },
+    )
+    .into_iter()
+    .collect()
+}
 
 /// Configuration for combined search.
 #[derive(Debug, Clone)]
@@ -190,9 +284,24 @@ impl SearchService {
     ///
     /// Returns `SearchError::Grep` if grep service initialization fails.
     pub fn new(db: Arc<Database>, root: PathBuf) -> Result<Self, SearchError> {
+        Self::with_trigram(db, root, Arc::new(RwLock::new(TrigramIndex::new())))
+    }
+
+    /// Creates a search service using a shared trigram index.
+    ///
+    /// Use this when the same index is also owned by an `Indexer`; otherwise
+    /// combined search cannot use newly loaded or incrementally updated trigrams.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SearchError::Grep` if grep service initialization fails.
+    pub fn with_trigram(
+        db: Arc<Database>,
+        root: PathBuf,
+        trigram: Arc<RwLock<TrigramIndex>>,
+    ) -> Result<Self, SearchError> {
         let fts = FtsService::new(Arc::clone(&db));
         let grep = GrepService::new(root)?;
-        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
 
         // Pre-populate cached total_files from DB (best-effort)
         let total = db.file_count().unwrap_or(0);
@@ -221,7 +330,7 @@ impl SearchService {
         root: PathBuf,
         config: SearchConfig,
     ) -> Result<Self, SearchError> {
-        let mut service = Self::new(db, root)?;
+        let mut service = Self::with_trigram(db, root, Arc::new(RwLock::new(TrigramIndex::new())))?;
         service.config = config;
         Ok(service)
     }
@@ -362,11 +471,14 @@ impl SearchService {
         // Phase 3: Run trigram BEFORE grep to build a file filter.
         // If the trigram bitmap is selective (<80% of files), convert it
         // to a path set and restrict grep to only those files.
-        let trigram_results = {
+        let trigram_results = if self.total_files() >= TRIGRAM_PREFILTER_MIN_FILES {
             let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
             if intent == QueryIntent::Regex {
                 // Extract literal segments from regex pattern for smarter trigram filtering
-                let literals = super::regex_literals::extract_literals(query);
+                let literals: Vec<_> = super::regex_literals::extract_literals(query)
+                    .into_iter()
+                    .filter(|literal| literal.len() >= MIN_REGEX_PREFILTER_LITERAL_LEN)
+                    .collect();
                 if literals.is_empty() {
                     None
                 } else {
@@ -389,6 +501,8 @@ impl SearchService {
             } else {
                 trigram.search(query)
             }
+        } else {
+            None
         };
 
         let file_filter = self.build_trigram_filter(&trigram_results);
@@ -435,6 +549,7 @@ impl SearchService {
             trigram_results,
             limit,
             config_ref,
+            intent,
         )
     }
 
@@ -445,13 +560,21 @@ impl SearchService {
     /// Returns `DbError` if the FTS database query fails.
     pub fn search_fts(&self, query: &str, limit: usize) -> DbResult<Vec<SearchResult>> {
         let results = self.fts.search(query, limit)?;
-        Ok(self.enrich_results(
+        let mut enriched = self.enrich_results(
             results,
             SearchSources {
                 fts: true,
                 ..Default::default()
             },
-        ))
+        );
+
+        for result in &mut enriched {
+            if let Ok(Some((_, content))) = self.db.get_file(result.file_id) {
+                result.snippets = snippet_from_content(&content, query);
+            }
+        }
+
+        Ok(enriched)
     }
 
     /// Performs grep-only search.
@@ -460,7 +583,7 @@ impl SearchService {
     ///
     /// Returns `SearchError::InvalidPattern` if the regex pattern is invalid.
     pub fn search_grep(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
-        let results = self.grep.search_files(query, limit)?;
+        let (results, matches_by_file) = self.grep.search_files_with_matches(query, limit)?;
 
         // Batch resolve paths to file IDs via cache
         let path_strings: Vec<String> = results
@@ -474,6 +597,9 @@ impl SearchService {
             .map(|(path, score)| {
                 let path_str = path.to_string_lossy().to_string();
                 let file_id = id_map.get(&path_str).copied().unwrap_or(FileId::new(0));
+                let snippets = matches_by_file
+                    .get(path.as_path())
+                    .map_or_else(Vec::new, |matches| snippets_from_matches(matches));
 
                 SearchResult {
                     file_id,
@@ -483,7 +609,7 @@ impl SearchService {
                         grep: true,
                         ..Default::default()
                     },
-                    snippets: Vec::new(),
+                    snippets,
                 }
             })
             .collect();
@@ -587,6 +713,7 @@ impl SearchService {
         trigram: Option<roaring::RoaringBitmap>,
         limit: usize,
         config: &SearchConfig,
+        intent: QueryIntent,
     ) -> Result<Vec<SearchResult>, SearchError> {
         let estimated_capacity = fts.len() + grep.len();
 
@@ -711,28 +838,30 @@ impl SearchService {
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        let mut seen = 0;
+        results.retain(|result| {
+            seen += 1;
+            seen == 1 || result.score.as_f64() >= MIN_SERIALIZED_SCORE
+        });
+
+        if intent == QueryIntent::NaturalLanguage && !results.is_empty() {
+            let score_floor = (results[0].score.as_f64() * NATURAL_LANGUAGE_RELATIVE_SCORE_FLOOR)
+                .max(NATURAL_LANGUAGE_ABSOLUTE_SCORE_FLOOR);
+            let mut seen = 0;
+            results.retain(|result| {
+                seen += 1;
+                seen <= NATURAL_LANGUAGE_MIN_RESULTS || result.score.as_f64() >= score_floor
+            });
+        }
+
         results.truncate(limit);
 
         // Lazy snippet extraction (1B): only for surviving top-N results.
-        // Deduplicate consecutive same-line matches (cheap for N≤3).
+        // Deduplicate consecutive same-line matches before taking a proof snippet.
         for result in &mut results {
             if let Some(matches) = grep_matches.get(result.path.as_path()) {
-                let mut last_line = None;
-                result.snippets = matches
-                    .iter()
-                    .filter(|m| {
-                        let dominated = last_line == Some(m.line_number);
-                        last_line = Some(m.line_number);
-                        !dominated
-                    })
-                    .take(3)
-                    .map(|m| MatchSnippet {
-                        line_number: m.line_number,
-                        line_content: m.line_content.clone(),
-                        match_start: m.match_start,
-                        match_end: m.match_end,
-                    })
-                    .collect();
+                result.snippets = snippets_from_matches(matches);
             }
         }
 
@@ -970,6 +1099,10 @@ mod tests {
             assert!(result.sources.fts);
             // grep and trigram should be false for FTS-only search
         }
+        assert!(
+            results.iter().any(|result| !result.snippets.is_empty()),
+            "FTS-only search should include proof snippets"
+        );
     }
 
     #[test]

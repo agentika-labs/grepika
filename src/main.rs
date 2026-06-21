@@ -261,7 +261,6 @@ async fn run_cli(
         std::fs::create_dir_all(parent)?;
     }
     let database = Arc::new(Database::open(&db_path)?);
-    let search = Arc::new(SearchService::new(Arc::clone(&database), root.clone())?);
 
     // Tier 2: Load trigrams only for commands that need them
     let needs_trigram = matches!(
@@ -283,6 +282,11 @@ async fn run_cli(
         Arc::new(RwLock::new(TrigramIndex::new()))
     };
 
+    let search = Arc::new(SearchService::with_trigram(
+        Arc::clone(&database),
+        root.clone(),
+        Arc::clone(&trigram),
+    )?);
     let indexer = Indexer::new(Arc::clone(&database), Arc::clone(&trigram), root);
 
     /// Outputs `result` as JSON (compact or pretty) and returns Ok.

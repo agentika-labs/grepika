@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn test_indexer() {
         let (dir, db, trigram) = setup_test_env();
-        let indexer = Indexer::new(db.clone(), trigram, dir.path().to_path_buf());
+        let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
 
         let progress = indexer.index(None, false).unwrap();
         assert_eq!(progress.files_indexed, 2);
@@ -660,7 +660,7 @@ mod tests {
     #[test]
     fn test_incremental_index() {
         let (dir, db, trigram) = setup_test_env();
-        let indexer = Indexer::new(db.clone(), trigram, dir.path().to_path_buf());
+        let indexer = Indexer::new(db, trigram, dir.path().to_path_buf());
 
         // First index
         let progress1 = indexer.index(None, false).unwrap();
@@ -695,7 +695,7 @@ mod tests {
         fs::write(dir.path().join("beta.rs"), "fn unique_beta_function() {}").unwrap();
         fs::write(dir.path().join("gamma.rs"), "fn unique_gamma_function() {}").unwrap();
 
-        let indexer = Indexer::new(db.clone(), trigram.clone(), dir.path().to_path_buf());
+        let indexer = Indexer::new(db, Arc::clone(&trigram), dir.path().to_path_buf());
 
         // Index all 3 files
         let progress = indexer.index(None, false).unwrap();
@@ -735,7 +735,7 @@ mod tests {
         fs::write(dir.path().join("keep.rs"), "fn keep() {}").unwrap();
         fs::write(dir.path().join("remove.rs"), "fn remove() {}").unwrap();
 
-        let indexer = Indexer::new(db.clone(), trigram.clone(), dir.path().to_path_buf());
+        let indexer = Indexer::new(Arc::clone(&db), trigram, dir.path().to_path_buf());
 
         let progress = indexer.index(None, false).unwrap();
         assert_eq!(progress.files_indexed, 2);
@@ -768,7 +768,11 @@ mod tests {
         fs::write(dir.path().join("alpha.rs"), "fn unique_alpha() {}").unwrap();
         fs::write(dir.path().join("beta.rs"), "fn unique_beta() {}").unwrap();
 
-        let indexer = Indexer::new(db.clone(), trigram.clone(), dir.path().to_path_buf());
+        let indexer = Indexer::new(
+            Arc::clone(&db),
+            Arc::clone(&trigram),
+            dir.path().to_path_buf(),
+        );
 
         // First index (force=false): uses dirty persistence
         let progress = indexer.index(None, false).unwrap();

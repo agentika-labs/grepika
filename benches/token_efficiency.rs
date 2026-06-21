@@ -49,7 +49,8 @@ fn setup_real_codebase() -> (PathBuf, Arc<Database>, SearchService) {
     let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
     indexer.index(None, false).expect("index");
 
-    let search = SearchService::new(Arc::clone(&db), root.clone()).expect("search service");
+    let search = SearchService::with_trigram(Arc::clone(&db), root.clone(), trigram)
+        .expect("search service");
     (root, db, search)
 }
 

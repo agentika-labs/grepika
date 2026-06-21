@@ -13,7 +13,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
 
 /// Classification of how a symbol is used at a reference site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,23 +45,29 @@ pub struct StatsInput {
 /// Output for the stats tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StatsOutput {
-    /// Total indexed files
+    /// Total indexed files.
+    #[serde(rename = "files")]
     pub total_files: u64,
-    /// Total trigrams indexed
+    /// Total trigrams indexed.
+    #[serde(rename = "trigrams")]
     pub trigram_count: usize,
-    /// Breakdown by file type (if detailed)
+    /// File counts by extension.
+    #[serde(rename = "by_type")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub by_type: Option<HashMap<String, u64>>,
-    /// Index size info
+    /// Index size.
+    #[serde(rename = "size")]
     pub index_size: IndexSize,
 }
 
 /// Index size information.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct IndexSize {
-    /// Approximate index size in bytes
+    /// Approximate bytes.
+    #[serde(rename = "b")]
     pub bytes: u64,
-    /// Human-readable size
+    /// Human-readable size.
+    #[serde(rename = "human")]
     pub human: String,
 }
 
@@ -72,7 +77,7 @@ pub struct IndexSize {
 ///
 /// Returns a `ServerError` if statistics retrieval fails.
 pub fn execute_stats(
-    service: &Arc<SearchService>,
+    service: &SearchService,
     indexer: &Indexer,
     input: StatsInput,
 ) -> crate::error::Result<StatsOutput> {
@@ -125,20 +130,25 @@ const fn default_refs_limit() -> usize {
 /// Output for the refs tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RefsOutput {
-    /// References found
+    /// References found.
+    #[serde(rename = "refs")]
     pub references: Vec<Reference>,
 }
 
 /// A reference to a symbol.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Reference {
-    /// File path
+    /// File path.
+    #[serde(rename = "p")]
     pub path: String,
-    /// Line number
+    /// Line number.
+    #[serde(rename = "l")]
     pub line: usize,
-    /// Line content
+    /// Line content.
+    #[serde(rename = "c")]
     pub content: String,
-    /// Reference type (definition, usage, import)
+    /// Reference type.
+    #[serde(rename = "type")]
     pub ref_type: String,
 }
 
@@ -152,10 +162,7 @@ pub struct Reference {
 /// # Errors
 ///
 /// Returns a `ServerError` if the grep search fails.
-pub fn execute_refs(
-    service: &Arc<SearchService>,
-    input: RefsInput,
-) -> crate::error::Result<RefsOutput> {
+pub fn execute_refs(service: &SearchService, input: RefsInput) -> crate::error::Result<RefsOutput> {
     // Use grep to find exact symbol matches, keeping raw GrepMatch data
     // to avoid re-reading files (the old approach doubled I/O).
     let matches_by_file = service.search_grep_with_matches(
