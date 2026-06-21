@@ -5,6 +5,7 @@
 //! - Score merging from multiple sources
 //! - FTS5 search performance
 //! - Grep parallel search
+//! - Structural ast-grep search
 //!
 //! Run with: `cargo bench`
 //! View reports: `open target/criterion/report/index.html`
@@ -14,6 +15,10 @@ use grepika::db::{Database, FileGraphBatchItem, SymbolRow};
 use grepika::services::ast::RawCall;
 use grepika::services::indexer::index_path_key;
 use grepika::services::{GrepService, Indexer, SearchService, TrigramIndex};
+use grepika::tools::{
+    execute_structural_search, StructuralLanguage, StructuralQuery, StructuralSearchInput,
+    STRUCTURAL_DEFAULT_TIMEOUT_MS,
+};
 use grepika::types::{FileId, Score};
 use std::collections::HashSet;
 use std::fs;
@@ -1005,6 +1010,169 @@ fn bench_grep_candidate_threshold_matrix(c: &mut Criterion) {
 }
 
 // ============================================================================
+// Structural Search Benchmarks
+// ============================================================================
+
+fn empty_search_service(root: &Path) -> SearchService {
+    let db = Arc::new(Database::in_memory().expect("structural bench db"));
+    let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+    SearchService::with_trigram(db, root.to_path_buf(), trigram)
+        .expect("structural bench search service")
+}
+
+fn structural_input(query: StructuralQuery, limit: usize) -> StructuralSearchInput {
+    StructuralSearchInput {
+        language: StructuralLanguage::Rust,
+        query,
+        path: ".".to_string(),
+        globs: Vec::new(),
+        limit,
+        include_meta: false,
+        strictness: None,
+        timeout_ms: STRUCTURAL_DEFAULT_TIMEOUT_MS,
+    }
+}
+
+fn setup_structural_files(dir: &Path, count: usize) {
+    fs::create_dir_all(dir.join("src")).expect("structural bench src dir");
+    for i in 0..count {
+        let target = if i + 1 == count {
+            format!("fn target_marker_{i}() {{ process_target(); }}\n")
+        } else {
+            String::new()
+        };
+        let content = format!(
+            r#"
+            pub struct Handler{i} {{
+                value: usize,
+            }}
+
+            impl Handler{i} {{
+                pub fn new() -> Self {{
+                    Self {{ value: {i} }}
+                }}
+
+                pub fn handle(&self, request: Request) -> Result<Response, Error> {{
+                    authenticate(&request)?;
+                    Ok(Response::new(self.value))
+                }}
+            }}
+
+            fn helper_{i}() {{
+                let value = {i};
+                process_value(value);
+            }}
+
+            {target}
+            "#,
+            i = i,
+            target = target
+        );
+        fs::write(dir.join("src").join(format!("module_{i}.rs")), content)
+            .expect("structural bench file");
+    }
+}
+
+fn bench_structural_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("structural_search");
+    group.sample_size(20);
+
+    for file_count in [200usize, 2_000] {
+        let dir = TempDir::new().expect("structural temp dir");
+        setup_structural_files(dir.path(), file_count);
+        let search = empty_search_service(dir.path());
+
+        let pattern_input = structural_input(
+            StructuralQuery::Pattern {
+                pattern: "fn $NAME($$$ARGS) { $$$BODY }".to_string(),
+                selector: None,
+            },
+            20,
+        );
+        let kind_input = structural_input(
+            StructuralQuery::Kind {
+                kind: "function_item".to_string(),
+            },
+            20,
+        );
+
+        assert!(
+            !execute_structural_search(&search, pattern_input.clone())
+                .expect("structural pattern preflight")
+                .results
+                .is_empty(),
+            "structural pattern preflight returned no results"
+        );
+        assert!(
+            !execute_structural_search(&search, kind_input.clone())
+                .expect("structural kind preflight")
+                .results
+                .is_empty(),
+            "structural kind preflight returned no results"
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("pattern_functions", file_count),
+            &pattern_input,
+            |b, input| {
+                b.iter(|| {
+                    black_box(
+                        execute_structural_search(&search, input.clone())
+                            .expect("structural pattern search"),
+                    )
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("kind_functions", file_count),
+            &kind_input,
+            |b, input| {
+                b.iter(|| {
+                    black_box(
+                        execute_structural_search(&search, input.clone())
+                            .expect("structural kind search"),
+                    )
+                })
+            },
+        );
+
+        if file_count == 2_000 {
+            let unique_input = structural_input(
+                StructuralQuery::Pattern {
+                    pattern: "fn target_marker_1999() { $$$BODY }".to_string(),
+                    selector: None,
+                },
+                20,
+            );
+            assert_eq!(
+                execute_structural_search(&search, unique_input.clone())
+                    .expect("structural unique preflight")
+                    .results
+                    .len(),
+                1,
+                "structural unique preflight should find the tail target"
+            );
+
+            group.bench_function("pattern_unique_tail_2000_files", |b| {
+                b.iter(|| {
+                    black_box(
+                        execute_structural_search(&search, unique_input.clone())
+                            .expect("structural unique search"),
+                    )
+                })
+            });
+
+            group.bench_function("grep_regex_functions_2000_files", |b| {
+                b.iter(|| black_box(search.search_grep(r"fn\s+\w+", 20).expect("grep search")))
+            });
+        }
+    }
+
+    group.finish();
+}
+
+// ============================================================================
 // Real Repository Benchmarks
 // ============================================================================
 
@@ -1043,6 +1211,27 @@ fn bench_real_repo(c: &mut Criterion) {
     group.bench_function("grep_search", |b| {
         b.iter(|| black_box(search.search_grep("fn ", 20)))
     });
+    let structural_kind_input = structural_input(
+        StructuralQuery::Kind {
+            kind: "function_item".to_string(),
+        },
+        20,
+    );
+    assert!(
+        !execute_structural_search(&search, structural_kind_input.clone())
+            .expect("real repo structural kind preflight")
+            .results
+            .is_empty(),
+        "real repo structural kind search returned no results"
+    );
+    group.bench_function("structural_kind_functions", |b| {
+        b.iter(|| {
+            black_box(
+                execute_structural_search(&search, structural_kind_input.clone())
+                    .expect("real repo structural kind search"),
+            )
+        })
+    });
     group.finish();
 }
 
@@ -1070,6 +1259,7 @@ criterion_group!(
     bench_grep_dense_matches,
     bench_grep_candidate_filter,
     bench_grep_candidate_threshold_matrix,
+    bench_structural_search,
 );
 
 criterion_group!(

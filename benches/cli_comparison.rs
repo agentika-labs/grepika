@@ -202,6 +202,11 @@ fn grepika_binary() -> Option<PathBuf> {
 fn run_subprocess_comparison() {
     let root =
         std::env::var("BENCH_REPO_PATH").unwrap_or_else(|_| env!("CARGO_MANIFEST_DIR").to_string());
+    let db_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("bench_cache")
+        .join("cli_comparison_subprocess.db");
+    let db_path = db_path.to_string_lossy().to_string();
 
     let grepika_bin = match grepika_binary() {
         Some(p) => p,
@@ -211,6 +216,18 @@ fn run_subprocess_comparison() {
             return;
         }
     };
+
+    let index_output = Command::new(&grepika_bin)
+        .args(["--root", root.as_str(), "--db", db_path.as_str(), "index"])
+        .output()
+        .unwrap_or_else(|err| panic!("failed to index subprocess benchmark DB: {err}"));
+    if !index_output.status.success() {
+        panic!(
+            "failed to index subprocess benchmark DB: status={} stderr={}",
+            index_output.status,
+            String::from_utf8_lossy(&index_output.stderr).trim()
+        );
+    }
 
     let has_rg = rg_available();
     if !has_rg {
@@ -251,13 +268,28 @@ fn run_subprocess_comparison() {
         for _ in 0..N {
             let start = Instant::now();
             let output = Command::new(&grepika_bin)
-                .args(["search", "--json", "--root", &root, query])
-                .output();
+                .args([
+                    "--root",
+                    root.as_str(),
+                    "--db",
+                    db_path.as_str(),
+                    "search",
+                    "--json",
+                    query,
+                ])
+                .output()
+                .unwrap_or_else(|err| panic!("failed to run grepika for '{name}': {err}"));
             let elapsed = start.elapsed();
-            if let Ok(o) = output {
-                grepika_times.push(elapsed.as_secs_f64() * 1000.0);
-                grepika_bytes = o.stdout.len();
+            if !output.status.success() {
+                panic!(
+                    "grepika failed for '{}': status={} stderr={}",
+                    name,
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
             }
+            grepika_times.push(elapsed.as_secs_f64() * 1000.0);
+            grepika_bytes = output.stdout.len();
         }
         let grepika_stats = BenchmarkStats::from_samples(&grepika_times);
         all_grepika_cv.push(grepika_stats.cv_percent);
