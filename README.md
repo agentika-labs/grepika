@@ -81,8 +81,8 @@ By default, grepika runs in **global mode** — the server starts without `--roo
 The grepika plugin bundles the MCP server with an exploration agent, skills, and commands.
 
 ```bash
-/plugin marketplace add agentika-labs/agentika-plugin-marketplace
-/plugin install grepika@agentika-marketplace
+/plugin marketplace add agentika-labs/grepika
+/plugin install grepika@grepika-marketplace
 ```
 
 | Type | Name | Description |

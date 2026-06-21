@@ -1,0 +1,33 @@
+{
+  "name": "grepika-marketplace",
+  "owner": {
+    "name": "Agentika",
+    "url": "https://github.com/agentika-labs",
+    "email": "support@agentika.io"
+  },
+  "metadata": {
+    "description": "Claude Code plugin marketplace for grepika, the token-efficient MCP server for ranked code search and structural navigation.",
+    "version": "1.0.0",
+    "pluginRoot": "plugins"
+  },
+  "plugins": [
+    {
+      "name": "grepika",
+      "source": "./plugins/grepika",
+      "description": "Token-efficient codebase exploration using the grepika MCP server with FTS5, ripgrep-backed regex search, sparse n-gram prefiltering, AST structural search, and code-graph navigation.",
+      "version": "1.2.0",
+      "author": {
+        "name": "Agentika"
+      },
+      "repository": "https://github.com/agentika-labs/grepika",
+      "keywords": [
+        "code-search",
+        "mcp",
+        "indexing",
+        "codebase-exploration",
+        "structural-search",
+        "code-graph"
+      ]
+    }
+  ]
+}

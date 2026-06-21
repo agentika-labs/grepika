@@ -7,13 +7,13 @@ The grepika plugin bundles the MCP server with an exploration agent, skills, and
 **Add the marketplace:**
 
 ```bash
-/plugin marketplace add agentika-labs/agentika-plugin-marketplace
+/plugin marketplace add agentika-labs/grepika
 ```
 
 **Install the plugin:**
 
 ```bash
-/plugin install grepika@agentika-marketplace
+/plugin install grepika@grepika-marketplace
 ```
 
 ### What it adds
