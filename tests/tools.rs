@@ -385,6 +385,7 @@ fn test_graph_tool_callers_callees_imports() {
             relation: "callers".to_string(),
             name: "authenticate".to_string(),
             depth: 5,
+            limit: 100,
         },
     )
     .unwrap();
@@ -401,6 +402,7 @@ fn test_graph_tool_callers_callees_imports() {
             relation: "callees".to_string(),
             name: "authenticate".to_string(),
             depth: 5,
+            limit: 100,
         },
     )
     .unwrap();
@@ -420,6 +422,7 @@ fn test_graph_tool_callers_callees_imports() {
             relation: "imports".to_string(),
             name: "auth.rs".to_string(),
             depth: 5,
+            limit: 100,
         },
     )
     .unwrap();
@@ -439,9 +442,30 @@ fn test_graph_tool_unknown_relation_errors() {
             relation: "bogus".to_string(),
             name: "x".to_string(),
             depth: 5,
+            limit: 100,
         },
     );
     assert!(err.is_err(), "unknown relation should error");
+}
+
+#[test]
+fn test_graph_tool_respects_limit() {
+    let (_dir, search, indexer) = setup_test_services();
+    indexer.index(None, true).unwrap();
+
+    let output = execute_graph(
+        &search,
+        GraphInput {
+            relation: "imports".to_string(),
+            name: "auth.rs".to_string(),
+            depth: 5,
+            limit: 1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(output.modules.len(), 1);
+    assert!(output.truncated, "graph output should report truncation");
 }
 
 #[test]

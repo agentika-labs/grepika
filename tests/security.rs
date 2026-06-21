@@ -146,6 +146,24 @@ fn test_toc_tool_blocks_path_traversal() {
 }
 
 #[test]
+fn test_graph_imports_blocks_path_traversal() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    for path in ["../etc/passwd", "/etc/passwd", "src/../../etc/passwd"] {
+        let result = execute_graph(
+            &service,
+            GraphInput {
+                relation: "imports".to_string(),
+                name: path.to_string(),
+                depth: 5,
+                limit: 100,
+            },
+        );
+        assert!(result.is_err(), "Should block graph imports path: {path}");
+    }
+}
+
+#[test]
 fn test_diff_tool_blocks_path_traversal() {
     let (_dir, service, _indexer) = setup_test_services();
 
@@ -314,6 +332,25 @@ fn test_null_byte_rejected_in_context() {
         },
     );
     assert!(result.is_err(), "Should block null byte in path");
+}
+
+#[test]
+fn test_null_byte_rejected_in_graph_imports() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    let result = execute_graph(
+        &service,
+        GraphInput {
+            relation: "imports".to_string(),
+            name: "\0main.rs".to_string(),
+            depth: 5,
+            limit: 100,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "Should block null byte in graph imports path"
+    );
 }
 
 // =============================================================================
@@ -610,7 +647,7 @@ fn test_workspace_new_creates_services() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
 
-    let ws = Workspace::new(dir.path().to_path_buf(), None);
+    let ws = Workspace::new(dir.path().to_path_buf(), Some(dir.path().join("test.db")));
     assert!(ws.is_ok(), "Workspace::new should succeed");
 
     let ws = ws.unwrap();
@@ -631,7 +668,7 @@ fn test_empty_server_tools_return_error() {
     // Verify Workspace::new works for the backward-compat path
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("test.rs"), "fn main() {}\n").unwrap();
-    let result = GrepikaServer::new(dir.path().to_path_buf(), None);
+    let result = GrepikaServer::new(dir.path().to_path_buf(), Some(dir.path().join("test.db")));
     assert!(result.is_ok(), "Server::new should succeed");
 
     // Ensure new_empty doesn't panic

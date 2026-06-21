@@ -296,11 +296,11 @@ impl Database {
     /// File paths that import a module whose name contains `module`.
     pub fn dependents_of(&self, module: &str) -> DbResult<Vec<String>> {
         let conn = self.conn()?;
-        let like = format!("%{module}%");
+        let like = format!("%{}%", escape_like(module));
         let mut stmt = conn.prepare(
             "SELECT DISTINCT f.path
              FROM edges e JOIN files f ON f.file_id = e.file_id
-             WHERE e.kind = 'IMPORTS' AND e.dst_name LIKE ?1
+             WHERE e.kind = 'IMPORTS' AND e.dst_name LIKE ?1 ESCAPE '\\'
              ORDER BY f.path",
         )?;
         let rows = stmt
@@ -338,6 +338,20 @@ fn innermost(ranges: &[(i64, usize, usize)], byte: usize) -> Option<i64> {
         .filter(|(_, s, e)| *s <= byte && byte < *e)
         .min_by_key(|(_, s, e)| e - s)
         .map(|(id, _, _)| *id)
+}
+
+fn escape_like(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -419,6 +433,10 @@ mod tests {
         assert_eq!(
             db.dependents_of("std::io").unwrap(),
             vec!["a.rs".to_string()]
+        );
+        assert!(
+            db.dependents_of("%").unwrap().is_empty(),
+            "LIKE wildcards in user input should be treated literally"
         );
     }
 

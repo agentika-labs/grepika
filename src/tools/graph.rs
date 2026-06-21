@@ -4,6 +4,7 @@
 //! imports, dependents. Backed by the symbols/edges tables populated during
 //! indexing (see [`crate::db::graph`]).
 
+use crate::security;
 use crate::services::SearchService;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -21,11 +22,20 @@ pub struct GraphInput {
     /// Max depth for call_chain (default 5).
     #[serde(default = "default_depth")]
     pub depth: usize,
+    /// Maximum results to return (default 100).
+    #[serde(default = "default_limit")]
+    pub limit: usize,
 }
 
 const fn default_depth() -> usize {
     5
 }
+
+const fn default_limit() -> usize {
+    100
+}
+
+const MAX_LIMIT: usize = 500;
 
 /// A symbol result row.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -44,11 +54,18 @@ const fn is_true(b: &bool) -> bool {
     *b
 }
 
+const fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Output for the graph tool.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct GraphOutput {
     pub relation: String,
     pub name: String,
+    /// Whether output was truncated to the requested limit.
+    #[serde(skip_serializing_if = "is_false")]
+    pub truncated: bool,
     /// Symbol results (callers / callees / call_chain).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub symbols: Vec<SymbolHit>,
@@ -69,6 +86,17 @@ pub fn execute_graph(
     let db = service.db();
     let root = service.root();
     let rel = |p: String| relativize(&p, root);
+    let limit = if input.limit == 0 {
+        default_limit()
+    } else {
+        input.limit.min(MAX_LIMIT)
+    };
+
+    if input.name.trim().is_empty() {
+        return Err(crate::error::ServerError::Tool(
+            "graph name must not be empty".to_string(),
+        ));
+    }
 
     let mut symbols = Vec::new();
     let mut modules = Vec::new();
@@ -104,9 +132,14 @@ pub fn execute_graph(
                 .collect();
         }
         "imports" => {
-            // name is a file path relative to root; match against stored path.
-            let abs = root.join(&input.name);
-            modules = db.imports_of(&abs.to_string_lossy())?;
+            // name is a file path relative to root; validate the same path
+            // contract as read-oriented tools even though this only queries DB.
+            let validated = security::validate_path(root, &input.name)?;
+            let joined = root.join(&input.name);
+            modules = db.imports_of(&joined.to_string_lossy())?;
+            if modules.is_empty() {
+                modules = db.imports_of(&validated.to_string_lossy())?;
+            }
             if modules.is_empty() {
                 modules = db.imports_of(&input.name)?;
             }
@@ -125,9 +158,14 @@ pub fn execute_graph(
         }
     }
 
+    let truncated = symbols.len() > limit || modules.len() > limit;
+    symbols.truncate(limit);
+    modules.truncate(limit);
+
     Ok(GraphOutput {
         relation: input.relation,
         name: input.name,
+        truncated,
         symbols,
         modules,
     })

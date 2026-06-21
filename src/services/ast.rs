@@ -134,7 +134,7 @@ fn extract_symbols_from_tree(
         };
         raw.push(AstSymbol {
             name: name.to_string(),
-            kind: friendly_kind(def.kind()),
+            kind: friendly_kind_for_def(def),
             line: def.start_position().row + 1,
             end_line: def.end_position().row + 1,
             start_byte: def.start_byte(),
@@ -263,7 +263,7 @@ fn friendly_kind(node_kind: &str) -> String {
     let mapped = match node_kind {
         "function_item" | "function_declaration" | "function_definition" => "fn",
         "method_declaration" | "method_definition" => "method",
-        "struct_item" => "struct",
+        "struct_item" | "struct_type" => "struct",
         "enum_item" | "enum_declaration" => "enum",
         "union_item" => "union",
         "trait_item" => "trait",
@@ -274,11 +274,28 @@ fn friendly_kind(node_kind: &str) -> String {
         "type_item" | "type_alias_declaration" | "type_declaration" => "type",
         "macro_definition" => "macro",
         "class_declaration" | "class_definition" => "class",
-        "interface_declaration" => "interface",
-        "lexical_declaration" | "variable_declaration" => "fn",
+        "interface_declaration" | "interface_type" => "interface",
+        "lexical_declaration" | "variable_declaration" | "variable_declarator" => "fn",
         other => return other.trim_end_matches("_declaration").to_string(),
     };
     mapped.to_string()
+}
+
+fn friendly_kind_for_def(def: Node<'_>) -> String {
+    if def.kind() == "type_declaration" {
+        let mut cursor = def.walk();
+        for child in def.children(&mut cursor) {
+            if child.kind() == "type_spec" {
+                if let Some(ty) = child.child_by_field_name("type") {
+                    return match ty.kind() {
+                        "struct_type" | "interface_type" => friendly_kind(ty.kind()),
+                        _ => "type".to_string(),
+                    };
+                }
+            }
+        }
+    }
+    friendly_kind(def.kind())
 }
 
 const RUST_QUERY: &str = r"
@@ -334,6 +351,9 @@ const RUST_CALL_QUERY: &str = r"
 (call_expression function: (identifier) @callee)
 (call_expression function: (scoped_identifier name: (identifier) @callee))
 (call_expression function: (field_expression field: (field_identifier) @callee))
+(call_expression function: (generic_function function: (identifier) @callee))
+(call_expression function: (generic_function function: (scoped_identifier name: (identifier) @callee)))
+(call_expression function: (generic_function function: (field_expression field: (field_identifier) @callee)))
 (macro_invocation macro: (identifier) @callee)
 ";
 
@@ -360,6 +380,7 @@ const RUST_IMPORT_QUERY: &str = r"
 
 const PY_IMPORT_QUERY: &str = r"
 (import_statement name: (dotted_name) @mod)
+(import_statement name: (aliased_import name: (dotted_name) @mod))
 (import_from_statement module_name: (dotted_name) @mod)
 ";
 
@@ -407,11 +428,14 @@ mod tests {
 
     #[test]
     fn rust_edges() {
-        let src = "use foo::bar;\nfn a() { b(); helper(); }\nfn b() {}\n";
+        let src =
+            "use foo::bar;\nfn a() { b(); helper(); parse::<u32>(); value.method::<String>(); }\nfn b() {}\n";
         let (calls, imports) = extract_edges(src, "rs");
         let callees: Vec<_> = calls.iter().map(|c| c.name.as_str()).collect();
         assert!(callees.contains(&"b"));
         assert!(callees.contains(&"helper"));
+        assert!(callees.contains(&"parse"));
+        assert!(callees.contains(&"method"));
         assert!(imports.iter().any(|i| i.contains("bar")));
 
         // Attribute the `b()` call to its enclosing fn `a` by byte range.
@@ -423,10 +447,22 @@ mod tests {
 
     #[test]
     fn py_imports() {
-        let src = "import os\nfrom collections import deque\n";
+        let src = "import os\nimport numpy as np\nfrom collections import deque\n";
         let (_calls, imports) = extract_edges(src, "py");
         assert!(imports.iter().any(|i| i == "os"));
+        assert!(imports.iter().any(|i| i == "numpy"));
         assert!(imports.iter().any(|i| i == "collections"));
+    }
+
+    #[test]
+    fn go_type_kinds() {
+        let src = "type User struct { name string }\ntype Store interface { Save() error }\ntype ID string\n";
+        let syms = extract(src, "go");
+        assert!(syms.iter().any(|s| s.name == "User" && s.kind == "struct"));
+        assert!(syms
+            .iter()
+            .any(|s| s.name == "Store" && s.kind == "interface"));
+        assert!(syms.iter().any(|s| s.name == "ID" && s.kind == "type"));
     }
 
     #[test]
@@ -437,5 +473,12 @@ mod tests {
             .iter()
             .any(|s| s.name == "Foo" && s.kind == "interface"));
         assert!(syms.iter().any(|s| s.name == "Bar" && s.kind == "class"));
+    }
+
+    #[test]
+    fn js_arrow_function_kind() {
+        let src = "const loadUser = async () => fetch('/user');\n";
+        let syms = extract(src, "js");
+        assert!(syms.iter().any(|s| s.name == "loadUser" && s.kind == "fn"));
     }
 }

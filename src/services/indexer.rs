@@ -346,6 +346,15 @@ impl Indexer {
             } // Drop write guard before save_trigrams (which takes a read lock)
 
             self.persist_trigrams(&indexing_conn, &state, force)?;
+
+            // Store HEAD commit for future git-based fast path using the same
+            // checked-out connection. In-memory test DBs have a pool size of 1.
+            if let Some(oid) = super::git_diff::head_oid(&self.root) {
+                if let Err(e) = Database::set_last_indexed_commit_on(&indexing_conn, &oid) {
+                    tracing::warn!("Failed to store HEAD commit for git fast path: {e}");
+                }
+            }
+
             Ok(state)
         })();
 
@@ -360,13 +369,6 @@ impl Indexer {
 
         if let Some(ref cb) = progress {
             cb(state.clone());
-        }
-
-        // Store HEAD commit for future git-based fast path
-        if let Some(oid) = super::git_diff::head_oid(&self.root) {
-            if let Err(e) = self.db.set_last_indexed_commit(&oid) {
-                tracing::warn!("Failed to store HEAD commit for git fast path: {e}");
-            }
         }
 
         Ok(state)
@@ -915,6 +917,10 @@ mod tests {
         let indexer = Indexer::new(db.clone(), trigram, dir.path().to_path_buf());
         let progress = indexer.index(None, false).unwrap();
         assert_eq!(progress.files_indexed, 2);
+        assert!(
+            db.get_last_indexed_commit().unwrap().is_some(),
+            "initial index should persist HEAD for the git fast path"
+        );
 
         {
             let conn = db.conn().unwrap();
@@ -931,6 +937,14 @@ mod tests {
         fs::remove_file(dir.path().join("remove.rs")).unwrap();
         let progress = indexer.index(None, false).unwrap();
         assert_eq!(progress.files_deleted, 1);
+        assert_eq!(
+            progress.files_total, 2,
+            "deletion should use the git fast path's existing indexed-file total"
+        );
+        assert_eq!(
+            progress.files_processed, 2,
+            "deletion should account for unchanged plus deleted files"
+        );
 
         let conn = db.conn().unwrap();
         let symbols: i64 = conn

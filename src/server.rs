@@ -289,6 +289,8 @@ pub struct GraphParams {
     pub name: String,
     /// Max depth for call_chain (default 5, max 25)
     pub depth: Option<usize>,
+    /// Maximum results to return (default 100, max 500)
+    pub limit: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -798,6 +800,7 @@ impl GrepikaServer {
             relation: params.relation,
             name: params.name,
             depth: params.depth.unwrap_or(5).min(25),
+            limit: params.limit.unwrap_or(100).min(500),
         };
         let search = Arc::clone(&ws.search);
         spawn_tool(move || tools::execute_graph(&search, input)).await
