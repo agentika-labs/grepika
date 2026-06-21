@@ -4,6 +4,10 @@
 # Rust build artifacts
 /target/
 
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
 # Project-specific index database (users generate their own)
 .grepika/
 
