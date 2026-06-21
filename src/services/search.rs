@@ -149,6 +149,32 @@ const NATURAL_LANGUAGE_MIN_RESULTS: usize = 3;
 /// Default limit when callers pass 0 (i.e. "no preference").
 const DEFAULT_SEARCH_LIMIT: usize = 50;
 
+/// How many lexical candidates to keep before semantic reranking.
+const SEMANTIC_CANDIDATE_MULTIPLIER: usize = 3;
+
+/// Semantic score blend weight for natural-language reranking.
+const SEMANTIC_WEIGHT: f64 = 0.3;
+
+fn backend_fetch_limit(limit: usize) -> usize {
+    limit
+        .saturating_mul(5)
+        .saturating_div(4)
+        .max(limit.saturating_add(1))
+}
+
+fn semantic_candidate_limit(limit: usize, semantic_active: bool) -> usize {
+    if semantic_active {
+        limit.saturating_mul(SEMANTIC_CANDIDATE_MULTIPLIER)
+    } else {
+        limit
+    }
+}
+
+fn blend_semantic_score(lexical: Score, similarity: f32) -> Score {
+    let semantic = f64::from(similarity.clamp(0.0, 1.0));
+    Score::new((1.0 - SEMANTIC_WEIGHT) * lexical.as_f64() + SEMANTIC_WEIGHT * semantic)
+}
+
 fn snippets_from_matches(matches: &[GrepMatch]) -> Vec<MatchSnippet> {
     let mut last_line = None;
     matches
@@ -273,6 +299,9 @@ pub struct SearchService {
     cached_total_files: AtomicU64,
     /// Bidirectional path↔FileId cache. Read-heavy (searches), write-rare (after indexing).
     path_cache: RwLock<PathCache>,
+    /// Embedding model for semantic re-ranking. `None` without the `semantic`
+    /// feature (or if the model failed to load), making the blend a no-op.
+    embedder: Option<std::sync::Mutex<crate::services::semantic::Embedder>>,
 }
 
 impl SearchService {
@@ -317,6 +346,7 @@ impl SearchService {
             config: SearchConfig::default(),
             cached_total_files: AtomicU64::new(total),
             path_cache: RwLock::new(path_cache),
+            embedder: crate::services::semantic::load_shared(),
         })
     }
 
@@ -457,12 +487,14 @@ impl SearchService {
             DEFAULT_SEARCH_LIMIT
         };
         let intent = classify_query(query);
+        let semantic_active = self.embedder.is_some() && intent == QueryIntent::NaturalLanguage;
+        let candidate_limit = semantic_candidate_limit(limit, semantic_active);
 
         // Run searches based on intent
         // For regex queries, skip FTS (it can't handle regex)
         let fts_results = if intent != QueryIntent::Regex {
             self.fts
-                .search(query, (limit * 5 / 4).max(limit + 1))
+                .search(query, backend_fetch_limit(candidate_limit))
                 .unwrap_or_default()
         } else {
             Vec::new()
@@ -511,7 +543,7 @@ impl SearchService {
             .grep
             .search_files_with_matches_filtered(
                 query,
-                (limit * 5 / 4).max(limit + 1),
+                backend_fetch_limit(candidate_limit),
                 file_filter.as_ref(),
             )
             .unwrap_or_default();
@@ -542,15 +574,89 @@ impl SearchService {
             QueryIntent::ExactSymbol | QueryIntent::ShortToken => &self.config,
         };
 
-        self.merge_results(
+        let mut results = self.merge_results(
             fts_results,
             grep_results,
             grep_matches,
             trigram_results,
-            limit,
+            candidate_limit,
             config_ref,
             intent,
-        )
+        )?;
+
+        // Semantic re-ranking (only active under the `semantic` feature with a
+        // loaded model). Natural-language queries benefit most.
+        if semantic_active {
+            self.blend_semantic(query, &mut results);
+            results.truncate(limit);
+        }
+
+        Ok(results)
+    }
+
+    /// Blends lexical scores with cosine similarity between the query embedding
+    /// and each file's symbol embeddings, then re-sorts.
+    ///
+    /// This re-ranks an over-collected lexical candidate set but does not
+    /// surface files the lexical backends missed. Add candidate injection if
+    /// recall on semantic-only matches becomes important.
+    fn blend_semantic(&self, query: &str, results: &mut [SearchResult]) {
+        use crate::services::semantic::cosine;
+
+        let Some(embedder) = &self.embedder else {
+            return;
+        };
+        let query_vec = {
+            let model = embedder.lock().unwrap_or_else(|e| e.into_inner());
+            match model.embed(vec![query.to_string()]) {
+                Ok(mut v) if !v.is_empty() => v.swap_remove(0),
+                _ => return,
+            }
+        };
+
+        let file_ids: Vec<FileId> = {
+            let mut seen = HashSet::new();
+            results
+                .iter()
+                .filter_map(|r| {
+                    let id = r.file_id.as_u32();
+                    (id != 0 && seen.insert(id)).then_some(r.file_id)
+                })
+                .collect()
+        };
+        if file_ids.is_empty() {
+            return;
+        }
+
+        let embeddings = match self.db.embeddings_for_files(&file_ids) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        if embeddings.is_empty() {
+            return;
+        }
+
+        // Best cosine per file (a file has many symbol embeddings).
+        let mut best: HashMap<u32, f32> = HashMap::new();
+        for (_sym, file_id, vec) in &embeddings {
+            let sim = cosine(&query_vec, vec).max(0.0);
+            let e = best.entry(*file_id).or_insert(0.0);
+            if sim > *e {
+                *e = sim;
+            }
+        }
+
+        for r in results.iter_mut() {
+            if let Some(sim) = best.get(&r.file_id.as_u32()) {
+                r.score = blend_semantic_score(r.score, *sim);
+            }
+        }
+        results.sort_by(|a, b| {
+            b.score
+                .as_f64()
+                .partial_cmp(&a.score.as_f64())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Performs FTS-only search.
@@ -1071,6 +1177,28 @@ mod tests {
     fn test_classify_regex_anchors() {
         assert_eq!(classify_query("^start"), QueryIntent::Regex);
         assert_eq!(classify_query("end$"), QueryIntent::Regex);
+    }
+
+    #[test]
+    fn test_semantic_candidate_limit_expands_only_when_active() {
+        assert_eq!(semantic_candidate_limit(10, false), 10);
+        assert_eq!(semantic_candidate_limit(10, true), 30);
+        assert_eq!(semantic_candidate_limit(usize::MAX, true), usize::MAX);
+    }
+
+    #[test]
+    fn test_backend_fetch_limit_overcollects_without_overflow() {
+        assert_eq!(backend_fetch_limit(20), 25);
+        assert_eq!(backend_fetch_limit(1), 2);
+        assert_eq!(backend_fetch_limit(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn test_semantic_blend_preserves_similarity_order_for_saturated_scores() {
+        let low_semantic = blend_semantic_score(Score::new(1.0), 0.1);
+        let high_semantic = blend_semantic_score(Score::new(1.0), 0.9);
+        assert!(high_semantic > low_semantic);
+        assert!(high_semantic.as_f64() < 1.0);
     }
 
     // ========================================================================

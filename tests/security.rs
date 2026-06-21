@@ -146,6 +146,24 @@ fn test_toc_tool_blocks_path_traversal() {
 }
 
 #[test]
+fn test_graph_imports_blocks_path_traversal() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    for path in ["../etc/passwd", "/etc/passwd", "src/../../etc/passwd"] {
+        let result = execute_graph(
+            &service,
+            GraphInput {
+                relation: "imports".to_string(),
+                name: path.to_string(),
+                depth: 5,
+                limit: 100,
+            },
+        );
+        assert!(result.is_err(), "Should block graph imports path: {path}");
+    }
+}
+
+#[test]
 fn test_diff_tool_blocks_path_traversal() {
     let (_dir, service, _indexer) = setup_test_services();
 
@@ -314,6 +332,25 @@ fn test_null_byte_rejected_in_context() {
         },
     );
     assert!(result.is_err(), "Should block null byte in path");
+}
+
+#[test]
+fn test_null_byte_rejected_in_graph_imports() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    let result = execute_graph(
+        &service,
+        GraphInput {
+            relation: "imports".to_string(),
+            name: "\0main.rs".to_string(),
+            depth: 5,
+            limit: 100,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "Should block null byte in graph imports path"
+    );
 }
 
 // =============================================================================

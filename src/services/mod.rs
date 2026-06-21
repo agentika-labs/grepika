@@ -1,5 +1,6 @@
 //! Core services for search, indexing, and file operations.
 
+pub mod ast;
 mod fts;
 mod git_diff;
 pub mod grep;
@@ -7,6 +8,7 @@ pub mod indexer;
 pub(crate) mod ngram;
 mod regex_literals;
 mod search;
+pub mod semantic;
 mod trigram;
 
 pub use fts::FtsService;

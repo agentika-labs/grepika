@@ -380,6 +380,103 @@ fn test_outline_tool_rust_file() {
 }
 
 #[test]
+fn test_graph_tool_callers_callees_imports() {
+    let (_dir, search, indexer) = setup_test_services();
+    // Populate the code graph by running a real (forced) index.
+    indexer.index(None, true).unwrap();
+
+    // main() calls authenticate() -> authenticate is a callee of main,
+    // and main is a caller of authenticate.
+    let callers = execute_graph(
+        &search,
+        GraphInput {
+            relation: "callers".to_string(),
+            name: "authenticate".to_string(),
+            depth: 5,
+            limit: 100,
+        },
+    )
+    .unwrap();
+    assert!(
+        callers.symbols.iter().any(|s| s.name == "main"),
+        "main should be a caller of authenticate, got {:?}",
+        callers.symbols
+    );
+
+    // authenticate() calls validate_credentials().
+    let callees = execute_graph(
+        &search,
+        GraphInput {
+            relation: "callees".to_string(),
+            name: "authenticate".to_string(),
+            depth: 5,
+            limit: 100,
+        },
+    )
+    .unwrap();
+    assert!(
+        callees
+            .symbols
+            .iter()
+            .any(|s| s.name == "validate_credentials"),
+        "authenticate should call validate_credentials, got {:?}",
+        callees.symbols
+    );
+
+    // auth.rs imports crate::config::Config and crate::error::AuthError.
+    let imports = execute_graph(
+        &search,
+        GraphInput {
+            relation: "imports".to_string(),
+            name: "auth.rs".to_string(),
+            depth: 5,
+            limit: 100,
+        },
+    )
+    .unwrap();
+    assert!(
+        imports.modules.iter().any(|m| m.contains("Config")),
+        "auth.rs should import a Config path, got {:?}",
+        imports.modules
+    );
+}
+
+#[test]
+fn test_graph_tool_unknown_relation_errors() {
+    let (_dir, search, _indexer) = setup_test_services();
+    let err = execute_graph(
+        &search,
+        GraphInput {
+            relation: "bogus".to_string(),
+            name: "x".to_string(),
+            depth: 5,
+            limit: 100,
+        },
+    );
+    assert!(err.is_err(), "unknown relation should error");
+}
+
+#[test]
+fn test_graph_tool_respects_limit() {
+    let (_dir, search, indexer) = setup_test_services();
+    indexer.index(None, true).unwrap();
+
+    let output = execute_graph(
+        &search,
+        GraphInput {
+            relation: "imports".to_string(),
+            name: "auth.rs".to_string(),
+            depth: 5,
+            limit: 1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(output.modules.len(), 1);
+    assert!(output.truncated, "graph output should report truncation");
+}
+
+#[test]
 fn test_outline_tool_extracts_impl_blocks() {
     let (_dir, search, _indexer) = setup_test_services();
 

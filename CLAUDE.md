@@ -70,7 +70,10 @@ SQLite + r2d2 pool         ← .grepika/index.db
 | Module | Purpose |
 |--------|---------|
 | `server.rs` | MCP server with `#[tool]` macro handlers |
-| `services/search.rs` | Combined search with score merging |
+| `services/ast.rs` | Tree-sitter symbol + edge extraction (rs/py/go/js/ts/tsx) |
+| `services/semantic.rs` | Optional embeddings (`semantic` feature; cosine + fastembed) |
+| `db/graph.rs` | Code-graph persistence + queries (symbols/edges, recursive CTEs) |
+| `services/search.rs` | Combined search with score merging (+ semantic re-rank) |
 | `services/fts.rs` | FTS5 BM25 search |
 | `services/grep.rs` | Parallel grep with ripgrep crates |
 | `services/trigram.rs` | In-memory trigram index (RoaringBitmap) |
@@ -92,6 +95,7 @@ SQLite + r2d2 pool         ← .grepika/index.db
 | `context` | Surrounding lines around a specific line |
 | `stats` | Index statistics |
 | `refs` | Find all references to a symbol |
+| `graph` | Navigate the code graph: callers, callees, call_chain, imports, dependents |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
 | `add_workspace` | Load a project workspace (global mode) |
@@ -113,3 +117,5 @@ SQLite + r2d2 pool         ← .grepika/index.db
 - Gitignore patterns are respected during indexing
 - Max file size for indexing: 1MB (configurable in `IndexConfig`)
 - Trigram index is persisted to database and loaded on startup
+- Code graph (symbols/edges) is populated during indexing from tree-sitter; the `graph` tool queries it
+- Semantic search is **off by default**: build with `cargo build --features semantic` to enable local embeddings (downloads a small model to cache on first use). Without the feature the embeddings table stays empty and search runs lexical-only
