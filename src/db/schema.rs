@@ -7,7 +7,8 @@ use rusqlite::Connection;
 /// v2: Changed hash from TEXT (SHA256 hex) to INTEGER (xxHash u64)
 /// v3: Replaced 3-byte trigram keys with u64 sparse n-gram keys
 /// v4: Added symbols + edges tables (tree-sitter code graph) and embeddings
-pub const SCHEMA_VERSION: u32 = 4;
+/// v5: Added graph foreign keys/cascades for index lifecycle cleanup
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Initializes the database schema.
 ///
@@ -33,12 +34,12 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
             // Old version - drop everything and recreate
             conn.execute_batch(
                 r"
-                DROP TABLE IF EXISTS files;
                 DROP TABLE IF EXISTS files_fts;
-                DROP TABLE IF EXISTS trigrams;
-                DROP TABLE IF EXISTS symbols;
-                DROP TABLE IF EXISTS edges;
                 DROP TABLE IF EXISTS embeddings;
+                DROP TABLE IF EXISTS edges;
+                DROP TABLE IF EXISTS symbols;
+                DROP TABLE IF EXISTS trigrams;
+                DROP TABLE IF EXISTS files;
                 DROP TABLE IF EXISTS schema_info;
                 ",
             )?;
@@ -105,7 +106,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- Code graph: definitions extracted via tree-sitter.
         CREATE TABLE IF NOT EXISTS symbols (
             symbol_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_id INTEGER NOT NULL,
+            file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             kind TEXT NOT NULL,
             start_line INTEGER NOT NULL,
@@ -120,10 +121,10 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- (name-based; no type scoping). src_symbol is NULL for file-level
         -- import edges. kind is 'CALLS' or 'IMPORTS'.
         CREATE TABLE IF NOT EXISTS edges (
-            src_symbol INTEGER,
+            src_symbol INTEGER REFERENCES symbols(symbol_id) ON DELETE CASCADE,
             dst_name TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            file_id INTEGER NOT NULL
+            kind TEXT NOT NULL CHECK (kind IN ('CALLS', 'IMPORTS')),
+            file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_symbol);
         CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_name);
@@ -132,10 +133,11 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         -- Semantic embeddings (one row per symbol chunk). Populated only when
         -- the `semantic` feature is built; otherwise the table stays empty.
         CREATE TABLE IF NOT EXISTS embeddings (
-            symbol_id INTEGER PRIMARY KEY,
-            file_id INTEGER NOT NULL,
+            symbol_id INTEGER PRIMARY KEY REFERENCES symbols(symbol_id) ON DELETE CASCADE,
+            file_id INTEGER NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
             vec BLOB NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_embeddings_file ON embeddings(file_id);
 
         -- Schema version tracking
         CREATE TABLE IF NOT EXISTS schema_info (
@@ -144,7 +146,7 @@ pub fn init_schema(conn: &Connection) -> DbResult<()> {
         ) WITHOUT ROWID;
 
         INSERT OR REPLACE INTO schema_info (key, value)
-        VALUES ('version', '4');
+        VALUES ('version', '5');
         "#,
     )?;
 

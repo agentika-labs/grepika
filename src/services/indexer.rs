@@ -45,7 +45,12 @@ fn index_graph(
         return;
     }
 
-    let symbols: Vec<SymbolRow> = ast::extract(content, &file_type)
+    let ast::AstExtraction {
+        symbols: ast_symbols,
+        calls,
+        imports,
+    } = ast::extract_all(content, &file_type);
+    let symbols: Vec<SymbolRow> = ast_symbols
         .into_iter()
         .map(|s| SymbolRow {
             name: s.name,
@@ -56,7 +61,6 @@ fn index_graph(
             end_byte: s.end_byte,
         })
         .collect();
-    let (calls, imports) = ast::extract_edges(content, &file_type);
 
     if let Err(e) = Database::replace_file_graph_on(conn, file_id, &symbols, &calls, &imports) {
         tracing::warn!("graph index failed for {path}: {e}");
@@ -453,7 +457,7 @@ impl Indexer {
         for path in existing_paths.difference(seen_paths) {
             if let Ok(Some(file_id)) = Database::get_file_id_on(conn, path) {
                 trigram_guard.remove_file(file_id);
-                Database::delete_file_graph_on(conn, file_id);
+                Database::delete_file_graph_on(conn, file_id)?;
             }
             if Database::delete_file_on(conn, path)? {
                 state.files_deleted += 1;
@@ -654,7 +658,10 @@ impl Indexer {
                     let abs_path = self.root.join(deleted_rel).to_string_lossy().to_string();
                     if existing_paths.contains(&abs_path) {
                         match Database::get_file_id_on(&indexing_conn, &abs_path) {
-                            Ok(Some(file_id)) => trigram_guard.remove_file(file_id),
+                            Ok(Some(file_id)) => {
+                                trigram_guard.remove_file(file_id);
+                                Database::delete_file_graph_on(&indexing_conn, file_id)?;
+                            }
                             Ok(None) => {}
                             Err(e) => {
                                 tracing::warn!("Failed to look up file_id for {abs_path}: {e}")
@@ -753,6 +760,7 @@ fn compute_hash(content: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn setup_test_env() -> (TempDir, Arc<Database>, Arc<RwLock<TrigramIndex>>) {
@@ -765,6 +773,31 @@ mod tests {
         fs::write(dir.path().join("lib.rs"), "pub fn greet() {}").unwrap();
 
         (dir, db, trigram)
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_init(dir: &Path) {
+        git(dir, &["init"]);
+        git(dir, &["config", "user.email", "test@test.com"]);
+        git(dir, &["config", "user.name", "Test"]);
+    }
+
+    fn git_add_commit(dir: &Path, msg: &str) {
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-m", msg, "--allow-empty"]);
     }
 
     #[test]
@@ -866,6 +899,52 @@ mod tests {
         let progress = indexer.index(None, false).unwrap();
         assert_eq!(progress.files_deleted, 1);
         assert_eq!(db.file_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_git_fast_path_deletion_removes_graph_rows() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+        git_init(dir.path());
+        fs::write(dir.path().join("keep.rs"), "fn keep() {}").unwrap();
+        fs::write(dir.path().join("remove.rs"), "fn doomed() { keep(); }").unwrap();
+        git_add_commit(dir.path(), "initial");
+
+        let indexer = Indexer::new(db.clone(), trigram, dir.path().to_path_buf());
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 2);
+
+        {
+            let conn = db.conn().unwrap();
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM symbols WHERE name = 'doomed'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+        }
+
+        fs::remove_file(dir.path().join("remove.rs")).unwrap();
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_deleted, 1);
+
+        let conn = db.conn().unwrap();
+        let symbols: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE name = 'doomed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let edges: i64 = conn
+            .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(symbols, 0, "deleted file symbols should be removed");
+        assert_eq!(edges, 0, "deleted file call/import edges should be removed");
     }
 
     #[test]

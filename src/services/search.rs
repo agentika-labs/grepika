@@ -453,10 +453,9 @@ impl SearchService {
     /// Boosts the scores of already-found results by cosine similarity between
     /// the query embedding and each file's symbol embeddings, then re-sorts.
     ///
-    /// ponytail: boost-only — it re-ranks existing lexical hits but does not
-    /// surface files the lexical backends missed. Add candidate injection
-    /// (with path/snippet enrichment) if recall on semantic-only matches
-    /// matters. No-op when the embedder is absent.
+    /// This is boost-only: it re-ranks existing lexical hits but does not
+    /// surface files the lexical backends missed. Add candidate injection if
+    /// recall on semantic-only matches becomes important.
     fn blend_semantic(&self, query: &str, results: &mut [SearchResult]) {
         use crate::services::semantic::cosine;
         const SEMANTIC_WEIGHT: f64 = 0.3;
@@ -472,7 +471,21 @@ impl SearchService {
             }
         };
 
-        let embeddings = match self.db.all_embeddings() {
+        let file_ids: Vec<FileId> = {
+            let mut seen = HashSet::new();
+            results
+                .iter()
+                .filter_map(|r| {
+                    let id = r.file_id.as_u32();
+                    (id != 0 && seen.insert(id)).then_some(r.file_id)
+                })
+                .collect()
+        };
+        if file_ids.is_empty() {
+            return;
+        }
+
+        let embeddings = match self.db.embeddings_for_files(&file_ids) {
             Ok(e) => e,
             Err(_) => return,
         };

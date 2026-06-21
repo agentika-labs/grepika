@@ -5,7 +5,7 @@
 //! `outline` tool. Parsing is on-demand (outline is infrequent), so a fresh
 //! `Parser` is built per call rather than pooled.
 
-use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
 /// A symbol extracted from source via tree-sitter.
 pub struct AstSymbol {
@@ -49,14 +49,63 @@ pub fn extract(content: &str, file_type: &str) -> Vec<AstSymbol> {
         return Vec::new();
     };
 
-    let mut parser = Parser::new();
-    if parser.set_language(&lang).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(content, None) else {
+    let Some(tree) = parse_tree(content, &lang) else {
         return Vec::new();
     };
-    let Ok(query) = Query::new(&lang, query_src) else {
+
+    extract_symbols_from_tree(&lang, tree.root_node(), content.as_bytes(), query_src)
+}
+
+/// A call site: the callee identifier and its byte offset (used to attribute
+/// the call to its enclosing symbol).
+pub struct RawCall {
+    pub name: String,
+    pub byte: usize,
+}
+
+/// Complete tree-sitter extraction for a file.
+#[derive(Default)]
+pub struct AstExtraction {
+    pub symbols: Vec<AstSymbol>,
+    pub calls: Vec<RawCall>,
+    pub imports: Vec<String>,
+}
+
+/// Extracts symbols, calls, and imports from `content` with a single parse.
+/// Returns an empty extraction for unsupported languages or parse failures.
+pub fn extract_all(content: &str, file_type: &str) -> AstExtraction {
+    let Some((lang, query_src)) = lang_for(file_type) else {
+        return AstExtraction::default();
+    };
+
+    let Some(tree) = parse_tree(content, &lang) else {
+        return AstExtraction::default();
+    };
+    let src = content.as_bytes();
+
+    let symbols = extract_symbols_from_tree(&lang, tree.root_node(), src, query_src);
+    let (calls, imports) = extract_edges_from_tree(&lang, tree.root_node(), src, file_type);
+
+    AstExtraction {
+        symbols,
+        calls,
+        imports,
+    }
+}
+
+fn parse_tree(content: &str, lang: &Language) -> Option<Tree> {
+    let mut parser = Parser::new();
+    parser.set_language(lang).ok()?;
+    parser.parse(content, None)
+}
+
+fn extract_symbols_from_tree(
+    lang: &Language,
+    root: Node<'_>,
+    src: &[u8],
+    query_src: &str,
+) -> Vec<AstSymbol> {
+    let Ok(query) = Query::new(lang, query_src) else {
         return Vec::new();
     };
 
@@ -66,11 +115,10 @@ pub fn extract(content: &str, file_type: &str) -> Vec<AstSymbol> {
         return Vec::new();
     };
 
-    let src = content.as_bytes();
     let mut cursor = QueryCursor::new();
     let mut raw: Vec<AstSymbol> = Vec::new();
 
-    let mut matches = cursor.matches(&query, tree.root_node(), src);
+    let mut matches = cursor.matches(&query, root, src);
     while let Some(m) = matches.next() {
         let mut name = None;
         let mut def = None;
@@ -96,7 +144,7 @@ pub fn extract(content: &str, file_type: &str) -> Vec<AstSymbol> {
     }
 
     // Nesting level = number of other definitions whose byte range strictly
-    // contains this one. ponytail: O(n²) over per-file symbol counts, fine.
+    // contains this one. O(n²) is acceptable for per-file symbol counts.
     for i in 0..raw.len() {
         let (s, e) = (raw[i].start_byte, raw[i].end_byte);
         raw[i].level = raw
@@ -111,75 +159,103 @@ pub fn extract(content: &str, file_type: &str) -> Vec<AstSymbol> {
     raw
 }
 
-/// A call site: the callee identifier and its byte offset (used to attribute
-/// the call to its enclosing symbol).
-pub struct RawCall {
-    pub name: String,
-    pub byte: usize,
-}
-
 /// Extracts call sites and imported module names from `content`.
 /// Returns `(calls, imports)`. Empty for unsupported languages.
 pub fn extract_edges(content: &str, file_type: &str) -> (Vec<RawCall>, Vec<String>) {
     let Some((lang, _)) = lang_for(file_type) else {
         return (Vec::new(), Vec::new());
     };
-    let (call_q, import_q) = match file_type {
+    let Some(tree) = parse_tree(content, &lang) else {
+        return (Vec::new(), Vec::new());
+    };
+    extract_edges_from_tree(&lang, tree.root_node(), content.as_bytes(), file_type)
+}
+
+fn extract_edges_from_tree(
+    lang: &Language,
+    root: Node<'_>,
+    src: &[u8],
+    file_type: &str,
+) -> (Vec<RawCall>, Vec<String>) {
+    let Some((call_q, import_q)) = edge_queries(file_type) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let calls = extract_calls_from_tree(lang, root, src, call_q);
+    let imports = extract_imports_from_tree(lang, root, src, import_q);
+
+    (calls, imports)
+}
+
+fn edge_queries(file_type: &str) -> Option<(&'static str, &'static str)> {
+    let queries = match file_type {
         "rs" => (RUST_CALL_QUERY, RUST_IMPORT_QUERY),
         "py" => (PY_CALL_QUERY, PY_IMPORT_QUERY),
         "go" => (GO_CALL_QUERY, GO_IMPORT_QUERY),
         "js" | "jsx" => (JS_CALL_QUERY, JS_IMPORT_QUERY),
         "ts" | "tsx" => (JS_CALL_QUERY, JS_IMPORT_QUERY),
-        _ => return (Vec::new(), Vec::new()),
+        _ => return None,
     };
+    Some(queries)
+}
 
-    let mut parser = Parser::new();
-    if parser.set_language(&lang).is_err() {
-        return (Vec::new(), Vec::new());
-    }
-    let Some(tree) = parser.parse(content, None) else {
-        return (Vec::new(), Vec::new());
+fn extract_calls_from_tree(
+    lang: &Language,
+    root: Node<'_>,
+    src: &[u8],
+    query_src: &str,
+) -> Vec<RawCall> {
+    let Ok(query) = Query::new(lang, query_src) else {
+        return Vec::new();
     };
-    let src = content.as_bytes();
+    let Some(idx) = query.capture_index_for_name("callee") else {
+        return Vec::new();
+    };
 
     let mut calls = Vec::new();
-    if let Ok(q) = Query::new(&lang, call_q) {
-        if let Some(idx) = q.capture_index_for_name("callee") {
-            let mut cursor = QueryCursor::new();
-            let mut it = cursor.matches(&q, tree.root_node(), src);
-            while let Some(m) = it.next() {
-                for cap in m.captures {
-                    if cap.index == idx {
-                        if let Ok(name) = cap.node.utf8_text(src) {
-                            calls.push(RawCall {
-                                name: name.to_string(),
-                                byte: cap.node.start_byte(),
-                            });
-                        }
-                    }
+    let mut cursor = QueryCursor::new();
+    let mut it = cursor.matches(&query, root, src);
+    while let Some(m) = it.next() {
+        for cap in m.captures {
+            if cap.index == idx {
+                if let Ok(name) = cap.node.utf8_text(src) {
+                    calls.push(RawCall {
+                        name: name.to_string(),
+                        byte: cap.node.start_byte(),
+                    });
                 }
             }
         }
     }
+    calls
+}
+
+fn extract_imports_from_tree(
+    lang: &Language,
+    root: Node<'_>,
+    src: &[u8],
+    query_src: &str,
+) -> Vec<String> {
+    let Ok(query) = Query::new(lang, query_src) else {
+        return Vec::new();
+    };
+    let Some(idx) = query.capture_index_for_name("mod") else {
+        return Vec::new();
+    };
 
     let mut imports = Vec::new();
-    if let Ok(q) = Query::new(&lang, import_q) {
-        if let Some(idx) = q.capture_index_for_name("mod") {
-            let mut cursor = QueryCursor::new();
-            let mut it = cursor.matches(&q, tree.root_node(), src);
-            while let Some(m) = it.next() {
-                for cap in m.captures {
-                    if cap.index == idx {
-                        if let Ok(name) = cap.node.utf8_text(src) {
-                            imports.push(name.trim_matches(['"', '`', '\'']).to_string());
-                        }
-                    }
+    let mut cursor = QueryCursor::new();
+    let mut it = cursor.matches(&query, root, src);
+    while let Some(m) = it.next() {
+        for cap in m.captures {
+            if cap.index == idx {
+                if let Ok(name) = cap.node.utf8_text(src) {
+                    imports.push(name.trim_matches(['"', '`', '\'']).to_string());
                 }
             }
         }
     }
-
-    (calls, imports)
+    imports
 }
 
 /// Maps a tree-sitter node kind to a short, stable label for output.

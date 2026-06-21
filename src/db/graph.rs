@@ -10,6 +10,7 @@ use crate::error::DbResult;
 use crate::services::ast::RawCall;
 use crate::types::FileId;
 use rusqlite::params;
+use rusqlite::types::ToSql;
 
 /// A symbol row returned from graph queries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,8 +59,11 @@ impl Database {
         let tx = conn.unchecked_transaction()?;
         let fid = file_id.as_u32();
 
-        tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![fid])?;
+        // Clear dependent rows first so this works correctly for both legacy
+        // v4 databases without foreign keys and newer schemas with cascades.
+        tx.execute("DELETE FROM embeddings WHERE file_id = ?1", params![fid])?;
         tx.execute("DELETE FROM edges WHERE file_id = ?1", params![fid])?;
+        tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![fid])?;
 
         // Insert symbols, remembering (symbol_id, start_byte, end_byte) so we
         // can attribute call sites to their enclosing definition.
@@ -107,11 +111,7 @@ impl Database {
     /// Removes all graph rows for a file (used when a file is deleted).
     pub fn delete_file_graph(&self, file_id: FileId) -> DbResult<()> {
         let conn = self.conn()?;
-        let fid = file_id.as_u32();
-        conn.execute("DELETE FROM symbols WHERE file_id = ?1", params![fid])?;
-        conn.execute("DELETE FROM edges WHERE file_id = ?1", params![fid])?;
-        conn.execute("DELETE FROM embeddings WHERE file_id = ?1", params![fid])?;
-        Ok(())
+        Self::delete_file_graph_on(&conn, file_id)
     }
 
     /// Stores one symbol embedding on a caller-provided connection.
@@ -145,14 +145,13 @@ impl Database {
                     r.get::<_, String>(2)?,
                 ))
             })?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// All stored embeddings as `(symbol_id, file_id, vector)`. Used for
-    /// brute-force cosine search. ponytail: linear scan; add an ANN index
-    /// (arroy/sqlite-vec) only if this is measurably slow on large repos.
+    /// All stored embeddings as `(symbol_id, file_id, vector)`. Intended for
+    /// diagnostics or offline analysis; search reranking should use bounded
+    /// embedding queries.
     pub fn all_embeddings(&self) -> DbResult<Vec<(i64, u32, Vec<f32>)>> {
         use crate::services::semantic::decode;
         let conn = self.conn()?;
@@ -162,21 +161,47 @@ impl Database {
                 let blob: Vec<u8> = r.get(2)?;
                 Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?, decode(&blob)))
             })?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
-    /// Best-effort graph-row cleanup on a caller-provided connection.
-    /// Errors are logged, not propagated (mirrors deletion-path semantics).
-    pub fn delete_file_graph_on(conn: &rusqlite::Connection, file_id: FileId) {
-        let fid = file_id.as_u32();
-        for table in ["symbols", "edges", "embeddings"] {
-            let sql = format!("DELETE FROM {table} WHERE file_id = ?1");
-            if let Err(e) = conn.execute(&sql, params![fid]) {
-                tracing::warn!("delete_file_graph_on({table}) failed: {e}");
-            }
+    /// Stored embeddings for a bounded set of files as `(symbol_id, file_id, vector)`.
+    pub fn embeddings_for_files(&self, file_ids: &[FileId]) -> DbResult<Vec<(i64, u32, Vec<f32>)>> {
+        use crate::services::semantic::decode;
+        if file_ids.is_empty() {
+            return Ok(Vec::new());
         }
+
+        let conn = self.conn()?;
+        let placeholders: Vec<String> = (1..=file_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT symbol_id, file_id, vec FROM embeddings WHERE file_id IN ({})",
+            placeholders.join(",")
+        );
+        let ids: Vec<u32> = file_ids.iter().map(|id| id.as_u32()).collect();
+        let params: Vec<&dyn ToSql> = ids.iter().map(|id| id as &dyn ToSql).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params.as_slice(), |r| {
+                let blob: Vec<u8> = r.get(2)?;
+                Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?, decode(&blob)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Graph-row cleanup on a caller-provided connection.
+    pub fn delete_file_graph_on(conn: &rusqlite::Connection, file_id: FileId) -> DbResult<()> {
+        let fid = file_id.as_u32();
+        for sql in [
+            "DELETE FROM embeddings WHERE file_id = ?1",
+            "DELETE FROM edges WHERE file_id = ?1",
+            "DELETE FROM symbols WHERE file_id = ?1",
+        ] {
+            conn.execute(sql, params![fid])?;
+        }
+        Ok(())
     }
 
     /// Definitions named `name`.
@@ -219,8 +244,7 @@ impl Database {
             )?;
             let names = stmt
                 .query_map(params![name], |r| r.get::<_, String>(0))?
-                .filter_map(Result::ok)
-                .collect::<Vec<_>>();
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             names
         };
 
@@ -265,8 +289,7 @@ impl Database {
         )?;
         let rows = stmt
             .query_map(params![path], |r| r.get::<_, String>(0))?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
@@ -282,8 +305,7 @@ impl Database {
         )?;
         let rows = stmt
             .query_map(params![like], |r| r.get::<_, String>(0))?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
@@ -304,8 +326,7 @@ impl Database {
                     end_line: r.get::<_, i64>(4)? as usize,
                 })
             })?
-            .filter_map(Result::ok)
-            .collect();
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 }
@@ -325,6 +346,20 @@ mod tests {
 
     fn db() -> Database {
         Database::in_memory().unwrap()
+    }
+
+    fn graph_row_counts(db: &Database) -> (i64, i64, i64) {
+        let conn = db.conn().unwrap();
+        let symbols = conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+            .unwrap();
+        let edges = conn
+            .query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))
+            .unwrap();
+        let embeddings = conn
+            .query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0))
+            .unwrap();
+        (symbols, edges, embeddings)
     }
 
     #[test]
@@ -429,5 +464,91 @@ mod tests {
         .unwrap();
         assert!(db.callers("old").unwrap().is_empty(), "old edge gone");
         assert_eq!(db.callers("new").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reindex_clears_stale_embeddings() {
+        let db = db();
+        let f = db.upsert_file("a.rs", "fn a() {}", 1).unwrap();
+        db.replace_file_graph(
+            f,
+            &[SymbolRow {
+                name: "a".into(),
+                kind: "fn".into(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: 0,
+                end_byte: 9,
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let symbol_id = db.file_symbol_ids(f).unwrap()[0].0;
+        {
+            let conn = db.conn().unwrap();
+            Database::upsert_embedding_on(&conn, symbol_id, f, &[0, 0, 0, 0]).unwrap();
+        }
+        assert_eq!(db.embeddings_for_files(&[f]).unwrap().len(), 1);
+
+        db.replace_file_graph(
+            f,
+            &[SymbolRow {
+                name: "renamed".into(),
+                kind: "fn".into(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: 0,
+                end_byte: 15,
+            }],
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        assert!(
+            db.embeddings_for_files(&[f]).unwrap().is_empty(),
+            "old embedding must not survive graph replacement"
+        );
+    }
+
+    #[test]
+    fn deleting_file_cascades_graph_rows() {
+        let db = db();
+        let f = db
+            .upsert_file("a.rs", "fn caller() { target(); }", 1)
+            .unwrap();
+        db.replace_file_graph(
+            f,
+            &[SymbolRow {
+                name: "caller".into(),
+                kind: "fn".into(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: 0,
+                end_byte: 25,
+            }],
+            &[RawCall {
+                name: "target".into(),
+                byte: 14,
+            }],
+            &["std::io".into()],
+        )
+        .unwrap();
+
+        let symbol_id = db.file_symbol_ids(f).unwrap()[0].0;
+        {
+            let conn = db.conn().unwrap();
+            Database::upsert_embedding_on(&conn, symbol_id, f, &[0, 0, 0, 0]).unwrap();
+        }
+        assert_eq!(graph_row_counts(&db), (1, 2, 1));
+
+        assert!(db.delete_file("a.rs").unwrap());
+        assert_eq!(
+            graph_row_counts(&db),
+            (0, 0, 0),
+            "graph data should be owned by the deleted file"
+        );
     }
 }

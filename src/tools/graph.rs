@@ -2,8 +2,7 @@
 //!
 //! One tool dispatches over a `relation`: callers, callees, call_chain,
 //! imports, dependents. Backed by the symbols/edges tables populated during
-//! indexing (see [`crate::db::graph`]). ponytail: single surface rather than
-//! five near-identical handlers.
+//! indexing (see [`crate::db::graph`]).
 
 use crate::services::SearchService;
 use schemars::JsonSchema;
