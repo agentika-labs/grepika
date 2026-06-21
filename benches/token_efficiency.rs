@@ -48,6 +48,12 @@ fn setup_real_codebase() -> (PathBuf, Arc<Database>, SearchService) {
     let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
     let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
     indexer.index(None, false).expect("index");
+    {
+        let mut guard = trigram.write().unwrap_or_else(|e| e.into_inner());
+        if guard.trigram_count() == 0 {
+            *guard = TrigramIndex::from_db_entries(db.load_all_trigrams().expect("load trigrams"));
+        }
+    }
 
     let search = SearchService::with_trigram(Arc::clone(&db), root.clone(), trigram)
         .expect("search service");
@@ -87,7 +93,7 @@ const BENCHMARK_QUERIES: &[(&str, &str, &str)] = &[
 
 /// Measures grepika search output size using the real search service.
 fn measure_grepika_search(service: &SearchService, query: &str, limit: usize) -> TokenMetrics {
-    let results = service.search(query, limit).unwrap_or_default();
+    let results = service.search(query, limit).expect("grepika search");
     let root = service.root();
 
     let items: Vec<SearchResultItem> = results
@@ -217,7 +223,7 @@ fn measure_output_formats(
     query: &str,
     limit: usize,
 ) -> (usize, usize, usize) {
-    let results = service.search(query, limit).unwrap_or_default();
+    let results = service.search(query, limit).expect("grepika search");
     let root = service.root();
 
     let items: Vec<SearchResultItem> = results

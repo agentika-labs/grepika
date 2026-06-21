@@ -9,6 +9,7 @@ pub(crate) mod ngram;
 mod regex_literals;
 mod search;
 pub mod semantic;
+pub mod structural;
 mod trigram;
 
 pub use fts::FtsService;

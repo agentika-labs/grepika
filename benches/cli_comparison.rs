@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
+use tempfile::TempDir;
 
 // ============================================================================
 // Shared Setup
@@ -47,6 +48,7 @@ fn setup_real_codebase() -> (PathBuf, Arc<Database>, Arc<SearchService>) {
     let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
     let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
     indexer.index(None, false).expect("index");
+    load_trigrams_if_empty(&db, &trigram);
 
     let search = Arc::new(
         SearchService::with_trigram(Arc::clone(&db), root.clone(), Arc::clone(&trigram))
@@ -55,24 +57,63 @@ fn setup_real_codebase() -> (PathBuf, Arc<Database>, Arc<SearchService>) {
     (root, db, search)
 }
 
-/// Returns an indexed repo setup suitable for index benchmarks.
-fn setup_indexed_repo() -> (PathBuf, Arc<Database>, Arc<RwLock<TrigramIndex>>) {
-    let root = std::env::var("BENCH_REPO_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+/// Returns an indexed temporary git repo plus one tracked file to mutate.
+fn setup_git_changed_file_fixture(
+    file_count: usize,
+) -> (TempDir, Arc<Database>, Arc<RwLock<TrigramIndex>>, PathBuf) {
+    let dir = TempDir::new().expect("git fixture dir");
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).expect("git fixture repo");
+    Command::new("git")
+        .args(["init"])
+        .current_dir(&repo)
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .args(["config", "user.email", "bench@example.com"])
+        .current_dir(&repo)
+        .output()
+        .expect("git config email");
+    Command::new("git")
+        .args(["config", "user.name", "Bench"])
+        .current_dir(&repo)
+        .output()
+        .expect("git config name");
 
-    let db_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("bench_cache");
-    fs::create_dir_all(&db_dir).expect("bench cache dir");
-    let db_path = db_dir.join("cli_comparison_index.db");
-    let db = Arc::new(Database::open(&db_path).expect("open DB"));
+    for i in 0..file_count {
+        fs::write(
+            repo.join(format!("file_{i}.rs")),
+            format!("fn file_{i}() {{ let value = {i}; }}\n"),
+        )
+        .expect("fixture file");
+    }
 
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(&repo)
+        .output()
+        .expect("git commit");
+
+    let db = Arc::new(Database::open(&dir.path().join("index.db")).expect("open fixture DB"));
     let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
-    let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root.clone());
-    indexer.index(None, false).expect("initial index");
+    let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), repo.clone());
+    indexer.index(None, false).expect("initial fixture index");
+    load_trigrams_if_empty(&db, &trigram);
 
-    (root, db, trigram)
+    let target = repo.join("file_0.rs");
+    (dir, db, trigram, target)
+}
+
+fn load_trigrams_if_empty(db: &Database, trigram: &Arc<RwLock<TrigramIndex>>) {
+    let mut guard = trigram.write().unwrap_or_else(|e| e.into_inner());
+    if guard.trigram_count() == 0 {
+        *guard = TrigramIndex::from_db_entries(db.load_all_trigrams().expect("load trigrams"));
+    }
 }
 
 // ============================================================================
@@ -86,6 +127,8 @@ fn bench_library_search(c: &mut Criterion) {
     let (_root, _db, search) = setup_real_codebase();
 
     for &(name, query) in BENCHMARK_QUERIES {
+        let preflight = search.search(query, 20).expect("combined search preflight");
+        assert!(!preflight.is_empty(), "combined search returned no results");
         // Combined mode (default)
         group.bench_function(BenchmarkId::new("combined", name), |b| {
             b.iter(|| {
@@ -94,11 +137,18 @@ fn bench_library_search(c: &mut Criterion) {
                     limit: 20,
                     mode: SearchMode::Combined,
                 };
-                black_box(grepika::tools::execute_search(&search, input))
+                black_box(grepika::tools::execute_search(&search, input).expect("combined search"))
             })
         });
     }
 
+    assert!(
+        !search
+            .search_fts("SearchService", 20)
+            .expect("fts preflight")
+            .is_empty(),
+        "fts preflight returned no results"
+    );
     // Also benchmark individual modes for "SearchService" query
     group.bench_function("fts_only/SearchService", |b| {
         b.iter(|| {
@@ -107,10 +157,17 @@ fn bench_library_search(c: &mut Criterion) {
                 limit: 20,
                 mode: SearchMode::Fts,
             };
-            black_box(grepika::tools::execute_search(&search, input))
+            black_box(grepika::tools::execute_search(&search, input).expect("fts search"))
         })
     });
 
+    assert!(
+        !search
+            .search_grep("SearchService", 20)
+            .expect("grep preflight")
+            .is_empty(),
+        "grep preflight returned no results"
+    );
     group.bench_function("grep_only/SearchService", |b| {
         b.iter(|| {
             let input = SearchInput {
@@ -118,7 +175,7 @@ fn bench_library_search(c: &mut Criterion) {
                 limit: 20,
                 mode: SearchMode::Grep,
             };
-            black_box(grepika::tools::execute_search(&search, input))
+            black_box(grepika::tools::execute_search(&search, input).expect("grep search"))
         })
     });
 
@@ -289,17 +346,77 @@ fn bench_incremental_index(c: &mut Criterion) {
     let mut group = c.benchmark_group("incremental_index");
     group.sample_size(20); // Indexing touches disk
 
-    let (root, db, trigram) = setup_indexed_repo();
-    let indexer = Indexer::new(Arc::clone(&db), Arc::clone(&trigram), root);
+    let (_git_dir, git_db, git_trigram, changed_file) = setup_git_changed_file_fixture(1_000);
+    let git_indexer = Indexer::new(
+        Arc::clone(&git_db),
+        Arc::clone(&git_trigram),
+        changed_file.parent().unwrap().to_path_buf(),
+    );
+    let (_many_dir, many_db, many_trigram, many_first_file) = setup_git_changed_file_fixture(1_000);
+    let many_root = many_first_file.parent().unwrap().to_path_buf();
+    let many_indexer = Indexer::new(
+        Arc::clone(&many_db),
+        Arc::clone(&many_trigram),
+        many_root.clone(),
+    );
+    let many_changed_files: Vec<PathBuf> = (0..100)
+        .map(|i| many_root.join(format!("file_{i}.rs")))
+        .collect();
+    let (_force_dir, force_db, force_trigram, force_file) = setup_git_changed_file_fixture(100);
+    let force_indexer = Indexer::new(
+        Arc::clone(&force_db),
+        Arc::clone(&force_trigram),
+        force_file.parent().unwrap().to_path_buf(),
+    );
+    let mut toggle = false;
+    let mut many_toggle = false;
 
     // Benchmark: no-op re-index (all files unchanged, xxHash match)
     group.bench_function("no_changes", |b| {
-        b.iter(|| black_box(indexer.index(None, false)))
+        b.iter(|| black_box(git_indexer.index(None, false).expect("no-change index")))
+    });
+
+    group.bench_function("one_changed_file_git_fast_path", |b| {
+        b.iter(|| {
+            toggle = !toggle;
+            let version = if toggle { "a" } else { "b" };
+            fs::write(
+                &changed_file,
+                format!("fn file_0() {{ let changed_value = \"{version}\"; }}\n"),
+            )
+            .expect("toggle changed file");
+            black_box(
+                git_indexer
+                    .index(None, false)
+                    .expect("one changed file git fast path"),
+            )
+        })
+    });
+
+    group.bench_function("many_changed_files_git_fast_path", |b| {
+        b.iter(|| {
+            many_toggle = !many_toggle;
+            let version = if many_toggle { "a" } else { "b" };
+            for (i, path) in many_changed_files.iter().enumerate() {
+                fs::write(
+                    path,
+                    format!(
+                        "fn file_{i}() {{ file_999(); let changed_value_{i} = \"{version}\"; }}\n"
+                    ),
+                )
+                .expect("toggle changed file batch");
+            }
+            black_box(
+                many_indexer
+                    .index(None, false)
+                    .expect("many changed files git fast path"),
+            )
+        })
     });
 
     // Benchmark: force full re-index
     group.bench_function("force_reindex", |b| {
-        b.iter(|| black_box(indexer.index(None, true)))
+        b.iter(|| black_box(force_indexer.index(None, true).expect("force reindex")))
     });
 
     group.finish();

@@ -56,7 +56,9 @@ fn extract_from_hir(hir: &Hir, buf: &mut Vec<u8>, segments: &mut Vec<String>) {
         }
         HirKind::Repetition(rep) => {
             flush(buf, segments);
-            extract_from_hir(&rep.sub, buf, segments);
+            if rep.min > 0 {
+                extract_from_hir(&rep.sub, buf, segments);
+            }
             flush(buf, segments);
         }
         HirKind::Capture(cap) => {
@@ -152,5 +154,24 @@ mod tests {
         // Both "foo" and "bar" are exactly 3 bytes, should be included
         assert!(literals.contains(&"foo".to_string()));
         assert!(literals.contains(&"bar".to_string()));
+    }
+
+    #[test]
+    fn test_optional_literal_not_extracted() {
+        let literals = extract_literals(r"password(reset)?");
+        assert!(literals.contains(&"password".to_string()));
+        assert!(!literals.contains(&"reset".to_string()));
+    }
+
+    #[test]
+    fn test_repeated_mandatory_literal_extracted() {
+        let literals = extract_literals(r"(token)+");
+        assert!(literals.contains(&"token".to_string()));
+    }
+
+    #[test]
+    fn test_zero_or_more_literal_not_extracted() {
+        let literals = extract_literals(r"(token)*");
+        assert!(literals.is_empty());
     }
 }

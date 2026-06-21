@@ -36,6 +36,7 @@ const fn default_limit() -> usize {
 }
 
 const MAX_LIMIT: usize = 500;
+pub const MAX_DEPTH: usize = 25;
 
 /// A symbol result row.
 #[derive(Debug, Serialize, JsonSchema)]
@@ -91,6 +92,12 @@ pub fn execute_graph(
     } else {
         input.limit.min(MAX_LIMIT)
     };
+    let depth = if input.depth == 0 {
+        default_depth()
+    } else {
+        input.depth.min(MAX_DEPTH)
+    };
+    let fetch_limit = limit.saturating_add(1);
 
     if input.name.trim().is_empty() {
         return Err(crate::error::ServerError::Tool(
@@ -104,13 +111,13 @@ pub fn execute_graph(
     match input.relation.as_str() {
         "callers" => {
             symbols = db
-                .callers(&input.name)?
+                .callers_limited(&input.name, fetch_limit)?
                 .into_iter()
                 .map(|s| hit(s, true, &rel))
                 .collect();
         }
         "callees" => {
-            for (callee, def) in db.callees(&input.name)? {
+            for (callee, def) in db.callees_limited(&input.name, fetch_limit)? {
                 match def {
                     Some(s) => symbols.push(hit(s, true, &rel)),
                     None => symbols.push(SymbolHit {
@@ -126,7 +133,7 @@ pub fn execute_graph(
         }
         "call_chain" => {
             symbols = db
-                .call_chain(&input.name, input.depth)?
+                .call_chain_limited(&input.name, depth, fetch_limit)?
                 .into_iter()
                 .map(|s| hit(s, true, &rel))
                 .collect();
@@ -134,19 +141,38 @@ pub fn execute_graph(
         "imports" => {
             // name is a file path relative to root; validate the same path
             // contract as read-oriented tools even though this only queries DB.
-            let validated = security::validate_path(root, &input.name)?;
+            let validated = security::validate_read_access(root, &input.name)?;
+            let canonical_root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
             let joined = root.join(&input.name);
-            modules = db.imports_of(&joined.to_string_lossy())?;
-            if modules.is_empty() {
-                modules = db.imports_of(&validated.to_string_lossy())?;
+            let mut candidates = Vec::with_capacity(5);
+            push_unique(&mut candidates, joined.to_string_lossy().into_owned());
+            push_unique(&mut candidates, validated.to_string_lossy().into_owned());
+            if let Ok(relative) = validated.strip_prefix(root) {
+                push_unique(
+                    &mut candidates,
+                    canonical_root.join(relative).to_string_lossy().into_owned(),
+                );
+                push_unique(&mut candidates, relative.to_string_lossy().into_owned());
             }
-            if modules.is_empty() {
-                modules = db.imports_of(&input.name)?;
+            if let Ok(relative) = validated.strip_prefix(&canonical_root) {
+                push_unique(
+                    &mut candidates,
+                    root.join(relative).to_string_lossy().into_owned(),
+                );
+                push_unique(&mut candidates, relative.to_string_lossy().into_owned());
+            }
+            push_unique(&mut candidates, input.name.clone());
+
+            for candidate in candidates {
+                modules = db.imports_of_limited(&candidate, fetch_limit)?;
+                if !modules.is_empty() {
+                    break;
+                }
             }
         }
         "dependents" => {
             modules = db
-                .dependents_of(&input.name)?
+                .dependents_of_limited(&input.name, fetch_limit)?
                 .into_iter()
                 .map(rel)
                 .collect();
@@ -179,6 +205,12 @@ fn hit(s: crate::db::GraphSymbol, resolved: bool, rel: &impl Fn(String) -> Strin
         start_line: s.start_line,
         end_line: s.end_line,
         resolved,
+    }
+}
+
+fn push_unique(candidates: &mut Vec<String>, value: String) {
+    if !value.is_empty() && !candidates.iter().any(|candidate| candidate == &value) {
+        candidates.push(value);
     }
 }
 

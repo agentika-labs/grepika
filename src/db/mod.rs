@@ -10,7 +10,7 @@ mod graph;
 mod pragmas;
 mod schema;
 
-pub use graph::{GraphSymbol, SymbolRow};
+pub use graph::{FileGraphBatchItem, GraphSymbol, SymbolRow};
 
 pub use pragmas::{apply_indexing_pragmas, restore_normal_pragmas};
 pub use pragmas::{apply_pragmas, apply_pragmas_raw};
@@ -350,10 +350,6 @@ impl Database {
         conn: &rusqlite::Connection,
         entries: &[(Vec<u8>, Vec<u8>)],
     ) -> DbResult<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-
         with_transaction(conn, || {
             conn.execute("DELETE FROM trigrams", [])?;
             let mut stmt =
@@ -450,6 +446,23 @@ impl Database {
     /// Optimized for O(1) change detection during indexing.
     pub fn get_all_hashes(&self) -> DbResult<HashMap<String, u64>> {
         self.get_indexed_files().map(|v| v.into_iter().collect())
+    }
+
+    /// Batch gets indexed content hashes by path.
+    ///
+    /// Missing paths are silently omitted from the result.
+    pub fn get_hashes_batch(&self, paths: &[String]) -> DbResult<HashMap<String, u64>> {
+        let conn = self.conn()?;
+        query_batch_map(
+            &conn,
+            "SELECT path, hash FROM files WHERE path IN ({})",
+            paths,
+            |row| {
+                let path: String = row.get(0)?;
+                let hash: i64 = row.get(1)?;
+                Ok((path, hash as u64))
+            },
+        )
     }
 
     /// Batch upserts multiple files in a single transaction.
@@ -844,6 +857,21 @@ mod tests {
         let paths: Vec<_> = indexed.iter().map(|(p, _)| p.as_str()).collect();
         assert!(paths.contains(&"file1.rs"));
         assert!(paths.contains(&"file2.rs"));
+    }
+
+    #[test]
+    fn test_get_hashes_batch() {
+        let db = Database::in_memory().unwrap();
+
+        db.upsert_file("file1.rs", "content1", 0x11).unwrap();
+        db.upsert_file("file2.rs", "content2", 0x22).unwrap();
+
+        let paths = vec!["file1.rs".to_string(), "missing.rs".to_string()];
+        let hashes = db.get_hashes_batch(&paths).unwrap();
+
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes["file1.rs"], 0x11);
+        assert!(!hashes.contains_key("missing.rs"));
     }
 
     #[test]

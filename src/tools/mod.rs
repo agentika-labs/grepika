@@ -5,9 +5,10 @@ mod content;
 mod graph;
 mod index;
 mod search;
+mod structural;
 
 // graph
-pub use graph::{execute_graph, GraphInput, GraphOutput, SymbolHit};
+pub use graph::{execute_graph, GraphInput, GraphOutput, SymbolHit, MAX_DEPTH};
 
 // analysis
 pub use analysis::{
@@ -30,4 +31,11 @@ pub use index::{
 // search
 pub use search::{
     execute_search, MatchSnippetOutput, SearchInput, SearchMode, SearchOutput, SearchResultItem,
+};
+
+// structural
+pub use structural::{
+    execute_structural_search, execute_structural_search_with_backend, StructuralLanguage,
+    StructuralQuery, StructuralSearchHit, StructuralSearchInput, StructuralSearchOutput,
+    StructuralStrictness, STRUCTURAL_DEFAULT_LIMIT, STRUCTURAL_DEFAULT_TIMEOUT_MS,
 };

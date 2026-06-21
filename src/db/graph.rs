@@ -11,6 +11,7 @@ use crate::services::ast::RawCall;
 use crate::types::FileId;
 use rusqlite::params;
 use rusqlite::types::ToSql;
+use std::collections::HashSet;
 
 /// A symbol row returned from graph queries.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +32,16 @@ pub struct SymbolRow {
     pub start_byte: usize,
     pub end_byte: usize,
 }
+
+/// One file's extracted graph rows for batch replacement.
+pub struct FileGraphBatchItem<'a> {
+    pub file_id: FileId,
+    pub symbols: &'a [SymbolRow],
+    pub calls: &'a [RawCall],
+    pub imports: &'a [String],
+}
+
+const GRAPH_DELETE_FILE_ID_CHUNK: usize = 900;
 
 impl Database {
     /// Replaces all graph data for `file_id` with the given symbols/edges.
@@ -56,55 +67,92 @@ impl Database {
         calls: &[RawCall],
         imports: &[String],
     ) -> DbResult<()> {
-        let tx = conn.unchecked_transaction()?;
-        let fid = file_id.as_u32();
+        let graph = FileGraphBatchItem {
+            file_id,
+            symbols,
+            calls,
+            imports,
+        };
+        Self::replace_file_graphs_on(conn, std::slice::from_ref(&graph))
+    }
 
+    /// Replaces graph data for many files in one transaction.
+    pub fn replace_file_graphs_on(
+        conn: &rusqlite::Connection,
+        graphs: &[FileGraphBatchItem<'_>],
+    ) -> DbResult<()> {
+        if graphs.is_empty() {
+            return Ok(());
+        }
+
+        super::with_transaction(conn, || Self::replace_file_graphs_no_tx(conn, graphs))
+    }
+
+    fn replace_file_graphs_no_tx(
+        conn: &rusqlite::Connection,
+        graphs: &[FileGraphBatchItem<'_>],
+    ) -> DbResult<()> {
+        let file_ids: Vec<u32> = graphs.iter().map(|graph| graph.file_id.as_u32()).collect();
         // Clear dependent rows first so this works correctly for both legacy
         // v4 databases without foreign keys and newer schemas with cascades.
-        tx.execute("DELETE FROM embeddings WHERE file_id = ?1", params![fid])?;
-        tx.execute("DELETE FROM edges WHERE file_id = ?1", params![fid])?;
-        tx.execute("DELETE FROM symbols WHERE file_id = ?1", params![fid])?;
+        delete_graph_rows_for_file_ids(
+            conn,
+            "DELETE FROM embeddings WHERE file_id IN ({})",
+            &file_ids,
+        )?;
+        delete_graph_rows_for_file_ids(conn, "DELETE FROM edges WHERE file_id IN ({})", &file_ids)?;
+        delete_graph_rows_for_file_ids(
+            conn,
+            "DELETE FROM symbols WHERE file_id IN ({})",
+            &file_ids,
+        )?;
 
-        // Insert symbols, remembering (symbol_id, start_byte, end_byte) so we
-        // can attribute call sites to their enclosing definition.
-        let mut ranges: Vec<(i64, usize, usize)> = Vec::with_capacity(symbols.len());
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO symbols
-                 (file_id, name, kind, start_line, end_line, start_byte, end_byte)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )?;
-            for s in symbols {
-                stmt.execute(params![
+        let mut insert_symbol = conn.prepare_cached(
+            "INSERT INTO symbols
+             (file_id, name, kind, start_line, end_line, start_byte, end_byte)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+        let mut insert_edge = conn.prepare_cached(
+            "INSERT INTO edges (src_symbol, dst_name, kind, file_id)
+             VALUES (?1, ?2, ?3, ?4)",
+        )?;
+
+        for graph in graphs {
+            let fid = graph.file_id.as_u32();
+
+            // Insert symbols, remembering (symbol_id, start_byte, end_byte) so
+            // we can attribute call sites to their enclosing definition.
+            let mut ranges: Vec<(i64, usize, usize)> = Vec::with_capacity(graph.symbols.len());
+            for s in graph.symbols {
+                insert_symbol.execute(params![
                     fid,
-                    s.name,
-                    s.kind,
+                    &s.name,
+                    &s.kind,
                     s.start_line as i64,
                     s.end_line as i64,
                     s.start_byte as i64,
                     s.end_byte as i64,
                 ])?;
-                let id = tx.last_insert_rowid();
+                let id = conn.last_insert_rowid();
                 ranges.push((id, s.start_byte, s.end_byte));
             }
-        }
 
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO edges (src_symbol, dst_name, kind, file_id)
-                 VALUES (?1, ?2, ?3, ?4)",
-            )?;
-            for c in calls {
+            let mut seen_calls: HashSet<(i64, &str)> = HashSet::new();
+            for c in graph.calls {
                 if let Some(src) = innermost(&ranges, c.byte) {
-                    stmt.execute(params![src, c.name, "CALLS", fid])?;
+                    if seen_calls.insert((src, c.name.as_str())) {
+                        insert_edge.execute(params![src, &c.name, "CALLS", fid])?;
+                    }
                 }
             }
-            for m in imports {
-                stmt.execute(params![Option::<i64>::None, m, "IMPORTS", fid])?;
+            let mut seen_imports: HashSet<&str> = HashSet::new();
+            for m in graph.imports {
+                if seen_imports.insert(m.as_str()) {
+                    insert_edge.execute(params![Option::<i64>::None, m, "IMPORTS", fid])?;
+                }
             }
         }
 
-        tx.commit()?;
         Ok(())
     }
 
@@ -134,7 +182,7 @@ impl Database {
     /// no symbols.
     pub fn file_symbol_ids(&self, file_id: FileId) -> DbResult<Vec<(i64, String, String)>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT symbol_id, name, kind FROM symbols WHERE file_id = ?1 ORDER BY symbol_id",
         )?;
         let rows = stmt
@@ -155,7 +203,7 @@ impl Database {
     pub fn all_embeddings(&self) -> DbResult<Vec<(i64, u32, Vec<f32>)>> {
         use crate::services::semantic::decode;
         let conn = self.conn()?;
-        let mut stmt = conn.prepare("SELECT symbol_id, file_id, vec FROM embeddings")?;
+        let mut stmt = conn.prepare_cached("SELECT symbol_id, file_id, vec FROM embeddings")?;
         let rows = stmt
             .query_map([], |r| {
                 let blob: Vec<u8> = r.get(2)?;
@@ -217,47 +265,155 @@ impl Database {
 
     /// Symbols that call `name` (direct callers).
     pub fn callers(&self, name: &str) -> DbResult<Vec<GraphSymbol>> {
+        self.callers_limited(name, usize::MAX)
+    }
+
+    /// Symbols that call `name`, capped to `limit` rows.
+    pub fn callers_limited(&self, name: &str, limit: usize) -> DbResult<Vec<GraphSymbol>> {
         self.query_symbols(
             "SELECT DISTINCT s.name, s.kind, f.path, s.start_line, s.end_line
              FROM edges e
              JOIN symbols s ON s.symbol_id = e.src_symbol
              JOIN files f ON f.file_id = s.file_id
              WHERE e.kind = 'CALLS' AND e.dst_name = ?1
-             ORDER BY f.path, s.start_line",
-            params![name],
+             ORDER BY f.path, s.start_line
+             LIMIT ?2",
+            params![name, limit_param(limit)],
         )
     }
 
     /// Names called by any definition named `name`, resolved to definitions
     /// when they exist in the index. Returns `(callee_name, Option<def>)`.
     pub fn callees(&self, name: &str) -> DbResult<Vec<(String, Option<GraphSymbol>)>> {
-        // Collect names, then release the connection before resolving defs —
-        // symbol_defs acquires its own connection (pool may be size 1).
-        let names: Vec<String> = {
-            let conn = self.conn()?;
-            let mut stmt = conn.prepare(
-                "SELECT DISTINCT e.dst_name
-                 FROM edges e
-                 JOIN symbols s ON s.symbol_id = e.src_symbol
-                 WHERE e.kind = 'CALLS' AND s.name = ?1
-                 ORDER BY e.dst_name",
-            )?;
-            let names = stmt
-                .query_map(params![name], |r| r.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            names
-        };
+        self.query_callees_unbounded(name)
+    }
 
-        let mut out = Vec::with_capacity(names.len());
-        for n in names {
-            let def = self.symbol_defs(&n)?.into_iter().next();
-            out.push((n, def));
+    /// Names called by `name`, resolved to at most one definition each, capped
+    /// to `limit` rows.
+    pub fn callees_limited(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> DbResult<Vec<(String, Option<GraphSymbol>)>> {
+        if limit == usize::MAX {
+            return self.query_callees_unbounded(name);
         }
-        Ok(out)
+
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare_cached(
+            "WITH names AS (
+                SELECT DISTINCT e.dst_name
+                FROM edges e
+             JOIN symbols src ON src.symbol_id = e.src_symbol
+             WHERE e.kind = 'CALLS' AND src.name = ?1
+             ORDER BY e.dst_name
+             LIMIT ?2
+             ),
+             resolved AS (
+                SELECT
+                    names.dst_name AS callee_name,
+                    s.name AS def_name,
+                    s.kind,
+                    f.path,
+                    s.start_line,
+                    s.end_line,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY names.dst_name
+                        ORDER BY f.path, s.start_line
+                    ) AS rn
+                FROM names
+                LEFT JOIN symbols s ON s.name = names.dst_name
+                LEFT JOIN files f ON f.file_id = s.file_id
+             )
+             SELECT callee_name, def_name, kind, path, start_line, end_line
+             FROM resolved
+             WHERE rn = 1
+             ORDER BY callee_name",
+        )?;
+
+        let rows = stmt
+            .query_map(params![name, limit_param(limit)], |r| {
+                let callee: String = r.get(0)?;
+                let def_name: Option<String> = r.get(1)?;
+                let def = match def_name {
+                    Some(name) => Some(GraphSymbol {
+                        name,
+                        kind: r.get(2)?,
+                        path: r.get(3)?,
+                        start_line: r.get::<_, i64>(4)? as usize,
+                        end_line: r.get::<_, i64>(5)? as usize,
+                    }),
+                    None => None,
+                };
+                Ok((callee, def))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn query_callees_unbounded(&self, name: &str) -> DbResult<Vec<(String, Option<GraphSymbol>)>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare_cached(
+            "WITH names AS (
+                SELECT DISTINCT e.dst_name
+                FROM edges e
+                JOIN symbols src ON src.symbol_id = e.src_symbol
+                WHERE e.kind = 'CALLS' AND src.name = ?1
+             ),
+             resolved AS (
+                SELECT
+                    names.dst_name AS callee_name,
+                    s.name AS def_name,
+                    s.kind,
+                    f.path,
+                    s.start_line,
+                    s.end_line,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY names.dst_name
+                        ORDER BY f.path, s.start_line
+                    ) AS rn
+                FROM names
+                LEFT JOIN symbols s ON s.name = names.dst_name
+                LEFT JOIN files f ON f.file_id = s.file_id
+             )
+             SELECT callee_name, def_name, kind, path, start_line, end_line
+             FROM resolved
+             WHERE rn = 1
+             ORDER BY callee_name",
+        )?;
+
+        let rows = stmt
+            .query_map(params![name], |r| {
+                let callee: String = r.get(0)?;
+                let def_name: Option<String> = r.get(1)?;
+                let def = match def_name {
+                    Some(name) => Some(GraphSymbol {
+                        name,
+                        kind: r.get(2)?,
+                        path: r.get(3)?,
+                        start_line: r.get::<_, i64>(4)? as usize,
+                        end_line: r.get::<_, i64>(5)? as usize,
+                    }),
+                    None => None,
+                };
+                Ok((callee, def))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Transitive callees of `name` up to `max_depth`, cycle-safe via UNION.
     pub fn call_chain(&self, name: &str, max_depth: usize) -> DbResult<Vec<GraphSymbol>> {
+        self.call_chain_limited(name, max_depth, usize::MAX)
+    }
+
+    /// Transitive callees of `name` up to `max_depth`, capped to `limit` rows.
+    pub fn call_chain_limited(
+        &self,
+        name: &str,
+        max_depth: usize,
+        limit: usize,
+    ) -> DbResult<Vec<GraphSymbol>> {
         self.query_symbols(
             "WITH RECURSIVE chain(sym, depth) AS (
                 SELECT symbol_id, 0 FROM symbols WHERE name = ?1
@@ -273,38 +429,52 @@ impl Database {
              JOIN symbols s ON s.symbol_id = chain.sym
              JOIN files f ON f.file_id = s.file_id
              WHERE chain.depth > 0
-             ORDER BY f.path, s.start_line",
-            params![name, max_depth as i64],
+             ORDER BY f.path, s.start_line
+             LIMIT ?3",
+            params![name, max_depth as i64, limit_param(limit)],
         )
     }
 
     /// Modules imported by the file at `path`.
     pub fn imports_of(&self, path: &str) -> DbResult<Vec<String>> {
+        self.imports_of_limited(path, usize::MAX)
+    }
+
+    /// Modules imported by the file at `path`, capped to `limit` rows.
+    pub fn imports_of_limited(&self, path: &str, limit: usize) -> DbResult<Vec<String>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT DISTINCT e.dst_name
              FROM edges e JOIN files f ON f.file_id = e.file_id
              WHERE e.kind = 'IMPORTS' AND f.path = ?1
-             ORDER BY e.dst_name",
+             ORDER BY e.dst_name
+             LIMIT ?2",
         )?;
         let rows = stmt
-            .query_map(params![path], |r| r.get::<_, String>(0))?
+            .query_map(params![path, limit_param(limit)], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
 
     /// File paths that import a module whose name contains `module`.
     pub fn dependents_of(&self, module: &str) -> DbResult<Vec<String>> {
+        self.dependents_of_limited(module, usize::MAX)
+    }
+
+    /// File paths that import a module whose name contains `module`, capped to
+    /// `limit` rows.
+    pub fn dependents_of_limited(&self, module: &str, limit: usize) -> DbResult<Vec<String>> {
         let conn = self.conn()?;
         let like = format!("%{}%", escape_like(module));
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT DISTINCT f.path
              FROM edges e JOIN files f ON f.file_id = e.file_id
              WHERE e.kind = 'IMPORTS' AND e.dst_name LIKE ?1 ESCAPE '\\'
-             ORDER BY f.path",
+             ORDER BY f.path
+             LIMIT ?2",
         )?;
         let rows = stmt
-            .query_map(params![like], |r| r.get::<_, String>(0))?
+            .query_map(params![like, limit_param(limit)], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
@@ -315,7 +485,7 @@ impl Database {
         params: impl rusqlite::Params,
     ) -> DbResult<Vec<GraphSymbol>> {
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare_cached(sql)?;
         let rows = stmt
             .query_map(params, |r| {
                 Ok(GraphSymbol {
@@ -329,6 +499,20 @@ impl Database {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
+}
+
+fn delete_graph_rows_for_file_ids(
+    conn: &rusqlite::Connection,
+    sql_template: &str,
+    file_ids: &[u32],
+) -> DbResult<()> {
+    for chunk in file_ids.chunks(GRAPH_DELETE_FILE_ID_CHUNK) {
+        let placeholders: Vec<String> = (1..=chunk.len()).map(|i| format!("?{i}")).collect();
+        let sql = sql_template.replace("{}", &placeholders.join(","));
+        let mut stmt = conn.prepare_cached(&sql)?;
+        stmt.execute(rusqlite::params_from_iter(chunk.iter()))?;
+    }
+    Ok(())
 }
 
 /// Innermost (smallest) symbol range containing `byte`. Returns its symbol id.
@@ -352,6 +536,10 @@ fn escape_like(value: &str) -> String {
         }
     }
     escaped
+}
+
+fn limit_param(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -441,6 +629,71 @@ mod tests {
     }
 
     #[test]
+    fn callees_resolve_first_definition_and_keep_unresolved() {
+        let db = db();
+        let caller = db
+            .upsert_file("caller.rs", "fn caller() { target(); missing(); }", 1)
+            .unwrap();
+        let target_z = db.upsert_file("z_target.rs", "fn target() {}", 2).unwrap();
+        let target_a = db.upsert_file("a_target.rs", "fn target() {}", 3).unwrap();
+
+        db.replace_file_graph(
+            caller,
+            &[SymbolRow {
+                name: "caller".into(),
+                kind: "fn".into(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: 0,
+                end_byte: 36,
+            }],
+            &[
+                RawCall {
+                    name: "target".into(),
+                    byte: 14,
+                },
+                RawCall {
+                    name: "missing".into(),
+                    byte: 24,
+                },
+            ],
+            &[],
+        )
+        .unwrap();
+        for file_id in [target_z, target_a] {
+            db.replace_file_graph(
+                file_id,
+                &[SymbolRow {
+                    name: "target".into(),
+                    kind: "fn".into(),
+                    start_line: 1,
+                    end_line: 1,
+                    start_byte: 0,
+                    end_byte: 14,
+                }],
+                &[],
+                &[],
+            )
+            .unwrap();
+        }
+
+        let callees = db.callees("caller").unwrap();
+        assert_eq!(callees.len(), 2);
+        assert_eq!(callees[0].0, "missing");
+        assert!(callees[0].1.is_none(), "unresolved callee should remain");
+        assert_eq!(callees[1].0, "target");
+        assert_eq!(
+            callees[1].1.as_ref().map(|s| s.path.as_str()),
+            Some("a_target.rs"),
+            "first definition should preserve symbol_defs path/start_line ordering"
+        );
+
+        let limited = db.callees_limited("caller", 1).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].0, "missing");
+    }
+
+    #[test]
     fn reindex_replaces_edges() {
         let db = db();
         let f = db.upsert_file("a.rs", "x", 1).unwrap();
@@ -482,6 +735,102 @@ mod tests {
         .unwrap();
         assert!(db.callers("old").unwrap().is_empty(), "old edge gone");
         assert_eq!(db.callers("new").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn batch_replaces_graphs_for_multiple_files() {
+        let db = db();
+        let fa = db
+            .upsert_file("a.rs", "fn caller() { target(); }", 1)
+            .unwrap();
+        let fb = db.upsert_file("b.rs", "fn target() {}", 2).unwrap();
+
+        let caller_symbols = [SymbolRow {
+            name: "caller".into(),
+            kind: "fn".into(),
+            start_line: 1,
+            end_line: 1,
+            start_byte: 0,
+            end_byte: 25,
+        }];
+        let caller_calls = [RawCall {
+            name: "target".into(),
+            byte: 14,
+        }];
+        let caller_imports = vec!["std::fs".to_string()];
+        let target_symbols = [SymbolRow {
+            name: "target".into(),
+            kind: "fn".into(),
+            start_line: 1,
+            end_line: 1,
+            start_byte: 0,
+            end_byte: 14,
+        }];
+
+        {
+            let conn = db.conn().unwrap();
+            Database::replace_file_graphs_on(
+                &conn,
+                &[
+                    FileGraphBatchItem {
+                        file_id: fa,
+                        symbols: &caller_symbols,
+                        calls: &caller_calls,
+                        imports: &caller_imports,
+                    },
+                    FileGraphBatchItem {
+                        file_id: fb,
+                        symbols: &target_symbols,
+                        calls: &[],
+                        imports: &[],
+                    },
+                ],
+            )
+            .unwrap();
+        }
+
+        assert_eq!(db.callers("target").unwrap()[0].name, "caller");
+        assert_eq!(db.imports_of("a.rs").unwrap(), vec!["std::fs".to_string()]);
+        assert_eq!(graph_row_counts(&db), (2, 2, 0));
+    }
+
+    #[test]
+    fn repeated_graph_edges_are_stored_once_per_file() {
+        let db = db();
+        let f = db
+            .upsert_file("a.rs", "fn caller() { target(); target(); }", 1)
+            .unwrap();
+        db.replace_file_graph(
+            f,
+            &[SymbolRow {
+                name: "caller".into(),
+                kind: "fn".into(),
+                start_line: 1,
+                end_line: 1,
+                start_byte: 0,
+                end_byte: 35,
+            }],
+            &[
+                RawCall {
+                    name: "target".into(),
+                    byte: 14,
+                },
+                RawCall {
+                    name: "target".into(),
+                    byte: 24,
+                },
+            ],
+            &["std::io".into(), "std::io".into()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            graph_row_counts(&db),
+            (1, 2, 0),
+            "one CALLS edge and one IMPORTS edge should be stored"
+        );
+        assert_eq!(db.callers("target").unwrap().len(), 1);
+        assert_eq!(db.imports_of("a.rs").unwrap(), vec!["std::io".to_string()]);
     }
 
     #[test]

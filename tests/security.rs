@@ -295,6 +295,28 @@ fn test_diff_tool_blocks_sensitive_files() {
     assert!(result.is_err(), "Should block .env.production in file2");
 }
 
+#[test]
+fn test_graph_imports_blocks_sensitive_files() {
+    let (_dir, service, _indexer) = setup_test_services();
+
+    for path in [".env", ".env.production", "credentials.json"] {
+        let result = execute_graph(
+            &service,
+            GraphInput {
+                relation: "imports".to_string(),
+                name: path.to_string(),
+                depth: 5,
+                limit: 100,
+            },
+        );
+        assert!(result.is_err(), "Should block graph imports path: {path}");
+        assert!(
+            result.unwrap_err().to_string().contains("sensitive"),
+            "Error should mention sensitive file for graph imports path: {path}"
+        );
+    }
+}
+
 // =============================================================================
 // Null Byte Injection Tests
 // =============================================================================
@@ -506,6 +528,19 @@ fn test_search_tool_blocks_redos_patterns() {
         },
     );
     assert!(result.is_err(), "Should block (.+)+ pattern");
+
+    let result = execute_search(
+        &service,
+        SearchInput {
+            query: "(a+)+".to_string(),
+            limit: 10,
+            mode: SearchMode::Combined,
+        },
+    );
+    assert!(
+        result.is_err(),
+        "Combined mode should also block (a+)+ pattern"
+    );
 }
 
 #[test]

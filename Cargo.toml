@@ -70,6 +70,17 @@ regex = "1"
 
 # Regex AST parsing for literal extraction (trigram pre-filtering)
 regex-syntax = "0.8"
+
+# Native structural search
+ast-grep-core = "0.43.0"
+ast-grep-language = { version = "0.43.0", default-features = false, features = [
+    "tree-sitter-go",
+    "tree-sitter-javascript",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-typescript",
+] }
+
 tree-sitter = "0.26.9"
 tree-sitter-rust = "0.24.2"
 tree-sitter-go = "0.25.0"

@@ -51,16 +51,41 @@ impl TrigramIndex {
 
     /// Adds a file's content to the index using sparse n-gram extraction.
     pub fn add_file(&mut self, file_id: FileId, content: &str) {
-        let keys = ngram::build_all(content.as_bytes());
-        let mut seen = AHashSet::with_capacity(keys.len());
+        let id = file_id.as_u32();
+        let new_keys: AHashSet<NgramKey> = ngram::build_all(content.as_bytes())
+            .into_iter()
+            .map(NgramKey::new)
+            .collect();
 
-        for hash in keys {
-            let key = NgramKey::new(hash);
-            self.index.entry(key).or_default().insert(file_id.as_u32());
-            self.dirty.insert(key);
-            seen.insert(key);
+        if let Some(old_keys) = self.reverse.remove(&file_id) {
+            let old_set: AHashSet<NgramKey> = old_keys.iter().copied().collect();
+
+            for key in &old_keys {
+                if new_keys.contains(key) {
+                    continue;
+                }
+                if let Some(bitmap) = self.index.get_mut(key) {
+                    if bitmap.remove(id) {
+                        self.dirty.insert(*key);
+                    }
+                }
+            }
+
+            for &key in &new_keys {
+                if old_set.contains(&key) {
+                    continue;
+                }
+                self.index.entry(key).or_default().insert(id);
+                self.dirty.insert(key);
+            }
+        } else {
+            for &key in &new_keys {
+                self.index.entry(key).or_default().insert(id);
+                self.dirty.insert(key);
+            }
         }
-        self.reverse.insert(file_id, seen.into_iter().collect());
+
+        self.reverse.insert(file_id, new_keys.into_iter().collect());
     }
 
     /// Removes a file from the index.
@@ -387,6 +412,49 @@ mod tests {
         let total_count = index.trigram_count();
         assert!(dirty_count <= total_count);
         assert!(dirty_count > 0);
+    }
+
+    #[test]
+    fn test_readding_identical_content_stays_clean() {
+        let mut index = TrigramIndex::new();
+        index.add_file(
+            FileId::new(1),
+            "authentication authorization password reset workflow",
+        );
+        let _ = index.take_dirty_entries();
+        assert_eq!(index.dirty_count(), 0);
+
+        index.add_file(
+            FileId::new(1),
+            "authentication authorization password reset workflow",
+        );
+
+        assert_eq!(index.dirty_count(), 0);
+    }
+
+    #[test]
+    fn test_small_update_only_dirties_changed_postings() {
+        let mut index = TrigramIndex::new();
+        index.add_file(
+            FileId::new(1),
+            "authentication authorization password reset workflow oldtoken",
+        );
+        let _ = index.take_dirty_entries();
+        assert_eq!(index.dirty_count(), 0);
+
+        index.add_file(
+            FileId::new(1),
+            "authentication authorization password reset workflow newtoken",
+        );
+
+        let dirty_count = index.dirty_count();
+        assert!(dirty_count > 0);
+        assert!(
+            dirty_count < index.trigram_count(),
+            "small edit should not rewrite every posting"
+        );
+        assert!(!index.search("oldtoken").unwrap().contains(1));
+        assert!(index.search("newtoken").unwrap().contains(1));
     }
 
     #[test]

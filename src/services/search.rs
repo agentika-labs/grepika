@@ -128,6 +128,10 @@ const TRIGRAM_SELECTIVITY_THRESHOLD: u64 = 80;
 /// Small repositories are faster with FTS + grep directly.
 const TRIGRAM_PREFILTER_MIN_FILES: u64 = 512;
 
+/// Maximum selective trigram candidates to search directly.
+/// Above this, the parallel walker with a filter is usually a safer trade-off.
+const TRIGRAM_DIRECT_CANDIDATE_MAX: usize = 128;
+
 /// Minimum regex literal length used for trigram prefiltering.
 /// Short regex literals such as "for" and "impl" are common in code and
 /// usually cost more to prefilter than they save.
@@ -269,6 +273,21 @@ impl Default for SearchConfig {
             multi_source_bonus: 0.1,
         }
     }
+}
+
+struct MergeInputs<'a> {
+    fts: Vec<(FileId, Score)>,
+    grep: Vec<(PathBuf, Score)>,
+    grep_matches: HashMap<Arc<Path>, Vec<GrepMatch>>,
+    trigram: Option<roaring::RoaringBitmap>,
+    limit: usize,
+    config: &'a SearchConfig,
+    intent: QueryIntent,
+}
+
+enum TrigramGrepPlan {
+    Direct(Vec<Arc<Path>>),
+    WalkFilter(HashSet<Arc<Path>>),
 }
 
 /// Bidirectional path↔FileId cache.
@@ -445,6 +464,7 @@ impl SearchService {
     }
 
     /// Batch resolves paths to FileIds, cache-first with DB fallback.
+    #[cfg(test)]
     fn get_file_ids_cached(&self, paths: &[String]) -> HashMap<String, FileId> {
         let mut result = HashMap::with_capacity(paths.len());
         let mut misses = Vec::new();
@@ -505,7 +525,9 @@ impl SearchService {
         // to a path set and restrict grep to only those files.
         let trigram_results = if self.total_files() >= TRIGRAM_PREFILTER_MIN_FILES {
             let trigram = self.trigram.read().unwrap_or_else(|e| e.into_inner());
-            if intent == QueryIntent::Regex {
+            if trigram.trigram_count() == 0 {
+                None
+            } else if intent == QueryIntent::Regex {
                 // Extract literal segments from regex pattern for smarter trigram filtering
                 let literals: Vec<_> = super::regex_literals::extract_literals(query)
                     .into_iter()
@@ -537,16 +559,19 @@ impl SearchService {
             None
         };
 
-        let file_filter = self.build_trigram_filter(&trigram_results);
-
-        let (grep_results, grep_matches) = self
-            .grep
-            .search_files_with_matches_filtered(
-                query,
-                backend_fetch_limit(candidate_limit),
-                file_filter.as_ref(),
-            )
-            .unwrap_or_default();
+        let grep_plan = self.build_trigram_grep_plan(&trigram_results);
+        let grep_limit = backend_fetch_limit(candidate_limit);
+        let (grep_results, grep_matches) = match grep_plan.as_ref() {
+            Some(TrigramGrepPlan::Direct(candidates)) => self
+                .grep
+                .search_files_with_matches_candidates(query, grep_limit, candidates)?,
+            Some(TrigramGrepPlan::WalkFilter(file_filter)) => self
+                .grep
+                .search_files_with_matches_filtered(query, grep_limit, Some(file_filter))?,
+            None => self
+                .grep
+                .search_files_with_matches_filtered(query, grep_limit, None)?,
+        };
 
         // Override weights based on intent.
         // Common case (ExactSymbol/ShortToken ~80% of queries) borrows self.config directly.
@@ -574,15 +599,15 @@ impl SearchService {
             QueryIntent::ExactSymbol | QueryIntent::ShortToken => &self.config,
         };
 
-        let mut results = self.merge_results(
-            fts_results,
-            grep_results,
+        let mut results = self.merge_results(MergeInputs {
+            fts: fts_results,
+            grep: grep_results,
             grep_matches,
-            trigram_results,
-            candidate_limit,
-            config_ref,
+            trigram: trigram_results,
+            limit: candidate_limit,
+            config: config_ref,
             intent,
-        )?;
+        })?;
 
         // Semantic re-ranking (only active under the `semantic` feature with a
         // loaded model). Natural-language queries benefit most.
@@ -691,18 +716,40 @@ impl SearchService {
     pub fn search_grep(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
         let (results, matches_by_file) = self.grep.search_files_with_matches(query, limit)?;
 
-        // Batch resolve paths to file IDs via cache
-        let path_strings: Vec<String> = results
-            .iter()
-            .map(|(p, _)| p.to_string_lossy().to_string())
-            .collect();
-        let id_map = self.get_file_ids_cached(&path_strings);
+        let mut file_ids = vec![FileId::new(0); results.len()];
+        let mut miss_indices = Vec::new();
+        let mut miss_paths = Vec::new();
+
+        if let Ok(cache) = self.path_cache.read() {
+            for (idx, (path, _)) in results.iter().enumerate() {
+                let path_str = path.to_string_lossy();
+                if let Some(&file_id) = cache.path_to_id.get(path_str.as_ref()) {
+                    file_ids[idx] = file_id;
+                } else {
+                    miss_indices.push(idx);
+                    miss_paths.push(path_str.into_owned());
+                }
+            }
+        } else {
+            for (idx, (path, _)) in results.iter().enumerate() {
+                miss_indices.push(idx);
+                miss_paths.push(path.to_string_lossy().to_string());
+            }
+        }
+
+        if !miss_paths.is_empty() {
+            let miss_ids = self.db.get_file_ids_batch(&miss_paths).unwrap_or_default();
+            for (idx, path) in miss_indices.into_iter().zip(miss_paths) {
+                if let Some(&file_id) = miss_ids.get(&path) {
+                    file_ids[idx] = file_id;
+                }
+            }
+        }
 
         let results: Vec<_> = results
             .into_iter()
-            .map(|(path, score)| {
-                let path_str = path.to_string_lossy().to_string();
-                let file_id = id_map.get(&path_str).copied().unwrap_or(FileId::new(0));
+            .zip(file_ids)
+            .map(|((path, score), file_id)| {
                 let snippets = matches_by_file
                     .get(path.as_path())
                     .map_or_else(Vec::new, |matches| snippets_from_matches(matches));
@@ -736,8 +783,15 @@ impl SearchService {
         query: &str,
         limit: usize,
     ) -> Result<HashMap<Arc<Path>, Vec<GrepMatch>>, SearchError> {
-        let (_, matches) = self.grep.search_files_with_matches(query, limit)?;
-        Ok(matches)
+        let matches = self.grep.search_parallel(query, limit)?;
+        let mut matches_by_file: HashMap<Arc<Path>, Vec<GrepMatch>> = HashMap::new();
+        for m in matches {
+            matches_by_file
+                .entry(Arc::clone(&m.path))
+                .or_default()
+                .push(m);
+        }
+        Ok(matches_by_file)
     }
 
     /// Gets the trigram index for modifications.
@@ -758,19 +812,19 @@ impl SearchService {
         self.grep.root()
     }
 
-    /// Builds a file filter from trigram results for grep pre-filtering (Phase 3).
+    /// Builds a grep execution plan from trigram results (Phase 3).
     ///
     /// Returns `None` if the bitmap is absent or matches >=80% of files
-    /// (filter overhead would exceed savings). Otherwise resolves FileIds
-    /// to paths via batch lookup.
+    /// (filter overhead would exceed savings). Small candidate sets are searched
+    /// directly; larger selective sets use the parallel walker with a filter.
     ///
     /// Uses `HashSet<Arc<Path>>` to avoid per-path heap allocations that
     /// `HashSet<PathBuf>` would incur. The grep walker's `entry.path()`
     /// returns `&Path`, which can look up via `Borrow<Path>` — zero-copy.
-    fn build_trigram_filter(
+    fn build_trigram_grep_plan(
         &self,
         trigram: &Option<roaring::RoaringBitmap>,
-    ) -> Option<HashSet<Arc<Path>>> {
+    ) -> Option<TrigramGrepPlan> {
         let bitmap = trigram.as_ref()?;
         let total = self.total_files();
         if total == 0 {
@@ -788,15 +842,20 @@ impl SearchService {
         let file_ids: Vec<FileId> = bitmap.iter().map(FileId::new).collect();
         let path_map = self.get_paths_cached(&file_ids);
 
-        let filter: HashSet<Arc<Path>> = path_map
-            .into_values()
-            .map(|s| Arc::from(Path::new(&*s)))
+        let paths: Vec<Arc<Path>> = file_ids
+            .iter()
+            .filter_map(|file_id| path_map.get(file_id))
+            .map(|s| Arc::from(Path::new(s.as_ref())))
             .collect();
 
-        if filter.is_empty() {
-            None
+        if paths.is_empty() {
+            return Some(TrigramGrepPlan::Direct(Vec::new()));
+        }
+
+        if paths.len() <= TRIGRAM_DIRECT_CANDIDATE_MAX {
+            Some(TrigramGrepPlan::Direct(paths))
         } else {
-            Some(filter)
+            Some(TrigramGrepPlan::WalkFilter(paths.into_iter().collect()))
         }
     }
 
@@ -811,16 +870,17 @@ impl SearchService {
     /// - Cached total_files: avoids DB round-trip (1C)
     /// - Reduced path conversions: index into pre-computed strings (1D)
     /// - sort_unstable_by: no allocation overhead (1E)
-    fn merge_results(
-        &self,
-        fts: Vec<(FileId, Score)>,
-        grep: Vec<(PathBuf, Score)>,
-        grep_matches: HashMap<Arc<Path>, Vec<GrepMatch>>,
-        trigram: Option<roaring::RoaringBitmap>,
-        limit: usize,
-        config: &SearchConfig,
-        intent: QueryIntent,
-    ) -> Result<Vec<SearchResult>, SearchError> {
+    fn merge_results(&self, inputs: MergeInputs<'_>) -> Result<Vec<SearchResult>, SearchError> {
+        let MergeInputs {
+            fts,
+            grep,
+            grep_matches,
+            trigram,
+            limit,
+            config,
+            intent,
+        } = inputs;
+
         let estimated_capacity = fts.len() + grep.len();
 
         // Single accumulator: (weighted_score_sum, weight_sum, sources, path)
@@ -1379,6 +1439,41 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_in_memory_trigram_does_not_suppress_regex_grep() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let target_path = dir.path().join("file_17.rs");
+
+        for i in 0..TRIGRAM_PREFILTER_MIN_FILES as usize {
+            let path = dir.path().join(format!("file_{i}.rs"));
+            let content = if i == 17 {
+                "fn target() { let needle_empty_trigram_17 = true; }\n".to_string()
+            } else {
+                format!("fn file_{i}() {{ let common_value = {i}; }}\n")
+            };
+            fs::write(&path, &content).unwrap();
+            db.upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+                .unwrap();
+        }
+
+        let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            service.trigram_index().read().unwrap().trigram_count(),
+            0,
+            "fixture must reproduce a DB-backed service with no loaded trigram index"
+        );
+
+        let results = service
+            .search(r"needle_empty_trigram_17.*true", 10)
+            .unwrap();
+
+        assert!(
+            results.iter().any(|result| result.path == target_path),
+            "regex grep should still run when the in-memory trigram index is empty"
+        );
+    }
+
+    #[test]
     fn test_trigram_index_access() {
         let (_dir, _db, service) = setup_multi_file_env();
 
@@ -1488,5 +1583,193 @@ mod tests {
                 file_id
             );
         }
+    }
+
+    #[test]
+    fn test_selective_trigram_builds_direct_grep_plan() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+        let target_index = 17usize;
+        let target_path = dir.path().join(format!("file_{target_index}.rs"));
+
+        {
+            let mut trigram_guard = trigram.write().unwrap();
+            for i in 0..TRIGRAM_PREFILTER_MIN_FILES as usize {
+                let path = dir.path().join(format!("file_{i}.rs"));
+                let content = if i == target_index {
+                    "fn target() { let super_unique_candidate_token = true; }\n".to_string()
+                } else {
+                    format!("fn file_{i}() {{ let common_value = {i}; }}\n")
+                };
+                fs::write(&path, &content).unwrap();
+                let file_id = db
+                    .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+                    .unwrap();
+                trigram_guard.add_file(file_id, &content);
+            }
+        }
+
+        let service =
+            SearchService::with_trigram(Arc::clone(&db), dir.path().to_path_buf(), trigram)
+                .unwrap();
+        let bitmap = service
+            .trigram_index()
+            .read()
+            .unwrap()
+            .search("super_unique_candidate_token")
+            .unwrap();
+
+        match service.build_trigram_grep_plan(&Some(bitmap)) {
+            Some(TrigramGrepPlan::Direct(paths)) => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0].as_ref(), target_path.as_path());
+            }
+            _ => panic!("expected direct candidate grep plan"),
+        }
+    }
+
+    #[test]
+    fn test_direct_grep_plan_preserves_file_id_order() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+        let target_indices = [2usize, 9, 17];
+
+        {
+            let mut trigram_guard = trigram.write().unwrap();
+            for i in 0..TRIGRAM_PREFILTER_MIN_FILES as usize {
+                let path = dir.path().join(format!("file_{i}.rs"));
+                let content = if target_indices.contains(&i) {
+                    format!("fn target_{i}() {{ let ordered_direct_candidate_token = true; }}\n")
+                } else {
+                    format!("fn file_{i}() {{ let common_value = {i}; }}\n")
+                };
+                fs::write(&path, &content).unwrap();
+                let file_id = db
+                    .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+                    .unwrap();
+                trigram_guard.add_file(file_id, &content);
+            }
+        }
+
+        let service =
+            SearchService::with_trigram(Arc::clone(&db), dir.path().to_path_buf(), trigram)
+                .unwrap();
+        let bitmap = service
+            .trigram_index()
+            .read()
+            .unwrap()
+            .search("ordered_direct_candidate_token")
+            .unwrap();
+
+        match service.build_trigram_grep_plan(&Some(bitmap)) {
+            Some(TrigramGrepPlan::Direct(paths)) => {
+                let expected: Vec<PathBuf> = target_indices
+                    .iter()
+                    .map(|i| dir.path().join(format!("file_{i}.rs")))
+                    .collect();
+                let actual: Vec<&Path> = paths.iter().map(|p| p.as_ref()).collect();
+                let expected: Vec<&Path> = expected.iter().map(PathBuf::as_path).collect();
+                assert_eq!(actual, expected);
+            }
+            _ => panic!("expected direct candidate grep plan"),
+        }
+    }
+
+    #[test]
+    fn test_large_selective_trigram_uses_walk_filter_plan() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+        let matching_files = TRIGRAM_DIRECT_CANDIDATE_MAX + 32;
+
+        {
+            let mut trigram_guard = trigram.write().unwrap();
+            for i in 0..TRIGRAM_PREFILTER_MIN_FILES as usize {
+                let path = dir.path().join(format!("file_{i}.rs"));
+                let content = if i < matching_files {
+                    format!("fn matched_{i}() {{ let medium_selective_token = {i}; }}\n")
+                } else {
+                    format!("fn file_{i}() {{ let common_value = {i}; }}\n")
+                };
+                fs::write(&path, &content).unwrap();
+                let file_id = db
+                    .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+                    .unwrap();
+                trigram_guard.add_file(file_id, &content);
+            }
+        }
+
+        let service =
+            SearchService::with_trigram(Arc::clone(&db), dir.path().to_path_buf(), trigram)
+                .unwrap();
+        let bitmap = service
+            .trigram_index()
+            .read()
+            .unwrap()
+            .search("medium_selective_token")
+            .unwrap();
+
+        match service.build_trigram_grep_plan(&Some(bitmap)) {
+            Some(TrigramGrepPlan::WalkFilter(filter)) => {
+                assert_eq!(filter.len(), matching_files);
+            }
+            _ => panic!("expected filtered walker grep plan"),
+        }
+    }
+
+    #[test]
+    fn test_empty_trigram_bitmap_builds_empty_direct_plan() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let service = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).unwrap();
+        service
+            .cached_total_files
+            .store(TRIGRAM_PREFILTER_MIN_FILES, Ordering::Relaxed);
+
+        match service.build_trigram_grep_plan(&Some(roaring::RoaringBitmap::new())) {
+            Some(TrigramGrepPlan::Direct(paths)) => assert!(paths.is_empty()),
+            _ => panic!("expected empty direct candidate plan"),
+        }
+    }
+
+    #[test]
+    fn test_optional_regex_literal_does_not_filter_valid_matches() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+        let target_path = dir.path().join("password_only.rs");
+
+        {
+            let mut trigram_guard = trigram.write().unwrap();
+            for i in 0..TRIGRAM_PREFILTER_MIN_FILES as usize {
+                let path = if i == 0 {
+                    target_path.clone()
+                } else {
+                    dir.path().join(format!("file_{i}.rs"))
+                };
+                let content = match i {
+                    0 => "fn password_only() { let password = true; }\n".to_string(),
+                    1 => "fn password_reset() { let passwordreset = true; }\n".to_string(),
+                    _ => format!("fn file_{i}() {{ let common_value = {i}; }}\n"),
+                };
+                fs::write(&path, &content).unwrap();
+                let file_id = db
+                    .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+                    .unwrap();
+                trigram_guard.add_file(file_id, &content);
+            }
+        }
+
+        let service =
+            SearchService::with_trigram(Arc::clone(&db), dir.path().to_path_buf(), trigram)
+                .unwrap();
+        let results = service.search(r"password(reset)?", 20).unwrap();
+
+        assert!(
+            results.iter().any(|result| result.path == target_path),
+            "optional regex suffix must not be treated as a mandatory trigram"
+        );
     }
 }

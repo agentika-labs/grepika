@@ -264,6 +264,23 @@ fn test_search_tool_respects_limit() {
     assert!(result.results.len() <= 2);
 }
 
+#[test]
+fn test_search_tool_zero_limit_uses_default() {
+    let (_dir, search, _indexer) = setup_test_services();
+
+    let input = SearchInput {
+        query: "fn".to_string(),
+        limit: 0,
+        mode: SearchMode::Combined,
+    };
+
+    let result = execute_search(&search, input).unwrap();
+
+    assert!(!result.results.is_empty());
+    assert!(result.results.len() <= 20);
+    assert!(result.hint.is_none());
+}
+
 // ============================================================================
 // Get Tool Tests
 // ============================================================================
@@ -474,6 +491,29 @@ fn test_graph_tool_respects_limit() {
 
     assert_eq!(output.modules.len(), 1);
     assert!(output.truncated, "graph output should report truncation");
+}
+
+#[test]
+fn test_graph_tool_imports_dot_slash_path_fallback() {
+    let (_dir, search, indexer) = setup_test_services();
+    indexer.index(None, true).unwrap();
+
+    let output = execute_graph(
+        &search,
+        GraphInput {
+            relation: "imports".to_string(),
+            name: "./auth.rs".to_string(),
+            depth: 5,
+            limit: 10,
+        },
+    )
+    .unwrap();
+
+    assert!(
+        output.modules.iter().any(|m| m.contains("Config")),
+        "./auth.rs should resolve through graph import path fallback, got {:?}",
+        output.modules
+    );
 }
 
 #[test]
@@ -709,6 +749,28 @@ fn test_refs_tool_respects_limit() {
     let result = execute_refs(&search, input).unwrap();
 
     assert!(result.references.len() <= 3);
+}
+
+#[test]
+fn test_refs_tool_returns_multiple_refs_from_same_file() {
+    let (_dir, search, _indexer) = setup_test_services();
+
+    let input = RefsInput {
+        symbol: "credentials".to_string(),
+        limit: 10,
+    };
+
+    let result = execute_refs(&search, input).unwrap();
+    let auth_refs = result
+        .references
+        .iter()
+        .filter(|reference| reference.path.ends_with("auth.rs"))
+        .count();
+
+    assert!(
+        auth_refs >= 2,
+        "refs should preserve multiple raw grep matches from auth.rs"
+    );
 }
 
 #[test]

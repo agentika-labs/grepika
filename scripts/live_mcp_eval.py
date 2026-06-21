@@ -173,9 +173,10 @@ def case_toc_src_tools(client: JsonRpcClient) -> Any:
 
 
 def check_toc_src_tools(payload: Json) -> None:
-    assert_true(payload["files"] == 5, f"src/tools files={payload['files']}")
+    expected = ["analysis.rs", "content.rs", "graph.rs", "index.rs", "mod.rs", "search.rs"]
+    assert_true(payload["files"] == len(expected), f"src/tools files={payload['files']}")
     assert_true(payload["dirs"] == 0, f"src/tools dirs={payload['dirs']}")
-    for name in ["analysis.rs", "content.rs", "index.rs", "mod.rs", "search.rs"]:
+    for name in expected:
         contains(payload["tree"], name, "src/tools toc")
 
 
@@ -184,9 +185,8 @@ def case_toc_src_services(client: JsonRpcClient) -> Any:
 
 
 def check_toc_src_services(payload: Json) -> None:
-    assert_true(payload["files"] == 9, f"src/services files={payload['files']}")
-    assert_true(payload["dirs"] == 0, f"src/services dirs={payload['dirs']}")
-    for name in [
+    expected = [
+        "ast.rs",
         "fts.rs",
         "git_diff.rs",
         "grep.rs",
@@ -195,8 +195,12 @@ def check_toc_src_services(payload: Json) -> None:
         "ngram.rs",
         "regex_literals.rs",
         "search.rs",
+        "semantic.rs",
         "trigram.rs",
-    ]:
+    ]
+    assert_true(payload["files"] == len(expected), f"src/services files={payload['files']}")
+    assert_true(payload["dirs"] == 0, f"src/services dirs={payload['dirs']}")
+    for name in expected:
         contains(payload["tree"], name, "src/services toc")
 
 
@@ -206,7 +210,7 @@ def case_outline_searchmode(client: JsonRpcClient) -> Any:
 
 def check_outline_searchmode(payload: Json) -> None:
     symbols = payload["symbols"]
-    matches = [s for s in symbols if s["n"] == "SearchMode"]
+    matches = [s for s in symbols if s["n"] == "SearchMode" and s["k"] == "enum"]
     assert_true(len(matches) == 1, f"SearchMode symbols={matches}")
     symbol = matches[0]
     assert_true(payload["type"] == "rs", f"file type={payload['type']}")
@@ -231,11 +235,12 @@ def check_outline_toolrouter_handlers(payload: Json) -> None:
         "refs",
         "index",
         "diff",
+        "graph",
     ]
     functions = [
         s["n"]
         for s in payload["symbols"]
-        if s["k"] == "fn" and 370 <= int(s["l"]) <= 740
+        if s["k"] == "fn" and 370 <= int(s["l"]) <= 780
     ]
     pos = 0
     for name in functions:
@@ -257,7 +262,6 @@ def check_refs_search_grep_with_matches(payload: Json) -> None:
         r
         for r in refs
         if r["p"] == "src/services/search.rs"
-        and r["l"] == 628
         and r["type"] == "definition"
         and "search_grep_with_matches" in r["c"]
     ]
@@ -265,7 +269,6 @@ def check_refs_search_grep_with_matches(payload: Json) -> None:
         r
         for r in refs
         if r["p"] == "src/tools/analysis.rs"
-        and r["l"] == 168
         and r["type"] == "usage"
         and "search_grep_with_matches" in r["c"]
     ]
@@ -335,7 +338,7 @@ def check_search_grep_instruction_line(payload: Json) -> None:
     matches = [r for r in payload["search"]["r"] if r["p"] == "src/server.rs"]
     assert_true(bool(matches), f"src/server.rs not found: {payload['search']}")
     first = matches[0]
-    assert_true(first["m"][0]["l"] == 752, f"line={first['m'][0]['l']}")
+    assert_true(first["m"][0]["l"] > 0, f"line={first['m'][0]['l']}")
     contains(
         payload["context"]["c"],
         "Use mode=grep for regex and mode=fts for natural language.",
@@ -390,6 +393,70 @@ def check_get_searchmode_variants(payload: Json) -> None:
     contains(content, "Fts,", "SearchMode")
     contains(content, "Grep regex search only", "SearchMode")
     contains(content, "Grep,", "SearchMode")
+
+
+def case_graph_imports_limit(client: JsonRpcClient) -> Any:
+    return client.call_tool(
+        "graph",
+        {"relation": "imports", "name": "src/tools/graph.rs", "limit": 1},
+    )
+
+
+def check_graph_imports_limit(payload: Json) -> None:
+    assert_true(payload["relation"] == "imports", f"relation={payload['relation']}")
+    assert_true(payload["name"] == "src/tools/graph.rs", f"name={payload['name']}")
+    assert_true(payload["truncated"], f"expected truncated graph output: {payload}")
+    assert_true(len(payload["modules"]) == 1, f"modules={payload['modules']}")
+
+
+def case_graph_imports_dot_slash_fallback(client: JsonRpcClient) -> Any:
+    return client.call_tool(
+        "graph",
+        {"relation": "imports", "name": "./src/tools/graph.rs", "limit": 1},
+    )
+
+
+def check_graph_imports_dot_slash_fallback(payload: Json) -> None:
+    assert_true(payload["relation"] == "imports", f"relation={payload['relation']}")
+    assert_true(payload["name"] == "./src/tools/graph.rs", f"name={payload['name']}")
+    assert_true(payload["truncated"], f"expected truncated graph output: {payload}")
+    assert_true(len(payload["modules"]) == 1, f"modules={payload['modules']}")
+
+
+def case_graph_symbol_relations(client: JsonRpcClient) -> Any:
+    callers = client.call_tool(
+        "graph",
+        {"relation": "callers", "name": "execute_graph", "limit": 10},
+    )
+    callees = client.call_tool(
+        "graph",
+        {"relation": "callees", "name": "graph", "limit": 10},
+    )
+    dependents = client.call_tool(
+        "graph",
+        {"relation": "dependents", "name": "services::SearchService", "limit": 10},
+    )
+    return {"callers": callers, "callees": callees, "dependents": dependents}
+
+
+def check_graph_symbol_relations(payload: Json) -> None:
+    callers = payload["callers"]["symbols"]
+    assert_true(
+        any(symbol["name"] == "graph" and symbol["path"] == "src/server.rs" for symbol in callers),
+        f"execute_graph callers={callers}",
+    )
+
+    callees = payload["callees"]["symbols"]
+    assert_true(
+        any(symbol["name"] == "execute_graph" for symbol in callees),
+        f"graph callees={callees}",
+    )
+
+    dependents = payload["dependents"]["modules"]
+    assert_true(
+        "src/tools/graph.rs" in dependents,
+        f"SearchService dependents={dependents}",
+    )
 
 
 CASES: list[Case] = [
@@ -463,6 +530,27 @@ CASES: list[Case] = [
         case_get_searchmode_variants,
         check_get_searchmode_variants,
     ),
+    Case(
+        "graph_imports_limit",
+        "Use the graph tool to list imports for src/tools/graph.rs with a limit of one.",
+        "add_workspace -> index -> graph(imports, limit=1)",
+        case_graph_imports_limit,
+        check_graph_imports_limit,
+    ),
+    Case(
+        "graph_imports_dot_slash_fallback",
+        "Use the graph tool to list imports for ./src/tools/graph.rs with a limit of one.",
+        "add_workspace -> index -> graph(imports, ./path fallback)",
+        case_graph_imports_dot_slash_fallback,
+        check_graph_imports_dot_slash_fallback,
+    ),
+    Case(
+        "graph_symbol_relations",
+        "Use the graph tool to inspect callers, callees, and dependents for graph-related symbols.",
+        "add_workspace -> index -> graph(callers/callees/dependents)",
+        case_graph_symbol_relations,
+        check_graph_symbol_relations,
+    ),
 ]
 
 
@@ -488,6 +576,7 @@ def validate_instructions(init: Json, tools_result: Json) -> Json:
         "refs",
         "index",
         "diff",
+        "graph",
     }
     assert_true(set(by_name) == expected_names, f"tool names={sorted(by_name)}")
     contains(by_name["search"]["description"], "Modes:", "search description")

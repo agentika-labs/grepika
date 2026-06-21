@@ -10,12 +10,15 @@
 //! View reports: `open target/criterion/report/index.html`
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use grepika::db::Database;
-use grepika::services::{Indexer, SearchService, TrigramIndex};
+use grepika::db::{Database, FileGraphBatchItem, SymbolRow};
+use grepika::services::ast::RawCall;
+use grepika::services::{GrepService, Indexer, SearchService, TrigramIndex};
 use grepika::types::{FileId, Score};
+use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tempfile::TempDir;
 
 // ============================================================================
@@ -154,6 +157,51 @@ fn bench_trigram_add_file(c: &mut Criterion) {
             },
         );
     }
+
+    group.finish();
+}
+
+/// Benchmarks updating an existing file in the trigram index.
+///
+/// Incremental indexing frequently revisits files that changed only slightly,
+/// so unchanged n-gram postings should not be dirtied or rewritten.
+fn bench_trigram_update_file(c: &mut Criterion) {
+    let mut group = c.benchmark_group("trigram_update_file");
+
+    let original = "authentication authorization password reset workflow ".repeat(40);
+    let edited = format!("{original}newtoken");
+
+    group.bench_function("readd_identical", |b| {
+        b.iter_batched(
+            || {
+                let mut index = TrigramIndex::new();
+                index.add_file(FileId::new(1), &original);
+                let _ = index.take_dirty_entries();
+                index
+            },
+            |mut index| {
+                index.add_file(FileId::new(1), black_box(&original));
+                black_box(index.dirty_count())
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("tiny_edit", |b| {
+        b.iter_batched(
+            || {
+                let mut index = TrigramIndex::new();
+                index.add_file(FileId::new(1), &original);
+                let _ = index.take_dirty_entries();
+                index
+            },
+            |mut index| {
+                index.add_file(FileId::new(1), black_box(&edited));
+                black_box(index.dirty_count())
+            },
+            criterion::BatchSize::SmallInput,
+        )
+    });
 
     group.finish();
 }
@@ -351,7 +399,9 @@ fn bench_fts_query_complexity(c: &mut Criterion) {
 ///
 /// Each file contains realistic Rust code with common patterns like
 /// `authenticate`, `Config`, and `Handler` — used by search benchmarks.
-fn setup_bench_files(dir: &std::path::Path, db: &Database, count: usize) {
+fn setup_bench_files(dir: &std::path::Path, db: &Database, count: usize) -> TrigramIndex {
+    let mut trigram = TrigramIndex::new();
+
     for i in 0..count {
         let content = format!(
             r#"
@@ -377,14 +427,76 @@ fn setup_bench_files(dir: &std::path::Path, db: &Database, count: usize) {
         );
 
         let filename = format!("file_{}.rs", i);
-        fs::write(dir.join(&filename), &content).expect("Failed to write file");
-        db.upsert_file(
-            dir.join(&filename).to_string_lossy().as_ref(),
-            &content,
-            i as u64,
-        )
-        .expect("Failed to insert file");
+        let path = dir.join(&filename);
+        fs::write(&path, &content).expect("Failed to write file");
+        let file_id = db
+            .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+            .expect("Failed to insert file");
+        trigram.add_file(file_id, &content);
     }
+
+    trigram
+}
+
+fn bench_search_service(dir: &std::path::Path, db: Arc<Database>, count: usize) -> SearchService {
+    let trigram = Arc::new(RwLock::new(setup_bench_files(dir, &db, count)));
+    SearchService::with_trigram(db, dir.to_path_buf(), trigram)
+        .expect("Failed to create search service")
+}
+
+fn assert_nonempty_search(search: &SearchService, query: &str, limit: usize) {
+    let results = search
+        .search(query, limit)
+        .expect("combined search preflight");
+    assert!(!results.is_empty(), "combined search returned no results");
+}
+
+fn assert_nonempty_fts(search: &SearchService, query: &str, limit: usize) {
+    let results = search
+        .search_fts(query, limit)
+        .expect("fts search preflight");
+    assert!(!results.is_empty(), "fts search returned no results");
+}
+
+fn assert_nonempty_grep(search: &SearchService, query: &str, limit: usize) {
+    let results = search
+        .search_grep(query, limit)
+        .expect("grep search preflight");
+    assert!(!results.is_empty(), "grep search returned no results");
+}
+
+fn assert_direct_candidate_sources(search: &SearchService) {
+    let results = search
+        .search("unique_direct_candidate_token_1999", 20)
+        .expect("direct candidate search preflight");
+    assert!(
+        results
+            .iter()
+            .any(|result| result.sources.trigram && result.sources.grep),
+        "combined search did not include trigram+grep results"
+    );
+}
+
+fn setup_direct_candidate_files(
+    dir: &std::path::Path,
+    db: &Database,
+    count: usize,
+) -> TrigramIndex {
+    let mut trigram = TrigramIndex::new();
+    for i in 0..count {
+        let content = if i + 1 == count {
+            format!("fn target_{i}() {{ let unique_direct_candidate_token_{i} = true; }}\n")
+        } else {
+            format!("fn file_{i}() {{ let common_value = {i}; }}\n")
+        };
+        let path = dir.join(format!("file_{i}.rs"));
+        fs::write(&path, &content).expect("Failed to write file");
+        let file_id = db
+            .upsert_file(path.to_string_lossy().as_ref(), &content, i as u64)
+            .expect("Failed to insert file");
+        trigram.add_file(file_id, &content);
+    }
+    trigram
 }
 
 /// Benchmarks the full combined search pipeline at 200 files.
@@ -397,26 +509,26 @@ fn bench_combined_search(c: &mut Criterion) {
 
     let dir = TempDir::new().expect("Failed to create temp dir");
     let db = Arc::new(Database::in_memory().expect("Failed to create database"));
-    setup_bench_files(dir.path(), &db, 200);
-
-    let search = SearchService::new(Arc::clone(&db), dir.path().to_path_buf())
-        .expect("Failed to create search service");
+    let search = bench_search_service(dir.path(), Arc::clone(&db), 200);
+    assert_nonempty_search(&search, "authenticate", 20);
+    assert_nonempty_fts(&search, "authenticate", 20);
+    assert_nonempty_grep(&search, "authenticate", 20);
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("combined_200_files", |b| {
         b.iter(|| {
             // Search for common pattern
-            black_box(search.search("authenticate", 20))
+            black_box(search.search("authenticate", 20).expect("combined search"))
         })
     });
 
     // Also benchmark individual modes
     group.bench_function("fts_only_200_files", |b| {
-        b.iter(|| black_box(search.search_fts("authenticate", 20)))
+        b.iter(|| black_box(search.search_fts("authenticate", 20).expect("fts search")))
     });
 
     group.bench_function("grep_only_200_files", |b| {
-        b.iter(|| black_box(search.search_grep("authenticate", 20)))
+        b.iter(|| black_box(search.search_grep("authenticate", 20).expect("grep search")))
     });
 
     group.finish();
@@ -433,18 +545,42 @@ fn bench_combined_search_2k(c: &mut Criterion) {
 
     let dir = TempDir::new().expect("Failed to create temp dir");
     let db = Arc::new(Database::in_memory().expect("Failed to create database"));
-    setup_bench_files(dir.path(), &db, 2000);
+    let search = bench_search_service(dir.path(), Arc::clone(&db), 2000);
+    assert_nonempty_search(&search, "authenticate", 20);
+    assert_nonempty_grep(&search, "authenticate", 20);
 
-    let search = SearchService::new(Arc::clone(&db), dir.path().to_path_buf())
-        .expect("Failed to create search service");
+    let direct_dir = TempDir::new().expect("Failed to create temp dir");
+    let direct_db = Arc::new(Database::in_memory().expect("Failed to create database"));
+    let direct_trigram = Arc::new(RwLock::new(setup_direct_candidate_files(
+        direct_dir.path(),
+        &direct_db,
+        2000,
+    )));
+    let direct_search = SearchService::with_trigram(
+        Arc::clone(&direct_db),
+        direct_dir.path().to_path_buf(),
+        direct_trigram,
+    )
+    .expect("direct candidate search service");
+    assert_direct_candidate_sources(&direct_search);
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("combined_2000_files", |b| {
-        b.iter(|| black_box(search.search("authenticate", 20)))
+        b.iter(|| black_box(search.search("authenticate", 20).expect("combined search")))
+    });
+
+    group.bench_function("direct_candidate_unique_2000_files", |b| {
+        b.iter(|| {
+            black_box(
+                direct_search
+                    .search("unique_direct_candidate_token_1999", 20)
+                    .expect("direct candidate search"),
+            )
+        })
     });
 
     group.bench_function("grep_only_2000_files", |b| {
-        b.iter(|| black_box(search.search_grep("authenticate", 20)))
+        b.iter(|| black_box(search.search_grep("authenticate", 20).expect("grep search")))
     });
 
     group.finish();
@@ -522,6 +658,138 @@ fn bench_db_read(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmarks graph read queries over a wide call/import fan-out.
+fn bench_graph_queries(c: &mut Criterion) {
+    let mut group = c.benchmark_group("graph_queries");
+    group.sample_size(50);
+
+    let db = Database::in_memory().expect("graph db");
+    let caller = db
+        .upsert_file("caller.rs", "fn caller() { /* generated calls */ }", 1)
+        .expect("caller file");
+    let caller_symbol = [SymbolRow {
+        name: "caller".to_string(),
+        kind: "fn".to_string(),
+        start_line: 1,
+        end_line: 1,
+        start_byte: 0,
+        end_byte: 64,
+    }];
+    let calls: Vec<RawCall> = (0..500)
+        .map(|i| RawCall {
+            name: format!("target_{i}"),
+            byte: 14,
+        })
+        .collect();
+    Database::replace_file_graph_on(
+        &db.conn().expect("conn"),
+        caller,
+        &caller_symbol,
+        &calls,
+        &[],
+    )
+    .expect("caller graph");
+
+    for i in 0..500 {
+        let path = format!("targets/target_{i}.rs");
+        let file_id = db
+            .upsert_file(&path, &format!("fn target_{i}() {{}}"), i as u64 + 2)
+            .expect("target file");
+        let symbol = [SymbolRow {
+            name: format!("target_{i}"),
+            kind: "fn".to_string(),
+            start_line: 1,
+            end_line: 1,
+            start_byte: 0,
+            end_byte: 16,
+        }];
+        let imports = vec!["crate::shared::Thing".to_string()];
+        Database::replace_file_graph_on(&db.conn().expect("conn"), file_id, &symbol, &[], &imports)
+            .expect("target graph");
+    }
+
+    assert_eq!(db.callees("caller").expect("callees").len(), 500);
+    assert_eq!(
+        db.callees_limited("caller", 21)
+            .expect("limited callees")
+            .len(),
+        21
+    );
+    assert_eq!(
+        db.dependents_of_limited("shared::Thing", 21)
+            .expect("limited dependents")
+            .len(),
+        21
+    );
+
+    group.bench_function("callees_500", |b| {
+        b.iter(|| black_box(db.callees("caller").expect("callees")))
+    });
+    group.bench_function("callees_limited_20", |b| {
+        b.iter(|| black_box(db.callees_limited("caller", 20).expect("limited callees")))
+    });
+    group.bench_function("callers_single", |b| {
+        b.iter(|| black_box(db.callers("target_250").expect("callers")))
+    });
+    group.bench_function("dependents_limited_20", |b| {
+        b.iter(|| {
+            black_box(
+                db.dependents_of_limited("shared::Thing", 20)
+                    .expect("limited dependents"),
+            )
+        })
+    });
+
+    let write_db = Database::in_memory().expect("graph write db");
+    let mut write_file_ids = Vec::with_capacity(200);
+    let mut write_symbols = Vec::with_capacity(200);
+    let mut write_calls = Vec::with_capacity(200);
+    let mut write_imports = Vec::with_capacity(200);
+    for i in 0..200 {
+        let file_id = write_db
+            .upsert_file(
+                &format!("write/file_{i}.rs"),
+                &format!("fn function_{i}() {{ shared_call(); }}"),
+                i as u64,
+            )
+            .expect("write file");
+        write_file_ids.push(file_id);
+        write_symbols.push(vec![SymbolRow {
+            name: format!("function_{i}"),
+            kind: "fn".to_string(),
+            start_line: 1,
+            end_line: 1,
+            start_byte: 0,
+            end_byte: 40,
+        }]);
+        write_calls.push(vec![RawCall {
+            name: "shared_call".to_string(),
+            byte: 18,
+        }]);
+        write_imports.push(vec!["crate::shared::Thing".to_string()]);
+    }
+    let write_batch: Vec<_> = (0..write_file_ids.len())
+        .map(|i| FileGraphBatchItem {
+            file_id: write_file_ids[i],
+            symbols: &write_symbols[i],
+            calls: &write_calls[i],
+            imports: &write_imports[i],
+        })
+        .collect();
+    let write_conn = write_db.conn().expect("graph write conn");
+    Database::replace_file_graphs_on(&write_conn, &write_batch).expect("graph write preflight");
+
+    group.bench_function("replace_graphs_200_files", |b| {
+        b.iter(|| {
+            Database::replace_file_graphs_on(&write_conn, &write_batch)
+                .expect("replace graph batch");
+            black_box(())
+        })
+    });
+
+    group.finish();
+}
+
 // ============================================================================
 // Standalone Grep Benchmarks
 // ============================================================================
@@ -536,8 +804,7 @@ fn bench_grep_search(c: &mut Criterion) {
 
     let dir = TempDir::new().expect("temp dir");
     let db = Arc::new(Database::in_memory().expect("db"));
-    setup_bench_files(dir.path(), &db, 200);
-    let search = SearchService::new(Arc::clone(&db), dir.path().to_path_buf()).expect("search");
+    let search = bench_search_service(dir.path(), Arc::clone(&db), 200);
 
     let patterns = [
         ("literal", "authenticate"),
@@ -547,8 +814,187 @@ fn bench_grep_search(c: &mut Criterion) {
     ];
 
     for (name, pattern) in patterns {
+        let preflight = search.search_grep(pattern, 20).expect("grep preflight");
+        if name != "no_match" {
+            assert!(!preflight.is_empty(), "grep preflight returned no results");
+        }
         group.bench_with_input(BenchmarkId::new("pattern", name), &pattern, |b, p| {
-            b.iter(|| black_box(search.search_grep(p, 20)))
+            b.iter(|| black_box(search.search_grep(p, 20).expect("grep search")))
+        });
+    }
+
+    group.finish();
+}
+
+/// Benchmarks grep file aggregation when one file has many matching lines.
+///
+/// Ranked search only keeps compact proof snippets, so this stresses the
+/// avoidable allocation path where raw matches are collected before aggregation.
+fn bench_grep_dense_matches(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grep_dense_matches");
+    group.sample_size(50);
+
+    let dir = TempDir::new().expect("temp dir");
+    let dense_content: String = (0..5_000)
+        .map(|i| format!("let needle_{i} = expensive_call();\n"))
+        .collect();
+    fs::write(dir.path().join("dense.rs"), dense_content).expect("dense file");
+    fs::write(
+        dir.path().join("sparse.rs"),
+        "fn sparse() { let needle = 1; }\n",
+    )
+    .expect("sparse file");
+
+    let grep = GrepService::new(dir.path().to_path_buf()).expect("grep");
+    let preflight = grep
+        .search_files_with_matches("needle", 200)
+        .expect("dense grep preflight");
+    assert!(!preflight.0.is_empty(), "dense grep returned no files");
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("search_files_with_matches_limit_200", |b| {
+        b.iter(|| {
+            black_box(
+                grep.search_files_with_matches("needle", 200)
+                    .expect("dense grep search"),
+            )
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmarks the trigram prefilter execution strategy.
+///
+/// The old path still walks every directory entry and checks the filter. The
+/// direct path searches the already-resolved candidate file list.
+fn bench_grep_candidate_filter(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grep_candidate_filter");
+    group.sample_size(50);
+
+    let dir = TempDir::new().expect("temp dir");
+    let target = dir.path().join("file_1999.rs");
+    for i in 0..2_000 {
+        let path = dir.path().join(format!("file_{i}.rs"));
+        let content = if i == 1_999 {
+            "fn target() { let needle_unique_candidate = true; }\n".to_string()
+        } else {
+            format!("fn file_{i}() {{ let common_value = {i}; }}\n")
+        };
+        fs::write(path, content).expect("candidate bench file");
+    }
+
+    let grep = GrepService::new(dir.path().to_path_buf()).expect("grep");
+    let candidate = Arc::<Path>::from(target.as_path());
+    let candidates = vec![Arc::clone(&candidate)];
+    let filter = HashSet::from([candidate]);
+    let direct_preflight = grep
+        .search_files_with_matches_candidates("needle_unique_candidate", 20, &candidates)
+        .expect("direct candidate preflight");
+    assert_eq!(direct_preflight.0.len(), 1, "direct candidate result count");
+    let filter_preflight = grep
+        .search_files_with_matches_filtered("needle_unique_candidate", 20, Some(&filter))
+        .expect("walker filter preflight");
+    assert_eq!(filter_preflight.0.len(), 1, "walker filter result count");
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("walker_filter_1_of_2000", |b| {
+        b.iter(|| {
+            black_box(
+                grep.search_files_with_matches_filtered(
+                    "needle_unique_candidate",
+                    20,
+                    Some(&filter),
+                )
+                .expect("walker filter search"),
+            )
+        })
+    });
+
+    group.bench_function("direct_candidate_1_of_2000", |b| {
+        b.iter(|| {
+            black_box(
+                grep.search_files_with_matches_candidates(
+                    "needle_unique_candidate",
+                    20,
+                    &candidates,
+                )
+                .expect("direct candidate search"),
+            )
+        })
+    });
+
+    group.finish();
+}
+
+/// Benchmarks direct-candidate search against walker filtering at different
+/// candidate-set sizes. Each candidate contains the trigram literal, but only
+/// the last candidate satisfies the full regex, which approximates the
+/// expensive false-positive shape that decides the direct/walk cutoff.
+fn bench_grep_candidate_threshold_matrix(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grep_candidate_threshold_matrix");
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_millis(500))
+        .measurement_time(Duration::from_secs(2));
+
+    let counts = [1usize, 4, 16, 64, 128, 192, 256, 257, 320, 512];
+    let dir = TempDir::new().expect("temp dir");
+
+    for i in 0..2_000usize {
+        let mut content = format!("fn file_{i}() {{ let common_value = {i}; }}\n");
+        for &count in &counts {
+            if i < count {
+                let value = if i + 1 == count { "true" } else { "false" };
+                content.push_str(&format!("let threshold_token_{count} = {value};\n"));
+            }
+        }
+        fs::write(dir.path().join(format!("file_{i}.rs")), content).expect("threshold bench file");
+    }
+
+    let grep = GrepService::new(dir.path().to_path_buf()).expect("grep");
+    let all_paths: Vec<Arc<Path>> = (0..2_000usize)
+        .map(|i| Arc::<Path>::from(dir.path().join(format!("file_{i}.rs")).as_path()))
+        .collect();
+
+    for &count in &counts {
+        let pattern = format!(r"threshold_token_{count}\s*=\s*true");
+        let candidates: Vec<_> = all_paths.iter().take(count).cloned().collect();
+        let filter: HashSet<_> = candidates.iter().cloned().collect();
+
+        let direct_preflight = grep
+            .search_files_with_matches_candidates(&pattern, 20, &candidates)
+            .expect("direct threshold preflight");
+        assert_eq!(
+            direct_preflight.0.len(),
+            1,
+            "direct candidate result count for {count}"
+        );
+        let filter_preflight = grep
+            .search_files_with_matches_filtered(&pattern, 20, Some(&filter))
+            .expect("walker threshold preflight");
+        assert_eq!(
+            filter_preflight.0.len(),
+            1,
+            "walker filter result count for {count}"
+        );
+
+        group.bench_with_input(BenchmarkId::new("direct", count), &count, |b, _| {
+            b.iter(|| {
+                black_box(
+                    grep.search_files_with_matches_candidates(&pattern, 20, &candidates)
+                        .expect("direct threshold search"),
+                )
+            })
+        });
+
+        group.bench_with_input(BenchmarkId::new("walker", count), &count, |b, _| {
+            b.iter(|| {
+                black_box(
+                    grep.search_files_with_matches_filtered(&pattern, 20, Some(&filter))
+                        .expect("walker threshold search"),
+                )
+            })
         });
     }
 
@@ -606,6 +1052,7 @@ criterion_group!(
     bench_trigram_search,
     bench_trigram_query_length,
     bench_trigram_add_file,
+    bench_trigram_update_file,
 );
 
 criterion_group!(score_benches, bench_score_operations, bench_result_merging,);
@@ -617,9 +1064,17 @@ criterion_group!(
     bench_combined_search,
     bench_combined_search_2k,
     bench_grep_search,
+    bench_grep_dense_matches,
+    bench_grep_candidate_filter,
+    bench_grep_candidate_threshold_matrix,
 );
 
-criterion_group!(db_benches, bench_db_upsert, bench_db_read,);
+criterion_group!(
+    db_benches,
+    bench_db_upsert,
+    bench_db_read,
+    bench_graph_queries,
+);
 
 criterion_group!(real_repo_benches, bench_real_repo,);
 

@@ -6,6 +6,7 @@
 
 use crate::db::Database;
 use crate::db::FileData;
+use crate::db::FileGraphBatchItem;
 use crate::error::{IndexError, ServerError};
 use crate::security;
 use crate::services::TrigramIndex;
@@ -22,16 +23,21 @@ use xxhash_rust::xxh3::xxh3_64;
 /// Larger batches reduce transaction overhead but increase memory usage.
 const BATCH_SIZE: usize = 500;
 
-/// Parses a file with tree-sitter and persists its symbols + edges.
-/// Best-effort: parse/DB failures are logged, not propagated (the lexical
-/// index must succeed even if graph extraction does not).
-fn index_graph(
-    conn: &rusqlite::Connection,
+struct ExtractedGraph<'a> {
     file_id: FileId,
-    path: &str,
-    content: &str,
-    embedder: Option<&std::sync::Mutex<crate::services::semantic::Embedder>>,
-) {
+    path: &'a str,
+    content: &'a str,
+    symbols: Vec<crate::db::SymbolRow>,
+    calls: Vec<crate::services::ast::RawCall>,
+    imports: Vec<String>,
+}
+
+/// Parses a file with tree-sitter into graph rows.
+fn extract_graph<'a>(
+    file_id: FileId,
+    path: &'a str,
+    content: &'a str,
+) -> Option<ExtractedGraph<'a>> {
     use crate::db::SymbolRow;
     use crate::services::ast;
 
@@ -42,7 +48,7 @@ fn index_graph(
         .unwrap_or_default();
 
     if !ast::is_supported(&file_type) {
-        return;
+        return None;
     }
 
     let ast::AstExtraction {
@@ -62,13 +68,74 @@ fn index_graph(
         })
         .collect();
 
-    if let Err(e) = Database::replace_file_graph_on(conn, file_id, &symbols, &calls, &imports) {
-        tracing::warn!("graph index failed for {path}: {e}");
+    Some(ExtractedGraph {
+        file_id,
+        path,
+        content,
+        symbols,
+        calls,
+        imports,
+    })
+}
+
+/// Persists extracted graph rows.
+///
+/// Best-effort: parse/DB failures are logged, not propagated (the lexical
+/// index must succeed even if graph extraction does not).
+fn persist_graphs(
+    conn: &rusqlite::Connection,
+    graphs: &[ExtractedGraph<'_>],
+    embedder: Option<&std::sync::Mutex<crate::services::semantic::Embedder>>,
+) {
+    if graphs.is_empty() {
         return;
     }
 
+    let batch: Vec<FileGraphBatchItem<'_>> = graphs
+        .iter()
+        .map(|graph| FileGraphBatchItem {
+            file_id: graph.file_id,
+            symbols: &graph.symbols,
+            calls: &graph.calls,
+            imports: &graph.imports,
+        })
+        .collect();
+
+    match Database::replace_file_graphs_on(conn, &batch) {
+        Ok(()) => {
+            embed_graphs(conn, graphs, embedder);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "graph batch index failed for {} files: {e}; retrying per file",
+                graphs.len()
+            );
+            for graph in graphs {
+                if let Err(e) = Database::replace_file_graph_on(
+                    conn,
+                    graph.file_id,
+                    &graph.symbols,
+                    &graph.calls,
+                    &graph.imports,
+                ) {
+                    tracing::warn!("graph index failed for {}: {e}", graph.path);
+                    continue;
+                }
+                embed_graphs(conn, std::slice::from_ref(graph), embedder);
+            }
+        }
+    }
+}
+
+fn embed_graphs(
+    conn: &rusqlite::Connection,
+    graphs: &[ExtractedGraph<'_>],
+    embedder: Option<&std::sync::Mutex<crate::services::semantic::Embedder>>,
+) {
     if let Some(emb) = embedder {
-        embed_symbols(conn, file_id, content, &symbols, emb);
+        for graph in graphs {
+            embed_symbols(conn, graph.file_id, graph.content, &graph.symbols, emb);
+        }
     }
 }
 
@@ -284,23 +351,23 @@ impl Indexer {
         progress: Option<ProgressCallback>,
         force: bool,
     ) -> Result<IndexProgress, ServerError> {
-        // Pre-load all existing hashes into memory for O(1) lookups
-        // When force=true, use empty map so all files appear changed
-        let existing_hashes: HashMap<String, u64> = if force {
-            HashMap::new()
-        } else {
-            self.db.get_all_hashes()?
-        };
-        let existing_paths: HashSet<String> = existing_hashes.keys().cloned().collect();
-
-        // Try git-based fast path for incremental indexing
+        // Try git-based fast path before loading every hash. Warm no-change
+        // indexing only needs the indexed file count, not the full path map.
         if !force {
-            if let Some(result) =
-                self.try_git_fast_path(&existing_hashes, &existing_paths, &progress)?
-            {
+            if let Some(result) = self.try_git_fast_path(&progress)? {
                 return Ok(result);
             }
         }
+
+        // Pre-load existing hashes/paths for non-git incremental runs and so
+        // force runs can still reconcile deleted indexed files.
+        let previous_hashes = self.db.get_all_hashes()?;
+        let existing_paths: HashSet<String> = previous_hashes.keys().cloned().collect();
+        let existing_hashes: HashMap<String, u64> = if force {
+            HashMap::new()
+        } else {
+            previous_hashes
+        };
 
         let files: Vec<PathBuf> = self.collect_files()?;
         let total = files.len();
@@ -325,25 +392,14 @@ impl Indexer {
         // Wrap indexing in a closure so exit_indexing_mode() runs even on error.
         // enter_indexing_mode() sets synchronous=OFF — must not leak to pool.
         let result = (|| -> Result<IndexProgress, ServerError> {
-            {
+            if force {
                 let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+                trigram_guard.clear();
+            }
 
-                self.phase2_batch_write(
-                    &file_data,
-                    &indexing_conn,
-                    &mut trigram_guard,
-                    &progress,
-                    &mut state,
-                )?;
+            self.phase2_batch_write(&file_data, &indexing_conn, &progress, &mut state)?;
 
-                self.handle_deletions(
-                    &indexing_conn,
-                    &existing_paths,
-                    &seen_paths,
-                    &mut trigram_guard,
-                    &mut state,
-                )?;
-            } // Drop write guard before save_trigrams (which takes a read lock)
+            self.handle_deletions(&indexing_conn, &existing_paths, &seen_paths, &mut state)?;
 
             self.persist_trigrams(&indexing_conn, &state, force)?;
 
@@ -413,12 +469,11 @@ impl Indexer {
         (file_data, seen_paths)
     }
 
-    /// Phase 2: Sequential batch upserts and trigram updates.
+    /// Phase 2: batched DB writes, trigram updates, and graph extraction.
     fn phase2_batch_write(
         &self,
         file_data: &[FileData],
         conn: &rusqlite::Connection,
-        trigram_guard: &mut TrigramIndex,
         progress: &Option<ProgressCallback>,
         state: &mut IndexProgress,
     ) -> Result<(), ServerError> {
@@ -430,16 +485,19 @@ impl Indexer {
 
             let file_ids = Database::upsert_files_batch_on(conn, batch)?;
 
-            for (data, file_id) in batch.iter().zip(file_ids) {
-                trigram_guard.add_file(file_id, &data.content);
-                index_graph(
-                    conn,
-                    file_id,
-                    &data.path,
-                    &data.content,
-                    self.embedder.as_ref(),
-                );
+            {
+                let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+                for (data, &file_id) in batch.iter().zip(&file_ids) {
+                    trigram_guard.add_file(file_id, &data.content);
+                }
             }
+
+            let graphs: Vec<_> = batch
+                .par_iter()
+                .zip(file_ids.par_iter())
+                .filter_map(|(data, &file_id)| extract_graph(file_id, &data.path, &data.content))
+                .collect();
+            persist_graphs(conn, &graphs, self.embedder.as_ref());
 
             state.files_indexed += batch.len();
             state.files_processed += batch.len();
@@ -453,18 +511,28 @@ impl Indexer {
         conn: &rusqlite::Connection,
         existing_paths: &HashSet<String>,
         seen_paths: &HashSet<String>,
-        trigram_guard: &mut TrigramIndex,
         state: &mut IndexProgress,
     ) -> Result<(), ServerError> {
+        let mut deletions = Vec::new();
         for path in existing_paths.difference(seen_paths) {
             if let Ok(Some(file_id)) = Database::get_file_id_on(conn, path) {
-                trigram_guard.remove_file(file_id);
-                Database::delete_file_graph_on(conn, file_id)?;
+                deletions.push((path, file_id));
             }
+        }
+
+        if !deletions.is_empty() {
+            let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+            for (_, file_id) in &deletions {
+                trigram_guard.remove_file(*file_id);
+            }
+        }
+
+        for (path, _) in deletions {
             if Database::delete_file_on(conn, path)? {
                 state.files_deleted += 1;
             }
         }
+
         Ok(())
     }
 
@@ -514,7 +582,9 @@ impl Indexer {
         let file_id = self.db.upsert_file(&path_str, &content, hash)?;
         self.index_trigrams(file_id, &content);
         if let Ok(conn) = self.db.conn() {
-            index_graph(&conn, file_id, &path_str, &content, self.embedder.as_ref());
+            if let Some(graph) = extract_graph(file_id, &path_str, &content) {
+                persist_graphs(&conn, std::slice::from_ref(&graph), self.embedder.as_ref());
+            }
         }
 
         Ok(file_id)
@@ -586,8 +656,6 @@ impl Indexer {
     /// through to the full walk.
     fn try_git_fast_path(
         &self,
-        existing_hashes: &HashMap<String, u64>,
-        existing_paths: &HashSet<String>,
         progress: &Option<ProgressCallback>,
     ) -> Result<Option<IndexProgress>, ServerError> {
         let last_commit = match self.db.get_last_indexed_commit()? {
@@ -607,7 +675,7 @@ impl Indexer {
         );
 
         if diff.changed.is_empty() && diff.deleted.is_empty() {
-            let total = existing_paths.len();
+            let total = self.db.file_count()? as usize;
             let state = IndexProgress {
                 files_processed: total,
                 files_total: total,
@@ -629,15 +697,27 @@ impl Indexer {
             .map(|p| self.root.join(p))
             .filter(|p| p.exists() && self.should_index_path(p))
             .collect();
+        let changed_paths: Vec<String> = changed_files
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        let existing_hashes = self.db.get_hashes_batch(&changed_paths)?;
 
-        let (file_data, _) = self.phase1_read_and_hash(&changed_files, existing_hashes);
+        let (file_data, _) = self.phase1_read_and_hash(&changed_files, &existing_hashes);
 
-        let total = existing_paths.len();
+        let deleted_paths: Vec<String> = diff
+            .deleted
+            .iter()
+            .map(|p| self.root.join(p).to_string_lossy().to_string())
+            .collect();
+        let deleted_file_ids = self.db.get_file_ids_batch(&deleted_paths)?;
+
+        let total = self.db.file_count()? as usize;
         let mut state = IndexProgress {
             files_processed: 0,
             files_total: total,
             files_indexed: 0,
-            files_unchanged: total.saturating_sub(file_data.len() + diff.deleted.len()),
+            files_unchanged: total.saturating_sub(file_data.len() + deleted_file_ids.len()),
             files_deleted: 0,
             current_file: None,
         };
@@ -645,34 +725,20 @@ impl Indexer {
         let indexing_conn = self.db.enter_indexing_mode()?;
 
         let result = (|| -> Result<IndexProgress, ServerError> {
-            {
+            self.phase2_batch_write(&file_data, &indexing_conn, progress, &mut state)?;
+
+            if !deleted_file_ids.is_empty() {
                 let mut trigram_guard = self.trigram.write().unwrap_or_else(|e| e.into_inner());
+                for file_id in deleted_file_ids.values() {
+                    trigram_guard.remove_file(*file_id);
+                }
+            }
 
-                self.phase2_batch_write(
-                    &file_data,
-                    &indexing_conn,
-                    &mut trigram_guard,
-                    progress,
-                    &mut state,
-                )?;
-
-                for deleted_rel in &diff.deleted {
-                    let abs_path = self.root.join(deleted_rel).to_string_lossy().to_string();
-                    if existing_paths.contains(&abs_path) {
-                        match Database::get_file_id_on(&indexing_conn, &abs_path) {
-                            Ok(Some(file_id)) => {
-                                trigram_guard.remove_file(file_id);
-                                Database::delete_file_graph_on(&indexing_conn, file_id)?;
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                tracing::warn!("Failed to look up file_id for {abs_path}: {e}")
-                            }
-                        }
-                        if Database::delete_file_on(&indexing_conn, &abs_path)? {
-                            state.files_deleted += 1;
-                        }
-                    }
+            for abs_path in &deleted_paths {
+                if deleted_file_ids.contains_key(abs_path)
+                    && Database::delete_file_on(&indexing_conn, abs_path)?
+                {
+                    state.files_deleted += 1;
                 }
             }
 
@@ -1018,5 +1084,109 @@ mod tests {
         assert!(!tri.search("unique_alpha").unwrap().is_empty());
         assert!(tri.search("unique_gamma").is_some());
         assert!(!tri.search("unique_gamma").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_incremental_update_removes_stale_trigram_entries() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+        fs::write(
+            dir.path().join("update.rs"),
+            "fn marker() { let unique_old_token_alpha = 1; }",
+        )
+        .unwrap();
+
+        let indexer = Indexer::new(
+            Arc::clone(&db),
+            Arc::clone(&trigram),
+            dir.path().to_path_buf(),
+        );
+
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 1);
+
+        fs::write(
+            dir.path().join("update.rs"),
+            "fn marker() { let unique_new_token_beta = 2; }",
+        )
+        .unwrap();
+
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 1);
+
+        {
+            let tri = trigram.read().unwrap();
+            assert!(
+                tri.search("unique_old_token_alpha")
+                    .is_none_or(|bitmap| bitmap.is_empty()),
+                "old content should not remain searchable in memory"
+            );
+            assert!(
+                tri.search("unique_new_token_beta")
+                    .is_some_and(|bitmap| !bitmap.is_empty()),
+                "new content should be searchable in memory"
+            );
+        }
+
+        let loaded = TrigramIndex::from_db_entries(db.load_all_trigrams().unwrap());
+        assert!(
+            loaded
+                .search("unique_old_token_alpha")
+                .is_none_or(|bitmap| bitmap.is_empty()),
+            "old content should not remain searchable after DB reload"
+        );
+        assert!(
+            loaded
+                .search("unique_new_token_beta")
+                .is_some_and(|bitmap| !bitmap.is_empty()),
+            "new content should be searchable after DB reload"
+        );
+    }
+
+    #[test]
+    fn test_force_reindex_removes_deleted_files_and_trigrams() {
+        let dir = TempDir::new().unwrap();
+        let db = Arc::new(Database::in_memory().unwrap());
+        let trigram = Arc::new(RwLock::new(TrigramIndex::new()));
+
+        fs::write(dir.path().join("keep.rs"), "fn unique_keep_token() {}").unwrap();
+        fs::write(
+            dir.path().join("remove.rs"),
+            "fn unique_force_removed_token() {}",
+        )
+        .unwrap();
+
+        let indexer = Indexer::new(
+            Arc::clone(&db),
+            Arc::clone(&trigram),
+            dir.path().to_path_buf(),
+        );
+
+        let progress = indexer.index(None, false).unwrap();
+        assert_eq!(progress.files_indexed, 2);
+        assert_eq!(db.file_count().unwrap(), 2);
+
+        fs::remove_file(dir.path().join("remove.rs")).unwrap();
+
+        let progress = indexer.index(None, true).unwrap();
+        assert_eq!(progress.files_indexed, 1);
+        assert_eq!(progress.files_deleted, 1);
+        assert_eq!(db.file_count().unwrap(), 1);
+
+        let loaded = TrigramIndex::from_db_entries(db.load_all_trigrams().unwrap());
+        assert!(
+            loaded
+                .search("unique_force_removed_token")
+                .is_none_or(|bitmap| bitmap.is_empty()),
+            "force reindex should remove deleted file trigrams from persisted index"
+        );
+        assert!(
+            loaded
+                .search("unique_keep_token")
+                .is_some_and(|bitmap| !bitmap.is_empty()),
+            "force reindex should preserve current file trigrams"
+        );
     }
 }

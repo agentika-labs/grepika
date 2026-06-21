@@ -165,8 +165,14 @@ pub fn execute_search(
         ));
     }
 
+    let limit = if input.limit == 0 {
+        default_limit()
+    } else {
+        input.limit
+    };
+
     // Overcollect by 1 to detect if more results exist
-    let request_limit = input.limit.saturating_add(1);
+    let request_limit = limit.saturating_add(1);
 
     let results = match input.mode {
         SearchMode::Fts => service.search_fts(&input.query, request_limit)?,
@@ -174,11 +180,11 @@ pub fn execute_search(
         SearchMode::Combined => service.search(&input.query, request_limit)?,
     };
 
-    let has_more = results.len() > input.limit;
+    let has_more = results.len() > limit;
     let root = service.root();
     let items: Vec<_> = results
         .iter()
-        .take(input.limit)
+        .take(limit)
         .filter(|r| security::is_sensitive_file(&r.path).is_none())
         .map(|r| SearchResultItem {
             path: relativize_path(&r.path, root),

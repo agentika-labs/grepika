@@ -35,6 +35,7 @@ KNOWN_GREPICA_TOOLS = {
     "refs",
     "index",
     "diff",
+    "graph",
 }
 
 SHELL_MARKERS = {
@@ -86,6 +87,16 @@ class TrialResult:
     errors: list[str] = field(default_factory=list)
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def line_containing(path: str, needle: str) -> str:
+    for number, line in enumerate((REPO_ROOT / path).read_text(encoding="utf-8").splitlines(), 1):
+        if needle in line:
+            return str(number)
+    raise RuntimeError(f"{needle!r} not found in {path}")
+
+
 CASES: tuple[EvalCase, ...] = (
     EvalCase(
         case_id="toc_src_tools_no_reads",
@@ -96,10 +107,11 @@ CASES: tuple[EvalCase, ...] = (
         expected_answer_terms=(
             "analysis.rs",
             "content.rs",
+            "graph.rs",
             "index.rs",
             "mod.rs",
             "search.rs",
-            "5",
+            "6",
             "0",
         ),
         required_tools=("add_workspace", "toc"),
@@ -123,8 +135,9 @@ CASES: tuple[EvalCase, ...] = (
             "ngram.rs",
             "regex_literals.rs",
             "search.rs",
+            "semantic.rs",
             "trigram.rs",
-            "9",
+            "11",
             "0",
         ),
         required_tools=("add_workspace", "toc"),
@@ -161,6 +174,7 @@ CASES: tuple[EvalCase, ...] = (
             "refs",
             "index",
             "diff",
+            "graph",
         ),
         required_tools=("add_workspace", "outline"),
         forbidden_tools=("index", "search", "get", "context", "refs", "toc"),
@@ -177,10 +191,8 @@ CASES: tuple[EvalCase, ...] = (
         ),
         expected_answer_terms=(
             "src/services/search.rs",
-            "628",
             "definition",
             "src/tools/analysis.rs",
-            "168",
             "usage",
         ),
         required_tools=("add_workspace", "refs"),
@@ -229,7 +241,7 @@ CASES: tuple[EvalCase, ...] = (
         ),
         expected_answer_terms=(
             "src/server.rs",
-            "752",
+            line_containing("src/server.rs", "Use mode=grep for regex"),
             "Use mode=grep",
             "mode=fts",
             "untrusted data",
@@ -507,9 +519,9 @@ def extract_observations(events: list[Json], transcript_text: str) -> tuple[list
 
     # Fallback regexes for Codex JSONL formats that embed tool calls as text.
     if not tools:
-        for match in re.finditer(r"mcp__grepika__(add_workspace|search|get|outline|toc|context|stats|refs|index|diff)", transcript_text):
+        for match in re.finditer(r"mcp__grepika__(add_workspace|search|get|outline|toc|context|stats|refs|index|diff|graph)", transcript_text):
             tools.append(match.group(1))
-        for match in re.finditer(r'"(?:tool|tool_name|name)"\s*:\s*"(add_workspace|search|get|outline|toc|context|stats|refs|index|diff)"', transcript_text):
+        for match in re.finditer(r'"(?:tool|tool_name|name)"\s*:\s*"(add_workspace|search|get|outline|toc|context|stats|refs|index|diff|graph)"', transcript_text):
             tools.append(match.group(1))
     if not modes:
         for match in re.finditer(r'"mode"\s*:\s*"(grep|fts|combined)"', transcript_text):
