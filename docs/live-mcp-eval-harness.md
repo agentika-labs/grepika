@@ -8,7 +8,7 @@ different things and should stay separate.
 Script:
 
 ```bash
-python3 scripts/live_mcp_eval.py --binary target/release/grepika
+python3 evals/live_mcp_eval.py --binary target/release/grepika
 ```
 
 This is a black-box protocol test. It starts the release binary in MCP stdio
@@ -21,7 +21,7 @@ It checks:
 - `add_workspace` works in global mode and reports the requested DB path.
 - `index` builds a search index for the workspace.
 - Stable tool payloads are returned for `toc`, `outline`, `refs`, `context`,
-  `get`, and `search`.
+  `get`, `search`, `structural_search`, and `graph`.
 - Search modes can be invoked directly, including `mode=grep` and `mode=fts`.
 - The harness can record tool traces, output bytes, schema bytes, and failures.
 
@@ -34,7 +34,7 @@ possible. It does not prove that a language model will choose those tools.
 Script:
 
 ```bash
-python3 scripts/codex_llm_mcp_eval.py --trials 3
+python3 evals/codex_llm_mcp_eval.py --trials 3
 ```
 
 This suite runs real Codex CLI turns with grepika configured as an MCP server.
@@ -51,6 +51,8 @@ lead Codex to use grepika effectively:
 - Uses `search(mode="fts")` or natural-language search for prose queries.
 - Uses `refs` for exact symbol references.
 - Uses `toc` and `outline` for structure questions instead of reading files.
+- Uses `structural_search` for syntax-aware AST pattern or node-kind tasks.
+- Uses `graph` for call/import relationship questions after indexing.
 - Uses `get` and `context` only when targeted evidence is needed.
 - Avoids shell commands and direct filesystem reads.
 - Avoids wasteful repeated calls and overly broad file reads.
@@ -83,19 +85,19 @@ cargo build --release
 Run the deterministic contract suite:
 
 ```bash
-python3 scripts/live_mcp_eval.py --binary target/release/grepika
+python3 evals/live_mcp_eval.py --binary target/release/grepika
 ```
 
 Run a dry run of the Codex LLM suite:
 
 ```bash
-python3 scripts/codex_llm_mcp_eval.py --dry-run --cases search_grep_mode
+python3 evals/codex_llm_mcp_eval.py --dry-run --cases search_grep_mode
 ```
 
 Run one real Codex trial:
 
 ```bash
-python3 scripts/codex_llm_mcp_eval.py \
+python3 evals/codex_llm_mcp_eval.py \
   --trials 1 \
   --cases toc_src_tools_no_reads
 ```
@@ -103,7 +105,7 @@ python3 scripts/codex_llm_mcp_eval.py \
 Run a more reliable behavior check:
 
 ```bash
-python3 scripts/codex_llm_mcp_eval.py --trials 3
+python3 evals/codex_llm_mcp_eval.py --trials 3
 ```
 
 By default, the runner uses `CODEX_BIN` when set, then the bundled Codex desktop
@@ -118,8 +120,9 @@ require running the command with the same permissions normally needed for
 
 ## Current limitation
 
-grepika currently has regex search (`mode=grep`), FTS natural-language search
-(`mode=fts`), and combined indexed search (`mode=combined`). It does not
-currently implement vector embedding search. In the evaluation suite,
-"semantic" behavior means natural-language FTS/combined search unless a vector
-backend is added later.
+grepika has regex search (`mode=grep`), FTS natural-language search
+(`mode=fts`), combined indexed search (`mode=combined`), structural AST search,
+and indexed code-graph navigation. Local embedding reranking exists behind the
+optional `semantic` Cargo feature and is off by default. In the evaluation
+suite, "semantic" behavior means natural-language FTS/combined search unless a
+vector-enabled binary and evaluation case are added.

@@ -18,6 +18,9 @@ cargo bench
 # Run real-repo benchmarks (indexes and searches this repo)
 cargo bench --bench hot_paths -- real_repo
 
+# Run structural-search benchmarks
+cargo bench --bench hot_paths structural_search
+
 # Run real-repo benchmarks against a different repository
 BENCH_REPO_PATH=/path/to/repo cargo bench --bench hot_paths -- real_repo
 ```
@@ -45,4 +48,3 @@ Then: `tail -f /tmp/grepika.log`
 ```
 
 When `--log-file` is not provided, profiling is disabled with negligible overhead (~20ns per tool call).
-

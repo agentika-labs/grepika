@@ -6,7 +6,7 @@
 
 Token-efficient MCP server for code search.
 
-LLMs burn context tokens on every search call. grepika indexes your codebase and returns ranked, compact results — so the model spends tokens reasoning instead of reading raw grep output. It combines three backends (FTS5, parallel grep, and trigram indexing) and merges their scores for high-quality results.
+LLMs burn context tokens on every search call. grepika indexes your codebase and returns ranked, compact results — so the model spends tokens reasoning instead of reading raw grep output. It combines FTS5, ripgrep-backed regex search, and a sparse n-gram prefilter for ranked lexical search, then adds MCP tools for AST structural search and code-graph navigation.
 
 ## Why grepika?
 
@@ -19,51 +19,55 @@ grep is a great tool, but it wasn't designed for LLM workflows. It returns unran
 | Explore structure | Read entire files | `outline` extracts functions/classes/structs |
 | Find related code | Guess-and-grep loop | `refs` finds files sharing symbols |
 | Natural language query | Requires regex | `search` routes to BM25 full-text search |
+| Find syntax patterns | Fragile regex | `structural_search` matches AST patterns and node kinds |
+| Trace relationships | Manual file hopping | `graph` navigates indexed call/import edges |
 
 ### Benchmarks
 
-Criterion benchmarks against ripgrep (Claude Code's Grep backend) on the grepika codebase, 9 queries across all intent categories:
+Criterion benchmarks against ripgrep content output on the grepika codebase, 9 queries across all intent categories:
 
 | Metric | grepika | ripgrep (content mode) |
 |--------|---------|------------------------|
-| Search latency | 2.3–2.8 ms | 4.9–6.1 ms |
-| Response size | ~2,500 B avg | ~12,600 B avg |
-| Relevance ranking | BM25 + trigram IDF | None |
+| Response size | 2,352 B avg | 17,336 B avg |
+| Mean per-query savings | 61.4% | N/A |
+| Relevance ranking | BM25 + grep + sparse n-gram signals | None |
+| Structural search | AST pattern/kind matching, no index required | Regex only |
 
-~80% fewer bytes on aggregate vs ripgrep content mode, with ranked results and snippets. Savings are largest on high-match queries (e.g. `fn` saves 94%); natural language queries where ripgrep finds few literal matches can be larger with grepika. See [full analysis](docs/token-efficiency-analysis.md).
+Savings are largest on high-match queries (for example, `fn` saves 93.8%); low-match patterns can be larger with grepika because structured JSON has a fixed cost. See [full analysis](docs/token-efficiency-analysis.md).
 
 ### Token Efficiency
 
 Compared to ripgrep content output (matching lines), indexed search returns fewer tokens per query. The bigger win is search quality — ranking, NLP queries, and reference classification reduce follow-up reads.
 
-Criterion benchmarks on the grepika codebase (~25 Rust files), 9 queries across all intent categories:
+Criterion benchmarks on the grepika codebase, 9 queries across all intent categories:
 
 ```
 Query             │  grepika │  ripgrep (content) │ Savings
 ──────────────────┼──────────┼────────────────────┼────────
-SearchService     │  3,375 B │         8,610 B    │  ~61%
-Score             │  2,789 B │         5,574 B    │  ~50%
-Database          │  2,156 B │        10,174 B    │  ~79%
-fn                │  1,832 B │        31,469 B    │  ~94%
-use               │  1,963 B │        23,308 B    │  ~92%
-search service    │  3,797 B │         1,632 B    │ -133%
-error handling    │  2,666 B │           986 B    │ -170%
-fn\s+\w+          │    385 B │        29,501 B    │  ~99%
-impl.*for         │  3,214 B │         2,480 B    │  -30%
+SearchService     │  3,227 B │        10,053 B    │  67.9%
+Score             │  2,433 B │         6,497 B    │  62.6%
+Database          │  2,680 B │        12,379 B    │  78.4%
+fn                │  2,880 B │        46,125 B    │  93.8%
+use               │  2,676 B │        31,868 B    │  91.6%
+search service    │    787 B │         1,556 B    │  49.4%
+error handling    │    782 B │           985 B    │  20.6%
+fn\s+\w+          │  2,896 B │        43,898 B    │  93.4%
+impl.*for         │  2,806 B │         2,664 B    │  -5.3%
 ```
 
-Savings are largest on high-match queries where ripgrep returns many unranked lines. Natural language queries (e.g. "error handling") route to FTS5 concept search in grepika but match few literals in ripgrep, making grepika's output larger.
+Savings are largest on high-match queries where ripgrep returns many unranked lines. Natural language queries route to FTS5 concept search in grepika and now stay close to ripgrep's output size while preserving ranking and snippets.
 
-Claude Code lazy-loads MCP tools on demand, so grepika's 11 tool schemas are not loaded all at once. Loaded schemas are prompt-cached after the first call (~90% discount on subsequent turns). In practice, schema overhead is minimal.
+Claude Code lazy-loads MCP tools on demand, so grepika's 12 tool schemas are not loaded all at once. Loaded schemas are prompt-cached after the first call (~90% discount on subsequent turns). In the current benchmark, the full schema is 11,475 bytes (~2,869 tokens), and the one-time schema cost breaks even after one average search compared with ripgrep content output.
 
 See [docs/token-efficiency-analysis.md](docs/token-efficiency-analysis.md) for the full comparison including Grep file-list mode and workflow analysis.
 
 ### How it works
 
-- Three search backends (FTS5 + grep + trigram) with weighted score merging
+- Three lexical search backends (FTS5 + grep + sparse n-gram prefilter) with weighted score merging
+- AST structural search via ast-grep and indexed code-graph navigation via tree-sitter symbols/edges
 - BM25 ranking with tuned column weights
 - Query intent detection — classifies regex vs natural language vs exact symbol
-- 190 tests, zero clippy warnings, Criterion benchmarks
+- Unit/integration tests, `cargo clippy --all-targets`, and Criterion benchmarks cover library, CLI, MCP, graph, and structural-search paths
 
 ## MCP Server Setup
 
@@ -117,8 +121,10 @@ Prefer grepika MCP tools over built-in Grep/Glob for code search:
 - `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
 - `mcp__grepika__outline` - File structure extraction
 - `mcp__grepika__refs` - Symbol references
+- `mcp__grepika__structural_search` - AST pattern/kind search
+- `mcp__grepika__graph` - Indexed call/import graph navigation
 
-These provide ranked results with FTS5+trigram indexing for better search quality.
+These provide ranked results with FTS5, grep, sparse n-gram prefiltering, AST search, and code-graph navigation.
 ````
 
 See [docs/claude-code-setup.md](docs/claude-code-setup.md) for the full version with a tool mapping table.
@@ -245,31 +251,31 @@ For other platforms, download the binary from [GitHub Releases](https://github.c
 
 ```bash
 # Index a codebase
-grepika index --root /path/to/project
+grepika --root /path/to/project index
 
 # Search (modes: combined, fts, grep)
-grepika search "authentication" --root /path/to/project -l 20 -m combined
+grepika --root /path/to/project search "authentication" -l 20 -m combined
 
 # Get file content with line range
-grepika get <path> -s 1 -e 100
+grepika --root /path/to/project get <path> -s 1 -e 100
 
 # View index statistics
-grepika stats
+grepika --root /path/to/project stats
 
 # Extract file structure (functions, classes, structs)
-grepika outline <path>
+grepika --root /path/to/project outline <path>
 
 # Directory tree
-grepika toc --root /path/to/project -d 3
+grepika --root /path/to/project toc . -d 3
 
 # Surrounding context for a line
-grepika context <path> -l 42 -c 10
+grepika --root /path/to/project context <path> 42 -C 10
 
 # Find all references to a symbol
-grepika refs <symbol>
+grepika --root /path/to/project refs <symbol>
 
 # Compare two files
-grepika diff <file1> <file2>
+grepika --root /path/to/project diff <file1> <file2>
 
 # Generate shell completions
 grepika completions <shell>
@@ -285,13 +291,15 @@ grepika --mcp --root /path/to/project
 
 | Tool | Description |
 |------|-------------|
-| `search` | Pattern search (regex/natural language) |
+| `search` | Indexed pattern, regex, and natural-language search |
 | `get` | File content with optional line range |
 | `outline` | Extract file structure (functions, classes) |
 | `toc` | Directory tree |
 | `context` | Surrounding lines around a specific line |
 | `stats` | Index statistics |
 | `refs` | Find all references to a symbol |
+| `structural_search` | Syntax-aware AST pattern/kind search via ast-grep (no index required) |
+| `graph` | Navigate indexed call/import graph relationships |
 | `index` | Update search index (incremental by default) |
 | `diff` | Compare two files |
 | `add_workspace` | Load a project workspace (global mode) |

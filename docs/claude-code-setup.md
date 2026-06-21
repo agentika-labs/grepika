@@ -64,16 +64,20 @@ Prefer grepika MCP tools over built-in Grep/Glob for code search:
 | Directory tree | `mcp__grepika__toc` | `Glob` with patterns |
 | Context around line | `mcp__grepika__context` | `Read` with offset |
 | Find references | `mcp__grepika__refs` | `Grep` for symbol |
+| Structural search | `mcp__grepika__structural_search` | Fragile regex for AST shapes |
+| Code graph | `mcp__grepika__graph` | Manual call/import tracing |
+| Compare files | `mcp__grepika__diff` | Manual side-by-side reads |
 | Index statistics | `mcp__grepika__stats` | N/A |
 | **Set workspace** | `mcp__grepika__add_workspace` | N/A (global mode only) |
 
-**First time setup:** Run `mcp__grepika__index` to build the search index before using other tools. The index updates incrementally on subsequent runs.
+**First time setup:** Run `mcp__grepika__index` before indexed search or graph navigation. The index updates incrementally on subsequent runs.
 
 **Global Mode (recommended):** When the server is started with `--mcp` (without `--root`), it runs in global mode. The LLM must call `mcp__grepika__add_workspace` with the project root path before using any other tools. The server's `get_info()` response will guide this. The LLM reads its working directory from its system prompt and calls `add_workspace` automatically.
 
 **Why prefer grepika:**
-- Combines FTS5 + ripgrep + trigram indexing for ranked, relevance-scored results
-- Returns compact responses — about 6x smaller than raw grep output on average
+- Combines FTS5 + ripgrep + sparse n-gram prefiltering for ranked, relevance-scored results
+- Adds AST structural search and indexed call/import graph navigation
+- Returns compact responses: 2,352 B average vs 17,336 B for ripgrep content mode in the current benchmark
 - Maintains an incremental index for faster subsequent searches
 
 **When to still use Claude Code's built-in tools:**
@@ -95,8 +99,10 @@ Prefer grepika MCP tools over built-in Grep/Glob for code search:
 - `mcp__grepika__toc` - Directory tree (replaces Glob patterns)
 - `mcp__grepika__outline` - File structure extraction
 - `mcp__grepika__refs` - Symbol references
+- `mcp__grepika__structural_search` - AST pattern/kind search
+- `mcp__grepika__graph` - Indexed call/import graph navigation
 
-These provide ranked results with FTS5+trigram indexing for better search quality.
+These provide ranked results with FTS5, grep, sparse n-gram prefiltering, AST search, and code-graph navigation.
 ```
 
 </details>
@@ -140,6 +146,8 @@ If you prefer explicit permissions instead of the wildcard:
     "allow": [
       "mcp__grepika__search",
       "mcp__grepika__refs",
+      "mcp__grepika__structural_search",
+      "mcp__grepika__graph",
       "mcp__grepika__outline",
       "mcp__grepika__context",
       "mcp__grepika__get",

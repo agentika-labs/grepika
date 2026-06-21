@@ -1,10 +1,11 @@
 //! grepika: Token-efficient MCP server for code search.
 //!
 //! This library provides a high-performance code search server using:
-//! - Trigram indexing for fast substring search
 //! - FTS5 full-text search with BM25 ranking
 //! - Parallel grep with ripgrep internals
-//! - Combined scoring from multiple search backends
+//! - Sparse n-gram prefiltering for fast substring candidate filtering
+//! - AST structural search and indexed code-graph navigation
+//! - Combined scoring from multiple lexical search backends
 //!
 //! # Architecture
 //!
@@ -16,7 +17,7 @@
 //!                   │
 //! ┌─────────────────▼───────────────────────────┐
 //! │               Tool Router                    │
-//! │  search, relevant, get, stats, outline...   │
+//! │ search, structural_search, graph, get...    │
 //! └─────────────────┬───────────────────────────┘
 //!                   │
 //! ┌─────────────────▼───────────────────────────┐
@@ -24,10 +25,10 @@
 //! │     (spawn_blocking for async bridge)       │
 //! └───────┬─────────┬─────────┬─────────────────┘
 //!         │         │         │
-//!    ┌────▼───┐ ┌───▼───┐ ┌───▼────┐
-//!    │  FTS5  │ │ Grep  │ │Trigram │
-//!    │ BM25   │ │rayon  │ │ Index  │
-//!    └────┬───┘ └───┬───┘ └───┬────┘
+//!    ┌────▼───┐ ┌───▼───┐ ┌─────▼─────┐
+//!    │  FTS5  │ │ Grep  │ │ Sparse    │
+//!    │ BM25   │ │rayon  │ │ n-grams   │
+//!    └────┬───┘ └───┬───┘ └─────┬─────┘
 //!         │         │         │
 //!    ┌────▼─────────▼─────────▼────┐
 //!    │     SQLite Database          │

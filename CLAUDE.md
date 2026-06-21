@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **grepika** is a token-efficient MCP (Model Context Protocol) server for code search. It combines three search backends for high-quality results:
 - **FTS5** - SQLite full-text search with BM25 ranking
 - **Grep** - Parallel regex search using ripgrep internals
-- **Trigram** - Fast substring search via 3-byte sequence indexing
+- **Sparse n-gram prefilter** - Fast substring candidate filtering, exposed through the legacy trigram naming in the code
 
 The server communicates via JSON-RPC over stdin/stdout when running as an MCP server.
 
@@ -43,25 +43,25 @@ grepika --mcp --log-file /tmp/grepika.log
 ```
 MCP Server (rmcp)          ← JSON-RPC stdin/stdout
        │
-Tool Router (server.rs)    ← search, get, outline, toc, context, stats, refs, index, diff, add_workspace
+Tool Router (server.rs)    ← search, structural_search, get, outline, toc, context, stats, refs, graph, index, diff, add_workspace
        │
 Workspace                  ← Holds root + SearchService + Indexer (None in global mode)
        │
 SearchService              ← spawn_blocking for async bridge
        │
 ┌──────┼──────┐
-FTS5   Grep   Trigram      ← Three search backends with weighted score merging
+FTS5   Grep   Sparse n-gram ← Three lexical backends with weighted score merging
        │
-SQLite + r2d2 pool         ← .grepika/index.db
+SQLite + r2d2 pool         ← ~/.cache/grepika/<hash>.db by default
 ```
 
 ### Key Design Decisions
 
 - **spawn_blocking bridge**: MCP handlers are async (rmcp), but search operations are CPU-bound. The `run_tool` helper in `server.rs` uses `tokio::task::spawn_blocking` to bridge this gap.
 
-- **Score merging**: Results from multiple backends are merged with configurable weights (default: FTS 0.4, grep 0.4, trigram 0.2) plus a multi-source bonus.
+- **Score merging**: Results from multiple backends are merged with configurable weights (default: FTS 0.4, grep 0.4, trigram/n-gram 0.2) plus a multi-source bonus.
 
-- **Type-safe newtypes**: `FileId`, `Score`, and `Trigram` in `types.rs` provide compile-time safety. `Score` uses saturating arithmetic (clamped to 0.0-1.0).
+- **Type-safe newtypes**: `FileId`, `Score`, and `NgramKey` in `types.rs` provide compile-time safety. `Trigram` remains a compatibility alias for `NgramKey`. `Score` uses saturating arithmetic (clamped to 0.0-1.0).
 
 - **r2d2 connection pool**: rusqlite::Connection is not Sync, so r2d2 manages thread-safe SQLite access.
 
@@ -76,12 +76,13 @@ SQLite + r2d2 pool         ← .grepika/index.db
 | `services/search.rs` | Combined search with score merging (+ semantic re-rank) |
 | `services/fts.rs` | FTS5 BM25 search |
 | `services/grep.rs` | Parallel grep with ripgrep crates |
-| `services/trigram.rs` | In-memory trigram index (RoaringBitmap) |
+| `services/ngram.rs` | Sparse frequency-weighted n-gram extraction |
+| `services/trigram.rs` | In-memory sparse n-gram index (RoaringBitmap; legacy trigram API name) |
 | `services/indexer.rs` | Incremental indexing with xxHash change detection |
 | `db/mod.rs` | Database with r2d2 pool and FTS5 queries |
-| `db/schema.rs` | SQLite schema (files, files_fts, trigrams tables) |
+| `db/schema.rs` | SQLite schema (files, files_fts, trigrams, symbols, edges tables) |
 | `tools/*.rs` | MCP tool input/output types and executors |
-| `types.rs` | FileId, Score, Trigram newtypes |
+| `types.rs` | FileId, Score, NgramKey newtypes |
 | `error.rs` | Hierarchical error types with machine-readable codes |
 
 ## MCP Tools Exposed
@@ -108,7 +109,7 @@ SQLite + r2d2 pool         ← .grepika/index.db
 
 ## Verification
 
-- **Always use `--all-targets` for final clippy**: `cargo test` does not compile benchmark files (`benches/`). When refactoring function signatures in library code, bench files are easy to overlook. Use `cargo clippy --all-targets` or `cargo bench` to catch mismatches.
+- **Always use `--all-targets` for final clippy**: `cargo test` does not compile benchmark files (`benchmarks/`). When refactoring function signatures in library code, bench files are easy to overlook. Use `cargo clippy --all-targets` or `cargo bench` to catch mismatches.
 
 ## Critical Notes
 
@@ -117,6 +118,6 @@ SQLite + r2d2 pool         ← .grepika/index.db
 - The `--db` flag can override the default index location
 - Gitignore patterns are respected during indexing
 - Max file size for indexing: 1MB (configurable in `IndexConfig`)
-- Trigram index is persisted to database and loaded on startup
+- Sparse n-gram index is persisted in the `trigrams` table and loaded on startup
 - Code graph (symbols/edges) is populated during indexing from tree-sitter; the `graph` tool queries it
 - Semantic search is **off by default**: build with `cargo build --features semantic` to enable local embeddings (downloads a small model to cache on first use). Without the feature the embeddings table stays empty and search runs lexical-only

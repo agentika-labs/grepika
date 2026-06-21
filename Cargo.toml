@@ -3,7 +3,7 @@ name = "grepika"
 version = "0.3.0"
 edition = "2021"
 rust-version = "1.91"
-description = "Token-efficient MCP server for code search with trigram indexing"
+description = "Token-efficient MCP server for ranked code search and structural navigation"
 authors = ["Agentika"]
 license = "MIT"
 publish = false
@@ -102,14 +102,17 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "hot_paths"
+path = "benchmarks/hot_paths.rs"
 harness = false
 
 [[bench]]
 name = "token_efficiency"
+path = "benchmarks/token_efficiency.rs"
 harness = false
 
 [[bench]]
 name = "cli_comparison"
+path = "benchmarks/cli_comparison.rs"
 harness = false
 
 [package.metadata.binstall]

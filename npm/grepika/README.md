@@ -1,6 +1,6 @@
 # @agentika/grepika
 
-Token-efficient MCP server for code search. Combines FTS5, parallel grep, and trigram indexing for ranked results with minimal token usage.
+Token-efficient MCP server for code search. Combines FTS5, parallel grep, sparse n-gram prefiltering, AST structural search, and code-graph navigation for ranked results with minimal token usage.
 
 ## Setup
 
@@ -40,12 +40,18 @@ claude mcp add -s user grepika -- npx -y @agentika/grepika --mcp
 
 | Tool | Description |
 |------|-------------|
-| `search` | Pattern search (regex/natural language) |
+| `search` | Indexed pattern, regex, and natural-language search |
 | `get` | File content with optional line range |
 | `outline` | Extract file structure (functions, classes) |
 | `toc` | Directory tree |
+| `context` | Surrounding lines around a specific line |
+| `stats` | Index statistics |
 | `refs` | Find all references to a symbol |
+| `structural_search` | Syntax-aware AST pattern/kind search via ast-grep |
+| `graph` | Navigate indexed call/import graph relationships |
 | `index` | Update search index |
+| `diff` | Compare two files |
+| `add_workspace` | Load a project workspace in global mode |
 
 ## Platforms
 
