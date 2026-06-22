@@ -58,22 +58,22 @@ jobs:
         run: cargo build --release
 
       - name: Compile Python eval scripts
-        run: python -m py_compile scripts/*.py
+        run: python -m py_compile evals/*.py
 
       - name: Run deterministic eval scripts
         run: |
           mkdir -p target/evals
-          python scripts/index_update_eval.py \
+          python evals/index_update_eval.py \
             --binary target/release/grepika \
             --runs 1 \
             --git-fast-path \
             --graph-batch \
             --out target/evals/index-update.json
-          python scripts/natural_search_eval.py \
+          python evals/natural_search_eval.py \
             --binary target/release/grepika \
             --runs 1 \
             --out target/evals/natural-search.json
-          python scripts/live_mcp_eval.py \
+          python evals/live_mcp_eval.py \
             --binary target/release/grepika \
             --timeout 20 \
             --json > target/evals/live-mcp.json
