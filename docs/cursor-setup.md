@@ -20,7 +20,7 @@ Add to your MCP config file:
 | Global (all projects) | `~/.cursor/mcp.json` |
 | Project (shared with team) | `.cursor/mcp.json` |
 
-For other editors: [Claude Code setup](claude-code-setup.md) · [OpenCode setup](opencode-setup.md)
+For other editors: [Claude Code setup](claude-code-setup.md) · [Codex setup](codex-setup.md) · [OpenCode setup](opencode-setup.md)
 
 ## Rules Snippet
 

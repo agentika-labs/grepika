@@ -43,7 +43,7 @@ claude mcp add -s project grepika -- npx -y @agentika/grepika --mcp
 
 > **Scope reference:** `-s user` writes to `~/.claude.json` (all projects), `-s project` writes to `.mcp.json` (committed, shared with team), `-s local` (default) writes to `.claude/settings.local.json` (gitignored, personal).
 
-For other editors: [Cursor setup](cursor-setup.md) · [OpenCode setup](opencode-setup.md)
+For other editors: [Codex setup](codex-setup.md) · [Cursor setup](cursor-setup.md) · [OpenCode setup](opencode-setup.md)
 
 ## Tool preference
 

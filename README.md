@@ -146,6 +146,25 @@ To avoid permission prompts, add to `.claude/settings.local.json` (project) or `
 </details>
 
 <details>
+<summary><b>Codex</b></summary>
+
+Add grepika as a global MCP server:
+
+```bash
+codex mcp add grepika -- npx -y @agentika/grepika --mcp
+```
+
+Verify the server is registered:
+
+```bash
+codex mcp list
+```
+
+See [docs/codex-setup.md](docs/codex-setup.md) for project-scoped config, `AGENTS.md` guidance, and tool approval setup.
+
+</details>
+
+<details>
 <summary><b>Cursor</b></summary>
 
 Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):

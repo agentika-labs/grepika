@@ -44,7 +44,7 @@ opencode mcp list
 
 </details>
 
-For other editors: [Claude Code setup](claude-code-setup.md) · [Cursor setup](cursor-setup.md)
+For other editors: [Claude Code setup](claude-code-setup.md) · [Codex setup](codex-setup.md) · [Cursor setup](cursor-setup.md)
 
 ## AGENTS.md Snippet
 
